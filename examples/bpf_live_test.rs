@@ -116,8 +116,8 @@ fn run_test(filter: &str, packets: &[(&[u8], Verdict)], ports: &[u16]) -> Result
 
     // Compile with RawIp: SOCK_RAW + IPPROTO_UDP presents the IP header at
     // offset 0, with no Ethernet wrapper.
-    let prog =
-        pktbaffle::compile(filter, LinkType::RawIp).map_err(|e| format!("compile error: {e}"))?;
+    let prog = pktbaffle::compile(filter, LinkType::RawIp, pktbaffle::Target::Classic)
+        .map_err(|e| format!("compile error: {e}"))?;
 
     // Raw receiving socket — sees all UDP datagrams at the IP layer.
     let raw_fd = open_raw_udp_socket()?;
