@@ -1,0 +1,7 @@
+# Don't copy build artifacts or editor/OS noise into the image.
+target/
+.git/
+.gitignore
+*.md
+.vscode/
+.idea/

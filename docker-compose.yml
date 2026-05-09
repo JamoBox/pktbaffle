@@ -1,0 +1,57 @@
+name: pktbaffle
+
+# Shared base so services don't repeat themselves.
+x-base: &base
+  build: .
+  volumes:
+    # Live source: edit on your host, run in the container.
+    - .:/workspace
+    # Persistent cargo cache: dependencies survive container restarts.
+    - cargo-cache:/cargo-cache
+  working_dir: /workspace
+
+services:
+
+  # ── Unit & integration tests ─────────────────────────────────────────────────
+  # Run:  docker compose run --rm test
+  # Or:   docker compose run --rm test cargo test -- --nocapture
+  test:
+    <<: *base
+    command: cargo test
+
+  # ── Live BPF socket tests ────────────────────────────────────────────────────
+  # Attaches compiled BPF programs to real sockets and sends packets through them.
+  # Requires CAP_NET_RAW for SOCK_RAW + IPPROTO_UDP.
+  #
+  # Run:  docker compose run --rm live-test
+  live-test:
+    <<: *base
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: cargo run --example bpf_live_test
+
+  # ── Compile and pretty-print a filter expression ─────────────────────────────
+  # Run:  docker compose run --rm dump "tcp port 80"
+  # Run:  docker compose run --rm dump "not host 1.2.3.4 and tcp port 443"
+  dump:
+    <<: *base
+    entrypoint: ["cargo", "run", "--example", "dump_filter", "--"]
+    command: "tcp port 80"
+
+  # ── Interactive development shell ────────────────────────────────────────────
+  # Run:  docker compose run --rm dev
+  # Then: cargo test, cargo run --example ..., etc.
+  dev:
+    <<: *base
+    stdin_open: true
+    tty: true
+    # NET_RAW lets you use the live-test binary inside the shell too.
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: bash
+
+volumes:
+  # Persists the cargo registry and compiled dependencies across runs.
+  cargo-cache:
