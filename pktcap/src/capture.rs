@@ -164,7 +164,7 @@ impl Capture {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn compile_filter(
+pub(crate) fn compile_filter(
     spec: Option<FilterSpec>,
     link: LinkType,
 ) -> Result<Option<pktbaffle::bpf::Program>> {

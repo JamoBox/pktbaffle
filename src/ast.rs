@@ -41,7 +41,20 @@ pub struct IpNet {
 }
 
 impl IpNet {
-    /// Construct from a CIDR prefix length.
+    /// Construct from a CIDR prefix length (0–32).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use std::net::Ipv4Addr;
+    /// use pktbaffle::ast::IpNet;
+    ///
+    /// let net = IpNet::from_prefix(Ipv4Addr::new(10, 0, 0, 0), 8);
+    /// assert_eq!(net.mask, 0xff00_0000);
+    ///
+    /// let host = IpNet::from_prefix(Ipv4Addr::new(192, 168, 1, 1), 32);
+    /// assert_eq!(host.mask, 0xffff_ffff);
+    /// ```
     pub fn from_prefix(addr: std::net::Ipv4Addr, prefix_len: u8) -> Self {
         let mask = if prefix_len == 0 {
             0
@@ -52,7 +65,15 @@ impl IpNet {
     }
 }
 
-/// A 48-bit Ethernet (MAC) address.
+/// A 48-bit Ethernet (MAC) address stored as six octets in network byte order.
+///
+/// # Example
+///
+/// ```rust
+/// use pktbaffle::ast::MacAddr;
+/// let addr = MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+/// assert_eq!(addr.0[0], 0xaa);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacAddr(pub [u8; 6]);
 

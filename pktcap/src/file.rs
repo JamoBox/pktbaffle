@@ -10,22 +10,11 @@ use std::path::Path;
 use pcap_file::pcap::PcapReader;
 use pcap_file::pcapng::Block;
 use pcap_file::pcapng::PcapNgReader;
-use pcap_file::DataLink;
 
-use pktbaffle::{compile, Target};
-
-use crate::capture::FilterSpec;
+use crate::capture::{compile_filter, FilterSpec};
+use crate::codec::datalink_to_link_type;
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, Packet};
-
-fn datalink_to_link_type(dl: DataLink) -> LinkType {
-    match dl {
-        DataLink::ETHERNET => LinkType::Ethernet,
-        DataLink::RAW => LinkType::RawIp,
-        DataLink::LINUX_SLL => LinkType::LinuxSll,
-        _ => LinkType::Ethernet,
-    }
-}
 
 // Intermediate owned packet data extracted from the match arm so that
 // subsequent borrows of `self` are not blocked by the reader borrow.
@@ -72,7 +61,7 @@ impl FileCapture {
             // IDB link types are discovered as blocks are read; Ethernet is used
             // as the compilation default since the SHB carries no global DLT.
             let link_type = LinkType::Ethernet;
-            let compiled = compile_file_filter(filter, link_type)?;
+            let compiled = compile_filter(filter, link_type)?;
             Ok(Self {
                 inner: Inner::PcapNg(ng),
                 filter: compiled,
@@ -82,7 +71,7 @@ impl FileCapture {
         } else {
             let pcap = PcapReader::new(reader).map_err(Error::Pcap)?;
             let link_type = datalink_to_link_type(pcap.header().datalink);
-            let compiled = compile_file_filter(filter, link_type)?;
+            let compiled = compile_filter(filter, link_type)?;
             Ok(Self {
                 inner: Inner::Pcap(pcap),
                 filter: compiled,
@@ -124,25 +113,6 @@ impl FileCapture {
                 raw.orig_len,
                 raw.link_type,
             )));
-        }
-    }
-}
-
-fn compile_file_filter(
-    spec: Option<FilterSpec>,
-    link: LinkType,
-) -> Result<Option<pktbaffle::bpf::Program>> {
-    match spec {
-        None => Ok(None),
-        Some(FilterSpec::Program(p)) => Ok(Some(p)),
-        Some(FilterSpec::String(s)) => {
-            let prog = compile(&s, link, Target::Classic)?;
-            match prog {
-                pktbaffle::Program::Classic(p) => Ok(Some(p)),
-                pktbaffle::Program::Extended(_) => Err(Error::Platform(
-                    "unexpected eBPF program for file capture".into(),
-                )),
-            }
         }
     }
 }

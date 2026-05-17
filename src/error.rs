@@ -1,12 +1,23 @@
+//! Error types returned by all fallible operations in this crate.
+
 use std::fmt;
 
+/// All errors that [`compile`][crate::compile] and [`parse`][crate::parse] can return.
+///
+/// Each variant corresponds to a stage in the compilation pipeline:
+/// lexing, parsing, or code generation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
-    /// Unexpected character at the given byte offset.
+    /// The input string contained a character the tokeniser does not recognise.
+    ///
+    /// `offset` is the byte position in the original filter string where the
+    /// unexpected character was found.
     LexError { offset: usize, ch: char },
-    /// Parser encountered something unexpected.
+    /// The token stream did not conform to the filter grammar.
     ParseError { message: String },
-    /// Code generation hit an unsupported construct.
+    /// The filter is grammatically valid but cannot be expressed in BPF —
+    /// for example, `inbound`/`outbound` direction primitives are not
+    /// representable in standard BPF bytecode.
     CodegenError { message: String },
 }
 
@@ -24,4 +35,5 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Convenience `Result` alias used throughout this crate.
 pub type Result<T> = std::result::Result<T, Error>;

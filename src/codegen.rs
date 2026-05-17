@@ -800,7 +800,17 @@ enum PatchField {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Compile a filter expression into a BPF [`Program`] for the given link type.
+/// Compile a filter expression into a cBPF [`Program`] for the given link type.
+///
+/// This is the low-level entry point used by [`pktbaffle::compile`][crate::compile]
+/// when [`Target::Classic`][crate::Target::Classic] is selected.
+/// Most callers should use [`pktbaffle::compile`][crate::compile] instead.
+///
+/// # Errors
+///
+/// Returns [`Error::CodegenError`][crate::Error::CodegenError] for filter
+/// constructs that are valid syntax but cannot be represented in classic BPF
+/// for the requested link type (e.g. `inbound`/`outbound` direction primitives).
 pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     let mut cg = Codegen::new(link);
     let patches = cg.emit_expr(expr)?;

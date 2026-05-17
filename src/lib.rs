@@ -1,19 +1,79 @@
 //! **pktbaffle** — compile libpcap-style packet filter expressions into
 //! classic BPF (cBPF) or extended BPF (eBPF) programs.
 //!
+//! # Overview
+//!
+//! `pktbaffle` turns the same filter syntax used by `tcpdump` and
+//! `pcap_compile(3)` into compact bytecode with no C runtime dependency.
+//! The output can be attached to a raw socket with `SO_ATTACH_FILTER`
+//! (classic BPF) or loaded into an XDP / TC hook (extended BPF).
+//!
 //! # Quick start
 //!
 //! ```rust
 //! use pktbaffle::{compile, LinkType, Target};
 //!
-//! // Classic BPF (for SO_ATTACH_FILTER / raw sockets)
+//! // Classic BPF — attach to a raw socket with SO_ATTACH_FILTER
 //! let prog = compile("tcp port 443", LinkType::Ethernet, Target::Classic).unwrap();
+//! assert!(prog.len() > 0);
 //! let bytes = prog.to_le_bytes(); // 8 bytes per instruction, little-endian
 //!
-//! // eBPF (for XDP / TC hooks)
+//! // eBPF — load into an XDP or TC program
 //! let prog = compile("tcp port 443", LinkType::Ethernet, Target::Extended).unwrap();
-//! let bytes = prog.to_le_bytes(); // 8 bytes per instruction, little-endian
+//! let bytes = prog.to_le_bytes();
 //! ```
+//!
+//! # Filter syntax
+//!
+//! The filter language is a subset of the libpcap expression syntax.
+//! Primitives can be combined with `and`, `or`, `not` (or `!`);
+//! juxtaposition is treated as AND.
+//!
+//! | Expression | Matches |
+//! |---|---|
+//! | `host 192.168.1.1` | IPv4 src or dst |
+//! | `src host 10.0.0.1` | IPv4 source only |
+//! | `net 10.0.0.0/8` | Any address in 10.0.0.0/8 |
+//! | `tcp port 443` | TCP to/from port 443 |
+//! | `udp portrange 1024-65535` | UDP ephemeral ports |
+//! | `port 80 or port 443` | HTTP or HTTPS |
+//! | `tcp and not port 22` | TCP excluding SSH |
+//! | `ether host aa:bb:cc:dd:ee:ff` | Ethernet MAC address |
+//! | `vlan 100` | VLAN-tagged, ID 100 |
+//! | `mpls` | Any MPLS-labeled packet |
+//! | `ip multicast` | IPv4 multicast destination |
+//! | `ip6 and tcp port 80` | IPv6 HTTP traffic |
+//! | `len <= 64` | Packets ≤ 64 bytes |
+//! | `tcp[13] & 0x02 != 0` | TCP SYN flag (raw byte access) |
+//!
+//! # Compilation pipeline
+//!
+//! Calling [`compile`] runs the following stages in sequence:
+//!
+//! 1. **Lex** ([`lexer::lex`]) — tokenise the input string into a
+//!    [`Vec<lexer::Spanned>`][lexer::Spanned].
+//! 2. **Parse** ([`parser::parse`]) — build an [`ast::Expr`] tree.
+//! 3. **Codegen** ([`codegen::compile`] or [`ebpf_codegen::compile`]) — emit
+//!    BPF instructions with a two-pass jump-patch strategy.
+//!
+//! You can stop after any stage if you only need the intermediate
+//! representation. [`parse`] is a convenience wrapper for steps 1–2.
+//!
+//! # Link types
+//!
+//! [`LinkType`] tells the compiler how to interpret packet offsets:
+//!
+//! | Variant | Header | Typical use |
+//! |---|---|---|
+//! | [`LinkType::Ethernet`] | 14-byte Ethernet II | `AF_PACKET` / `pcap` |
+//! | [`LinkType::RawIp`] | None — packet starts at IP | `SOCK_RAW` + `IPPROTO_*` |
+//! | [`LinkType::LinuxSll`] | 16-byte Linux SLL | `any` interface in `pcap` |
+//!
+//! # Feature flags
+//!
+//! | Feature | Description |
+//! |---|---|
+//! | `vm` | Enable the software cBPF interpreter (`bpf::Program::matches`) |
 
 pub mod ast;
 pub mod bpf;
@@ -58,11 +118,25 @@ impl Program {
         }
     }
 
+    /// Returns `true` if the program contains no instructions.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Encode the program as raw bytes (8 bytes per instruction, little-endian).
+    ///
+    /// The layout matches the kernel's `struct sock_filter` (cBPF) or
+    /// `struct bpf_insn` (eBPF), making the output ready for direct use
+    /// with kernel APIs such as `SO_ATTACH_FILTER` or `bpf(2)`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use pktbaffle::{compile, LinkType, Target};
+    /// let prog = compile("tcp", LinkType::Ethernet, Target::Classic).unwrap();
+    /// let bytes = prog.to_le_bytes();
+    /// assert_eq!(bytes.len() % 8, 0); // always a multiple of 8
+    /// ```
     pub fn to_le_bytes(&self) -> Vec<u8> {
         match self {
             Program::Classic(p) => p.to_le_bytes(),
@@ -71,14 +145,27 @@ impl Program {
     }
 
     /// Return the classic BPF instruction slice.
-    /// Panics if this is an eBPF program — use `as_classic()` for a safe variant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is an eBPF program. Use [`as_classic`][Program::as_classic]
+    /// for a non-panicking alternative.
     pub fn instructions(&self) -> &[bpf::Insn] {
         self.as_classic()
             .expect("instructions() called on an eBPF program; use as_extended() instead")
             .instructions()
     }
 
-    /// Return a reference to the inner [`bpf::Program`], or `None` if eBPF.
+    /// Return a reference to the inner [`bpf::Program`], or `None` if this is an eBPF program.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use pktbaffle::{compile, LinkType, Target};
+    /// let prog = compile("tcp", LinkType::Ethernet, Target::Classic).unwrap();
+    /// let cbpf = prog.as_classic().expect("should be cBPF");
+    /// assert!(cbpf.len() > 0);
+    /// ```
     pub fn as_classic(&self) -> Option<&bpf::Program> {
         match self {
             Program::Classic(p) => Some(p),
@@ -86,7 +173,16 @@ impl Program {
         }
     }
 
-    /// Return a reference to the inner [`ebpf::Program`], or `None` if classic.
+    /// Return a reference to the inner [`ebpf::Program`], or `None` if this is a classic BPF program.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use pktbaffle::{compile, LinkType, Target};
+    /// let prog = compile("tcp", LinkType::Ethernet, Target::Extended).unwrap();
+    /// let ebpf = prog.as_extended().expect("should be eBPF");
+    /// assert!(ebpf.len() > 0);
+    /// ```
     pub fn as_extended(&self) -> Option<&ebpf::Program> {
         match self {
             Program::Classic(_) => None,
@@ -112,7 +208,24 @@ pub fn compile(filter: &str, link: LinkType, target: Target) -> Result<Program> 
     }
 }
 
-/// Parse a filter expression string into an AST without generating code.
+/// Parse a filter expression string into an [`ast::Expr`] without generating code.
+///
+/// Useful for inspecting or transforming the filter tree before compilation,
+/// or for validating syntax without committing to a [`Target`] or [`LinkType`].
+///
+/// # Errors
+///
+/// Returns [`Error::LexError`] or [`Error::ParseError`] on invalid input.
+///
+/// # Example
+///
+/// ```rust
+/// use pktbaffle::parse;
+///
+/// let expr = parse("host 192.168.1.1 and tcp port 22").unwrap();
+/// // Inspect the AST:
+/// println!("{expr:#?}");
+/// ```
 pub fn parse(filter: &str) -> Result<ast::Expr> {
     let tokens = lexer::lex(filter)?;
     parser::parse(&tokens)
