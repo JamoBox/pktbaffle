@@ -8,8 +8,8 @@ use std::io::BufReader;
 use std::path::Path;
 
 use pcap_file::pcap::PcapReader;
-use pcap_file::pcapng::PcapNgReader;
 use pcap_file::pcapng::Block;
+use pcap_file::pcapng::PcapNgReader;
 use pcap_file::DataLink;
 
 use pktbaffle::{compile, Target};
@@ -139,9 +139,9 @@ fn compile_file_filter(
             let prog = compile(&s, link, Target::Classic)?;
             match prog {
                 pktbaffle::Program::Classic(p) => Ok(Some(p)),
-                pktbaffle::Program::Extended(_) => {
-                    Err(Error::Platform("unexpected eBPF program for file capture".into()))
-                }
+                pktbaffle::Program::Extended(_) => Err(Error::Platform(
+                    "unexpected eBPF program for file capture".into(),
+                )),
             }
         }
     }

@@ -97,13 +97,17 @@ impl CaptureBuilder {
                 let link_type = live::query_link_type(&iface)?;
                 let prog = compile_filter(self.filter, link_type)?;
                 let live = Live::open(&iface, prog.as_ref(), self.snaplen, self.promiscuous)?;
-                Ok(Capture { inner: Inner::Live(live) })
+                Ok(Capture {
+                    inner: Inner::Live(live),
+                })
             }
             Source::File(path) => {
                 // Pass the raw filter spec to FileCapture so it can compile the
                 // string expression after detecting the file's link type.
                 let fc = FileCapture::open(&path, self.filter)?;
-                Ok(Capture { inner: Inner::File(fc) })
+                Ok(Capture {
+                    inner: Inner::File(fc),
+                })
             }
         }
     }
@@ -146,6 +150,10 @@ impl Capture {
     ///
     /// Returns `Ok(None)` at end-of-file for file captures.
     /// Live captures block indefinitely until a packet arrives.
+    ///
+    /// Returns `Result<Option<Packet>>` rather than implementing `Iterator`
+    /// so that I/O errors propagate via `?` without panicking.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Packet>> {
         match &mut self.inner {
             Inner::Live(l) => l.next_packet().map(Some),
@@ -167,9 +175,9 @@ fn compile_filter(
             let prog = compile(&s, link, Target::Classic)?;
             match prog {
                 pktbaffle::Program::Classic(p) => Ok(Some(p)),
-                pktbaffle::Program::Extended(_) => {
-                    Err(Error::Platform("unexpected eBPF program for live capture".into()))
-                }
+                pktbaffle::Program::Extended(_) => Err(Error::Platform(
+                    "unexpected eBPF program for live capture".into(),
+                )),
             }
         }
     }
