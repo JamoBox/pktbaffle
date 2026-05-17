@@ -24,6 +24,10 @@ _Avoid_: datalink, layer, medium
 The unified source type in `pktcap` that yields packets from either a live interface or a pcap/pcapng file. A single enum type, not a trait.
 _Avoid_: handle, session, reader, socket
 
+**Dump**:
+The write-side counterpart to Capture. Accepts packets and writes them to a pcap or pcapng file on disk. Supports both pcap and pcapng format, selected by file extension (`.pcap` → pcap, `.pcapng` → pcapng). Named after `tcpdump -w` and `pcap_dump()`.
+_Avoid_: writer, recorder, sink, exporter
+
 **PacketRef**:
 A borrowed view of a single captured packet, valid only for the current iteration step. Carries raw bytes, timestamp, original length, and LinkType. Call `.to_owned()` to extend its lifetime.
 _Avoid_: frame, buffer, packet (use PacketRef when referring to the borrowed iterator item specifically)
@@ -48,6 +52,7 @@ _Avoid_: capture length, truncation length
 
 - A **Filter** string is compiled by `pktbaffle::compile()` into a **Program** for a given **Target** and **LinkType**
 - A **Capture** is configured with a **Filter** string or a pre-compiled **Program** via its builder
+- A **Dump** is configured with a **LinkType** (required) and a file path via its builder; format is determined by file extension
 - A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the internal **Ring buffer** and must be consumed before the next iteration step
 - The **VM** evaluates a **Program** against **PacketRef** bytes when the **Capture** source is a file (not a live interface)
 - **Snaplen** applies at the **Capture** level and affects all **PacketRef**s from that source
