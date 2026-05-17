@@ -406,6 +406,15 @@ impl Program {
     pub fn is_empty(&self) -> bool {
         self.insns.is_empty()
     }
+
+    /// Run the program against `pkt` using the software VM.
+    ///
+    /// Returns `true` if the program accepts the packet, `false` if it drops
+    /// it or encounters an invalid instruction / out-of-bounds access.
+    #[cfg(feature = "vm")]
+    pub fn matches(&self, pkt: &[u8]) -> bool {
+        crate::vm::run(&self.insns, pkt)
+    }
 }
 
 #[cfg(test)]

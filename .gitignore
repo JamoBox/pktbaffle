@@ -1,2 +1,5 @@
 /target
 Cargo.lock
+.claude
+.agents
+skills-lock.json
