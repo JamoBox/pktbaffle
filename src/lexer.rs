@@ -2,6 +2,11 @@
 
 use crate::error::{Error, Result};
 
+/// A single token produced by [`lex`].
+///
+/// Variants map directly to keywords, operators, punctuation, and literals in
+/// the libpcap filter grammar. The grouping comments below match the grammar
+/// sections where each token appears.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // ── logical operators ────────────────────────────────────────────────────
@@ -93,12 +98,35 @@ pub enum Token {
     Ident(String),
 }
 
+/// A [`Token`] together with its byte offset in the source string.
 #[derive(Debug, Clone)]
 pub struct Spanned {
+    /// The token value.
     pub token: Token,
+    /// Byte offset of this token's first character in the original input.
     pub offset: usize,
 }
 
+/// Tokenise a libpcap filter expression string.
+///
+/// Returns a vector of [`Spanned`] tokens on success. The tokens can be
+/// passed directly to [`crate::parser::parse`] to build an AST.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::LexError`] if the input contains a character that
+/// is not part of the filter grammar.
+///
+/// # Example
+///
+/// ```rust
+/// use pktbaffle::lexer::{lex, Token};
+///
+/// let tokens = lex("tcp port 80").unwrap();
+/// assert_eq!(tokens[0].token, Token::Tcp);
+/// assert_eq!(tokens[0].offset, 0);
+/// assert_eq!(tokens[1].token, Token::Port);
+/// ```
 pub fn lex(src: &str) -> Result<Vec<Spanned>> {
     let bytes = src.as_bytes();
     let len = bytes.len();

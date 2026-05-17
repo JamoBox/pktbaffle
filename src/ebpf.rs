@@ -47,17 +47,29 @@ pub const BPF_JLE: u8 = 0xb0;
 pub const BPF_EXIT: u8 = 0x90;
 
 // ── Registers ────────────────────────────────────────────────────────────────
-pub const R0: u8 = 0; // return value
-pub const R1: u8 = 1; // first function argument / XDP context ptr
-pub const R2: u8 = 2; // packet data start (loaded from context)
-pub const R3: u8 = 3; // packet data end   (loaded from context)
-pub const R4: u8 = 4; // scratch: loaded packet values / comparands
-pub const R5: u8 = 5; // scratch: computed addresses / bounds end
-pub const R6: u8 = 6; // scratch: transport header pointer (port checks)
-pub const R10: u8 = 10; // frame pointer (read-only)
+
+/// Return value register. Set to [`XDP_PASS`] or [`XDP_DROP`] before `exit`.
+pub const R0: u8 = 0;
+/// First function argument; holds the XDP context pointer (`xdp_md *`).
+pub const R1: u8 = 1;
+/// Packet data start — loaded from `xdp_md->data` in the prologue.
+pub const R2: u8 = 2;
+/// Packet data end — loaded from `xdp_md->data_end` in the prologue.
+pub const R3: u8 = 3;
+/// Primary scratch register: loaded packet values and computed results.
+pub const R4: u8 = 4;
+/// Address scratch register: bounds-check end pointer and computed base addresses.
+pub const R5: u8 = 5;
+/// Transport scratch register: transport header pointer used for port checks.
+pub const R6: u8 = 6;
+/// Frame pointer (read-only stack base).
+pub const R10: u8 = 10;
 
 // ── XDP return codes ─────────────────────────────────────────────────────────
+
+/// XDP return code: drop the packet and recycle the buffer.
 pub const XDP_DROP: i32 = 1;
+/// XDP return code: pass the packet up the networking stack.
 pub const XDP_PASS: i32 = 2;
 
 /// A single eBPF instruction (8 bytes, little-endian on the wire).
@@ -72,6 +84,10 @@ pub struct Insn {
 }
 
 impl Insn {
+    /// Construct an eBPF instruction from its raw fields.
+    ///
+    /// `dst` and `src` are register numbers (0–10); they are packed into the
+    /// `regs` byte automatically as `(dst & 0xf) | ((src & 0xf) << 4)`.
     #[inline]
     pub fn new(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Self {
         Self {
@@ -82,10 +98,13 @@ impl Insn {
         }
     }
 
+    /// Destination register number (low nibble of `regs`).
     #[inline]
     pub fn dst(&self) -> u8 {
         self.regs & 0xf
     }
+
+    /// Source register number (high nibble of `regs`).
     #[inline]
     pub fn src(&self) -> u8 {
         (self.regs >> 4) & 0xf
@@ -221,14 +240,17 @@ impl Program {
         Self { insns }
     }
 
+    /// The instruction slice.
     pub fn instructions(&self) -> &[Insn] {
         &self.insns
     }
 
+    /// Number of instructions in the program.
     pub fn len(&self) -> usize {
         self.insns.len()
     }
 
+    /// Returns `true` if the program contains no instructions.
     pub fn is_empty(&self) -> bool {
         self.insns.is_empty()
     }
