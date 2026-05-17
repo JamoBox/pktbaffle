@@ -16,9 +16,20 @@ pub struct Packet {
 }
 
 impl Packet {
-    pub(crate) fn new(data: Vec<u8>, ts_sec: u64, ts_nsec: u32, orig_len: u32, link_type: LinkType) -> Self {
+    pub(crate) fn new(
+        data: Vec<u8>,
+        ts_sec: u64,
+        ts_nsec: u32,
+        orig_len: u32,
+        link_type: LinkType,
+    ) -> Self {
         let timestamp = UNIX_EPOCH + Duration::new(ts_sec, ts_nsec);
-        Self { data, timestamp, orig_len, link_type }
+        Self {
+            data,
+            timestamp,
+            orig_len,
+            link_type,
+        }
     }
 
     /// Returns true if the packet was truncated by snaplen.

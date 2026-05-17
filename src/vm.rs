@@ -4,10 +4,10 @@
 //! Out-of-bounds packet loads cause the program to return false (drop).
 
 use crate::bpf::{
-    BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_B, BPF_DIV, BPF_H, BPF_IMM, BPF_IND, BPF_JA,
+    Insn, BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_B, BPF_DIV, BPF_H, BPF_IMM, BPF_IND, BPF_JA,
     BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET, BPF_LD, BPF_LDX, BPF_LEN, BPF_LSH, BPF_MEM,
-    BPF_MISC, BPF_MSH, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST, BPF_STX, BPF_SUB,
-    BPF_W, BPF_X, BPF_XOR, Insn,
+    BPF_MISC, BPF_MSH, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST, BPF_STX, BPF_SUB, BPF_W,
+    BPF_X, BPF_XOR,
 };
 
 const SCRATCH: usize = 16;
@@ -115,7 +115,11 @@ fn inner(insns: &[Insn], pkt: &[u8]) -> Option<bool> {
             } else {
                 return None;
             };
-            pc += if taken { insn.jt as usize } else { insn.jf as usize };
+            pc += if taken {
+                insn.jt as usize
+            } else {
+                insn.jf as usize
+            };
         } else if class == BPF_RET {
             let retval = if insn.code & 0x10 != 0 { a } else { insn.k };
             return Some(retval != 0);
@@ -150,7 +154,7 @@ fn sized_load(pkt: &[u8], off: u32, size: u16) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bpf::{BPF_ACCEPT, Insn};
+    use crate::bpf::{Insn, BPF_ACCEPT};
 
     #[test]
     fn accept_all() {
@@ -205,9 +209,19 @@ mod tests {
         use crate::bpf::{BPF_MEM, BPF_ST};
         let insns = vec![
             Insn::ld_imm(42),
-            Insn { code: BPF_ST, jt: 0, jf: 0, k: 0 },
+            Insn {
+                code: BPF_ST,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
             Insn::ld_imm(0),
-            Insn { code: BPF_LD | BPF_MEM, jt: 0, jf: 0, k: 0 },
+            Insn {
+                code: BPF_LD | BPF_MEM,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
             Insn::jeq_k(42, 0, 1),
             Insn::ret_k(BPF_ACCEPT),
             Insn::ret_k(0),

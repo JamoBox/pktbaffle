@@ -15,6 +15,7 @@ const ETH_P_ALL: u16 = 0x0003;
 const SOL_SOCKET: libc::c_int = 1;
 const SO_ATTACH_FILTER: libc::c_int = 26;
 const SOL_PACKET: libc::c_int = 263;
+#[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
 const PACKET_VERSION: libc::c_int = 10;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
 
@@ -33,7 +34,9 @@ pub fn query_link_type(iface: &str) -> Result<LinkType> {
     let path = format!("/sys/class/net/{iface}/type");
     let s = std::fs::read_to_string(&path)
         .map_err(|_| Error::Platform(format!("cannot read link type for {iface}")))?;
-    let arphrd: u32 = s.trim().parse()
+    let arphrd: u32 = s
+        .trim()
+        .parse()
         .map_err(|_| Error::Platform(format!("invalid ARPHRD value for {iface}")))?;
     Ok(arphrd_to_link_type(arphrd))
 }
@@ -61,13 +64,8 @@ impl LinuxLive {
         let snaplen = snaplen as usize;
 
         // AF_PACKET / SOCK_RAW socket capturing all ethertypes
-        let raw_fd = unsafe {
-            libc::socket(
-                AF_PACKET,
-                libc::SOCK_RAW,
-                (ETH_P_ALL as u16).to_be() as libc::c_int,
-            )
-        };
+        let raw_fd =
+            unsafe { libc::socket(AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as libc::c_int) };
         if raw_fd < 0 {
             return Err(io_err());
         }
@@ -122,7 +120,7 @@ impl LinuxLive {
         // Bind to the specific interface
         let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         addr.sll_family = AF_PACKET as u16;
-        addr.sll_protocol = (ETH_P_ALL as u16).to_be();
+        addr.sll_protocol = ETH_P_ALL.to_be();
         addr.sll_ifindex = ifindex;
         let rc = unsafe {
             libc::bind(

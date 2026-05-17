@@ -46,7 +46,11 @@ pub fn query_link_type(iface: &str) -> Result<LinkType> {
                 let sdl = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_dl) };
                 // IFT_ETHER=0x06; everything else defaults to Ethernet since
                 // DLT_NULL (loopback) is not yet supported in pktbaffle codegen.
-                result = if sdl.sdl_type == 0x06 { LinkType::Ethernet } else { LinkType::Ethernet };
+                result = if sdl.sdl_type == 0x06 {
+                    LinkType::Ethernet
+                } else {
+                    LinkType::Ethernet
+                };
                 break;
             }
         }
@@ -98,8 +102,8 @@ impl MacosLive {
         }
 
         // Bind to interface
-        let iface_c = CString::new(iface)
-            .map_err(|_| Error::Platform("invalid interface name".into()))?;
+        let iface_c =
+            CString::new(iface).map_err(|_| Error::Platform("invalid interface name".into()))?;
         let mut ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
         let bytes = iface_c.as_bytes_with_nul();
         for (i, &b) in bytes.iter().enumerate().take(libc::IFNAMSIZ) {
@@ -113,7 +117,11 @@ impl MacosLive {
         // Query the actual data link type from the kernel (authoritative)
         let mut dlt: libc::c_uint = 0;
         let dlt_rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCGDLT, &mut dlt) };
-        let link_type = if dlt_rc >= 0 { dlt_to_link_type(dlt) } else { LinkType::Ethernet };
+        let link_type = if dlt_rc >= 0 {
+            dlt_to_link_type(dlt)
+        } else {
+            LinkType::Ethernet
+        };
 
         // Enable promiscuous mode
         if promiscuous {
@@ -190,9 +198,7 @@ impl MacosLive {
             return None;
         }
         let hdr = unsafe {
-            std::ptr::read_unaligned(
-                self.buf.as_ptr().add(self.buf_pos) as *const BpfHdr,
-            )
+            std::ptr::read_unaligned(self.buf.as_ptr().add(self.buf_pos) as *const BpfHdr)
         };
         let data_start = self.buf_pos + hdr.bh_hdrlen as usize;
         let cap = (hdr.bh_caplen as usize).min(self.snaplen);
