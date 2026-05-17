@@ -24,6 +24,8 @@ pub mod error;
 pub mod lexer;
 pub mod optimizer;
 pub mod parser;
+#[cfg(feature = "vm")]
+pub mod vm;
 
 pub use codegen::LinkType;
 pub use error::{Error, Result};
