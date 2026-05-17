@@ -4,9 +4,29 @@ use pktcap::Capture;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let help_message = "Usage: inspect <interface|file.pcap> [filter]";
+
     if args.len() < 2 {
-        eprintln!("Usage: dump <interface|file.pcap> [filter]");
+        eprintln!("{}", help_message);
         std::process::exit(1);
+    }
+
+    if args[1] == "--help" || args[1] == "-h" {
+        eprintln!("{}", help_message);
+        std::process::exit(0);
+    }  
+
+    // check if argument is -l or --list-interfaces and print list of interfaces
+    if args[1] == "-l" || args[1] == "--list-interfaces" {
+        match pktcap::interfaces() {
+            Ok(interfaces) => {
+                for iface in interfaces {
+                    println!("{}", iface);
+                }
+                std::process::exit(0);
+            }
+            Err(e) => die(e),
+        }
     }
 
     let target = &args[1];

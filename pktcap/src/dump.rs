@@ -13,18 +13,10 @@ use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
 use pcap_file::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionBlock;
 use pcap_file::pcapng::{Block, PcapNgWriter};
-use pcap_file::DataLink;
 
+use crate::codec::link_type_to_datalink;
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, Packet};
-
-fn link_type_to_datalink(lt: LinkType) -> DataLink {
-    match lt {
-        LinkType::Ethernet => DataLink::ETHERNET,
-        LinkType::RawIp => DataLink::RAW,
-        LinkType::LinuxSll => DataLink::LINUX_SLL,
-    }
-}
 
 enum Inner {
     Pcap(PcapWriter<File>),

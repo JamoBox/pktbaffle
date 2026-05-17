@@ -27,6 +27,7 @@
 //! ```
 
 mod capture;
+mod codec;
 mod dump;
 mod error;
 mod file;

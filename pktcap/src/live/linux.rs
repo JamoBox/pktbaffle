@@ -67,7 +67,7 @@ impl LinuxLive {
         let raw_fd =
             unsafe { libc::socket(AF_PACKET, libc::SOCK_RAW, ETH_P_ALL.to_be() as libc::c_int) };
         if raw_fd < 0 {
-            return Err(io_err());
+            return Err(super::io_err());
         }
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
@@ -88,7 +88,7 @@ impl LinuxLive {
                 )
             };
             if rc < 0 {
-                return Err(io_err());
+                return Err(super::io_err());
             }
         }
 
@@ -113,7 +113,7 @@ impl LinuxLive {
                 )
             };
             if rc < 0 {
-                return Err(io_err());
+                return Err(super::io_err());
             }
         }
 
@@ -130,7 +130,7 @@ impl LinuxLive {
             )
         };
         if rc < 0 {
-            return Err(io_err());
+            return Err(super::io_err());
         }
 
         let link_type = query_link_type(iface).unwrap_or(LinkType::Ethernet);
@@ -204,14 +204,11 @@ fn iface_index(fd: libc::c_int, name: &str) -> Result<libc::c_int> {
     }
     let rc = unsafe { libc::ioctl(fd, SIOCGIFINDEX, &ifreq) };
     if rc < 0 {
-        return Err(io_err());
+        return Err(super::io_err());
     }
     Ok(unsafe { ifreq.ifr_ifru.ifru_ifindex })
 }
 
-fn io_err() -> Error {
-    std::io::Error::last_os_error().into()
-}
 
 /// List network interfaces by reading /proc/net/dev.
 pub fn list_interfaces() -> Result<Vec<String>> {

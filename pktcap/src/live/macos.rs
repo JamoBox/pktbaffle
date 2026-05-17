@@ -18,14 +18,6 @@ const BIOCPROMISC: libc::c_ulong = 0x20004269;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCGDLT: libc::c_ulong = 0x4004426a;
 
-fn dlt_to_link_type(dlt: libc::c_uint) -> LinkType {
-    match dlt {
-        1 => LinkType::Ethernet,   // DLT_EN10MB
-        101 => LinkType::RawIp,    // DLT_RAW
-        113 => LinkType::LinuxSll, // DLT_LINUX_SLL
-        _ => LinkType::Ethernet,
-    }
-}
 
 /// Query the link type of an interface using getifaddrs / AF_LINK.
 /// This is a pre-open estimate; BIOCGDLT (called inside open()) is authoritative.
@@ -33,7 +25,7 @@ pub fn query_link_type(iface: &str) -> Result<LinkType> {
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
     let rc = unsafe { libc::getifaddrs(&mut ifap) };
     if rc < 0 {
-        return Err(io_err());
+        return Err(super::io_err());
     }
     let mut result = LinkType::Ethernet;
     let mut cur = ifap;
@@ -98,7 +90,7 @@ impl MacosLive {
         let one: libc::c_uint = 1;
         let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCIMMEDIATE, &one) };
         if rc < 0 {
-            return Err(io_err());
+            return Err(super::io_err());
         }
 
         // Bind to interface
@@ -111,14 +103,14 @@ impl MacosLive {
         }
         let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETIF, &ifreq) };
         if rc < 0 {
-            return Err(io_err());
+            return Err(super::io_err());
         }
 
         // Query the actual data link type from the kernel (authoritative)
         let mut dlt: libc::c_uint = 0;
         let dlt_rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCGDLT, &mut dlt) };
         let link_type = if dlt_rc >= 0 {
-            dlt_to_link_type(dlt)
+            super::dlt_to_link_type(dlt)
         } else {
             LinkType::Ethernet
         };
@@ -127,7 +119,7 @@ impl MacosLive {
         if promiscuous {
             let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCPROMISC) };
             if rc < 0 {
-                return Err(io_err());
+                return Err(super::io_err());
             }
         }
 
@@ -140,7 +132,7 @@ impl MacosLive {
             };
             let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETF, &bpf_prog) };
             if rc < 0 {
-                return Err(io_err());
+                return Err(super::io_err());
             }
         }
 
@@ -244,16 +236,12 @@ fn word_align(n: usize) -> usize {
     (n + 3) & !3
 }
 
-fn io_err() -> Error {
-    std::io::Error::last_os_error().into()
-}
-
 /// List network interfaces via getifaddrs.
 pub fn list_interfaces() -> Result<Vec<String>> {
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
     let rc = unsafe { libc::getifaddrs(&mut ifap) };
     if rc < 0 {
-        return Err(io_err());
+        return Err(super::io_err());
     }
     let mut names = Vec::new();
     let mut cur = ifap;
