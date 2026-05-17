@@ -58,19 +58,16 @@ struct PcapIf {
     flags: u32,
 }
 
-
 // ── Dynamic function table ────────────────────────────────────────────────────
 
 struct NpcapLib {
     // Kept alive so the DLL is not unloaded while the function pointers live.
     _lib: Library,
-    pcap_open_live:
-        unsafe extern "C" fn(*const i8, i32, i32, i32, *mut i8) -> *mut PcapT,
+    pcap_open_live: unsafe extern "C" fn(*const i8, i32, i32, i32, *mut i8) -> *mut PcapT,
     pcap_close: unsafe extern "C" fn(*mut PcapT),
     pcap_setfilter: unsafe extern "C" fn(*mut PcapT, *mut BpfProgram) -> i32,
     pcap_datalink: unsafe extern "C" fn(*mut PcapT) -> i32,
-    pcap_next_ex:
-        unsafe extern "C" fn(*mut PcapT, *mut *const PcapPkthdr, *mut *const u8) -> i32,
+    pcap_next_ex: unsafe extern "C" fn(*mut PcapT, *mut *const PcapPkthdr, *mut *const u8) -> i32,
     pcap_findalldevs: unsafe extern "C" fn(*mut *mut PcapIf, *mut i8) -> i32,
     pcap_freealldevs: unsafe extern "C" fn(*mut PcapIf),
     pcap_geterr: unsafe extern "C" fn(*mut PcapT) -> *const i8,
@@ -94,30 +91,25 @@ impl NpcapLib {
                 b"pcap_open_live\0",
                 unsafe extern "C" fn(*const i8, i32, i32, i32, *mut i8) -> *mut PcapT
             );
-            let pcap_close =
-                sym!(b"pcap_close\0", unsafe extern "C" fn(*mut PcapT));
+            let pcap_close = sym!(b"pcap_close\0", unsafe extern "C" fn(*mut PcapT));
             let pcap_setfilter = sym!(
                 b"pcap_setfilter\0",
                 unsafe extern "C" fn(*mut PcapT, *mut BpfProgram) -> i32
             );
-            let pcap_datalink =
-                sym!(b"pcap_datalink\0", unsafe extern "C" fn(*mut PcapT) -> i32);
+            let pcap_datalink = sym!(b"pcap_datalink\0", unsafe extern "C" fn(*mut PcapT) -> i32);
             let pcap_next_ex = sym!(
                 b"pcap_next_ex\0",
-                unsafe extern "C" fn(
-                    *mut PcapT,
-                    *mut *const PcapPkthdr,
-                    *mut *const u8,
-                ) -> i32
+                unsafe extern "C" fn(*mut PcapT, *mut *const PcapPkthdr, *mut *const u8) -> i32
             );
             let pcap_findalldevs = sym!(
                 b"pcap_findalldevs\0",
                 unsafe extern "C" fn(*mut *mut PcapIf, *mut i8) -> i32
             );
-            let pcap_freealldevs =
-                sym!(b"pcap_freealldevs\0", unsafe extern "C" fn(*mut PcapIf));
-            let pcap_geterr =
-                sym!(b"pcap_geterr\0", unsafe extern "C" fn(*mut PcapT) -> *const i8);
+            let pcap_freealldevs = sym!(b"pcap_freealldevs\0", unsafe extern "C" fn(*mut PcapIf));
+            let pcap_geterr = sym!(
+                b"pcap_geterr\0",
+                unsafe extern "C" fn(*mut PcapT) -> *const i8
+            );
 
             Ok(NpcapLib {
                 _lib: lib,
@@ -206,7 +198,7 @@ unsafe fn with_temp_handle<T>(
     let handle = (lib.pcap_open_live)(
         device.as_ptr(),
         65535,
-        0,  // non-promiscuous
+        0, // non-promiscuous
         100,
         errbuf.as_mut_ptr(),
     );
@@ -278,9 +270,8 @@ impl WindowsLive {
         let device_name = unsafe { resolve_device_name(alldevs, iface) };
         unsafe { (lib.pcap_freealldevs)(alldevs) };
 
-        let device_name = device_name.ok_or_else(|| {
-            Error::Platform(format!("interface not found: {iface}"))
-        })?;
+        let device_name =
+            device_name.ok_or_else(|| Error::Platform(format!("interface not found: {iface}")))?;
         let device_c = CString::new(device_name)
             .map_err(|_| Error::Platform("invalid interface name".into()))?;
 
@@ -338,15 +329,12 @@ impl WindowsLive {
         loop {
             let mut hdr_ptr: *const PcapPkthdr = std::ptr::null();
             let mut data_ptr: *const u8 = std::ptr::null();
-            let rc = unsafe {
-                (lib.pcap_next_ex)(self.handle, &mut hdr_ptr, &mut data_ptr)
-            };
+            let rc = unsafe { (lib.pcap_next_ex)(self.handle, &mut hdr_ptr, &mut data_ptr) };
             match rc {
                 1 => {
                     let hdr = unsafe { &*hdr_ptr };
                     let cap = (hdr.caplen as usize).min(self.snaplen);
-                    let data =
-                        unsafe { slice::from_raw_parts(data_ptr, cap).to_vec() };
+                    let data = unsafe { slice::from_raw_parts(data_ptr, cap).to_vec() };
                     return Ok(Packet::new(
                         data,
                         hdr.ts.tv_sec as u64,
@@ -385,15 +373,12 @@ pub fn query_link_type(iface: &str) -> Result<LinkType> {
     let device_name = unsafe { resolve_device_name(alldevs, iface) };
     unsafe { (lib.pcap_freealldevs)(alldevs) };
 
-    let device_name = device_name.ok_or_else(|| {
-        Error::Platform(format!("interface not found: {iface}"))
-    })?;
-    let device_c = CString::new(device_name)
-        .map_err(|_| Error::Platform("invalid interface name".into()))?;
+    let device_name =
+        device_name.ok_or_else(|| Error::Platform(format!("interface not found: {iface}")))?;
+    let device_c =
+        CString::new(device_name).map_err(|_| Error::Platform("invalid interface name".into()))?;
 
-    let dlt = unsafe {
-        with_temp_handle(lib, &device_c, |h| (lib.pcap_datalink)(h))?
-    };
+    let dlt = unsafe { with_temp_handle(lib, &device_c, |h| (lib.pcap_datalink)(h))? };
     Ok(super::dlt_to_link_type(dlt as u32))
 }
 

@@ -18,7 +18,6 @@ const BIOCPROMISC: libc::c_ulong = 0x20004269;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCGDLT: libc::c_ulong = 0x4004426a;
 
-
 /// Query the link type of an interface using getifaddrs / AF_LINK.
 /// This is a pre-open estimate; BIOCGDLT (called inside open()) is authoritative.
 pub fn query_link_type(iface: &str) -> Result<LinkType> {

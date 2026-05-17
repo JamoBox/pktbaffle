@@ -209,7 +209,6 @@ fn iface_index(fd: libc::c_int, name: &str) -> Result<libc::c_int> {
     Ok(unsafe { ifreq.ifr_ifru.ifru_ifindex })
 }
 
-
 /// List network interfaces by reading /proc/net/dev.
 pub fn list_interfaces() -> Result<Vec<String>> {
     let content = std::fs::read_to_string("/proc/net/dev")?;

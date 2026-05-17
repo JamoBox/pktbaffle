@@ -117,7 +117,6 @@ impl FileCapture {
     }
 }
 
-
 fn fetch_pcap(r: &mut PcapReader<BufReader<File>>, link_type: LinkType) -> Result<Option<RawPkt>> {
     match r.next_packet() {
         None => Ok(None),

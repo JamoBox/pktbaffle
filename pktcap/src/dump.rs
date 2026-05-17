@@ -41,7 +41,10 @@ pub struct DumpBuilder {
 impl Dump {
     /// Begin building a file dump at `path`.
     pub fn to_file(path: impl AsRef<Path>) -> DumpBuilder {
-        DumpBuilder { path: path.as_ref().to_owned(), link_type: None }
+        DumpBuilder {
+            path: path.as_ref().to_owned(),
+            link_type: None,
+        }
     }
 
     /// Write one packet to the file.
@@ -98,10 +101,13 @@ impl DumpBuilder {
     /// `.pcap` or `.pcapng`.
     pub fn open(self) -> Result<Dump> {
         let lt = self.link_type.ok_or_else(|| {
-            Error::Platform("Dump::open requires a link type — call .link_type() on the builder".into())
+            Error::Platform(
+                "Dump::open requires a link type — call .link_type() on the builder".into(),
+            )
         })?;
 
-        let ext = self.path
+        let ext = self
+            .path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")

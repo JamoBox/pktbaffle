@@ -9,7 +9,10 @@ fn pcap_tmp() -> tempfile::NamedTempFile {
 }
 
 fn pcapng_tmp() -> tempfile::NamedTempFile {
-    tempfile::Builder::new().suffix(".pcapng").tempfile().unwrap()
+    tempfile::Builder::new()
+        .suffix(".pcapng")
+        .tempfile()
+        .unwrap()
 }
 
 // ── open() contract ───────────────────────────────────────────────────────────
@@ -25,7 +28,10 @@ fn dump_open_errors_without_link_type() {
 fn dump_open_errors_on_unknown_extension() {
     let tmp = tempfile::Builder::new().suffix(".xyz").tempfile().unwrap();
     assert!(
-        Dump::to_file(tmp.path()).link_type(LinkType::Ethernet).open().is_err(),
+        Dump::to_file(tmp.path())
+            .link_type(LinkType::Ethernet)
+            .open()
+            .is_err(),
         "unknown extension should fail"
     );
 }
@@ -35,9 +41,8 @@ fn dump_open_errors_on_unknown_extension() {
 #[test]
 fn dump_pcap_single_packet_roundtrip() {
     let src = common::tcp_frame(80);
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path());
 
     let out = pcap_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -60,9 +65,8 @@ fn dump_pcap_multiple_packets_in_order() {
         common::tcp_frame(443),
     ];
     let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path());
 
     let out = pcap_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -84,9 +88,8 @@ fn dump_pcap_multiple_packets_in_order() {
 #[test]
 fn dump_pcap_link_type_written_to_header() {
     let src = common::tcp_frame(80);
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path());
 
     let out = pcap_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -104,9 +107,8 @@ fn dump_pcap_link_type_written_to_header() {
 fn dump_pcap_orig_len_preserved() {
     let src = common::tcp_frame(80);
     let expected_orig = src.len() as u32;
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path());
 
     let out = pcap_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -125,9 +127,8 @@ fn dump_pcap_orig_len_preserved() {
 #[test]
 fn dump_pcapng_single_packet_roundtrip() {
     let src = common::tcp_frame(443);
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path());
 
     let out = pcapng_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -145,9 +146,8 @@ fn dump_pcapng_single_packet_roundtrip() {
 #[test]
 fn dump_pcapng_link_type_written_to_idb() {
     let src = common::tcp_frame(80);
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src])).into_temp_path());
 
     let out = pcapng_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -165,9 +165,8 @@ fn dump_pcapng_link_type_written_to_idb() {
 fn dump_pcapng_multiple_packets_in_order() {
     let frames: Vec<Vec<u8>> = vec![common::tcp_frame(80), common::udp_frame(53)];
     let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path());
 
     let out = pcapng_tmp();
     let mut dump = Dump::to_file(out.path())
@@ -204,22 +203,26 @@ fn dump_flush_succeeds() {
 fn dump_overwrites_existing_file() {
     let src_a = common::tcp_frame(80);
     let src_b = common::tcp_frame(443);
-    let src_pkts_a = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src_a])).into_temp_path(),
-    );
-    let src_pkts_b = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &[&src_b])).into_temp_path(),
-    );
+    let src_pkts_a =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src_a])).into_temp_path());
+    let src_pkts_b =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &[&src_b])).into_temp_path());
 
     let out = pcap_tmp();
 
     // First dump: write packet A
-    let mut dump = Dump::to_file(out.path()).link_type(LinkType::Ethernet).open().unwrap();
+    let mut dump = Dump::to_file(out.path())
+        .link_type(LinkType::Ethernet)
+        .open()
+        .unwrap();
     dump.write_packet(&src_pkts_a[0]).unwrap();
     drop(dump);
 
     // Second dump to same path: overwrite with packet B only
-    let mut dump = Dump::to_file(out.path()).link_type(LinkType::Ethernet).open().unwrap();
+    let mut dump = Dump::to_file(out.path())
+        .link_type(LinkType::Ethernet)
+        .open()
+        .unwrap();
     dump.write_packet(&src_pkts_b[0]).unwrap();
     drop(dump);
 
@@ -234,9 +237,8 @@ fn dump_overwrites_existing_file() {
 fn convenience_dump_packets_roundtrip() {
     let frames: Vec<Vec<u8>> = vec![common::tcp_frame(80), common::udp_frame(53)];
     let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
-    let src_pkts = common::read_all(
-        &common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path(),
-    );
+    let src_pkts =
+        common::read_all(&common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path());
 
     let out = pcap_tmp();
     pktcap::dump_packets(out.path(), &src_pkts, LinkType::Ethernet).unwrap();
