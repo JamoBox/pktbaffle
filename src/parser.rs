@@ -16,6 +16,25 @@ use crate::ast::*;
 use crate::error::{Error, Result};
 use crate::lexer::{Spanned, Token};
 
+/// Parse a slice of [`Spanned`] tokens into a filter expression tree.
+///
+/// This is the low-level entry point. Most callers should use
+/// [`pktbaffle::parse`][crate::parse], which handles lexing automatically.
+///
+/// # Errors
+///
+/// Returns [`Error::ParseError`][crate::Error::ParseError] if the token
+/// stream does not match the filter grammar.
+///
+/// # Example
+///
+/// ```rust
+/// use pktbaffle::{lexer, parser};
+///
+/// let tokens = lexer::lex("tcp port 80").unwrap();
+/// let expr = parser::parse(&tokens).unwrap();
+/// println!("{expr:#?}");
+/// ```
 pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
     let mut p = Parser { tokens, pos: 0 };
     let expr = p.parse_expr()?;

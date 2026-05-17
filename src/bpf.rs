@@ -403,6 +403,7 @@ impl Program {
         self.insns.len()
     }
 
+    /// Returns `true` if the program contains no instructions.
     pub fn is_empty(&self) -> bool {
         self.insns.is_empty()
     }
