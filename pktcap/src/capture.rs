@@ -57,9 +57,27 @@ impl CaptureBuilder {
         }
     }
 
-    /// Compile and attach a filter expression string.
-    pub fn filter(mut self, expr: &str) -> Self {
-        self.filter = Some(FilterSpec::String(expr.to_owned()));
+    /// Set a filter expression.
+    ///
+    /// Accepts a `&str`, an `Option<&str>`, or `None`. Passing `None` (or an
+    /// `Option` that is `None`) is a no-op — all packets are captured, the
+    /// same as not calling `.filter()` at all. This lets callers pass an
+    /// optional filter from a variable without a separate `if let`:
+    ///
+    /// ```no_run
+    /// use pktcap::Capture;
+    ///
+    /// let expr: Option<&str> = Some("tcp port 443");
+    ///
+    /// // Works for all three: &str, Option<&str>, or None
+    /// # fn example(expr: Option<&str>) -> pktcap::Result<()> {
+    /// let _cap = Capture::from_file("traffic.pcap").filter(expr).open()?;
+    /// let _cap = Capture::from_file("traffic.pcap").filter("tcp port 80").open()?;
+    /// let _cap = Capture::from_file("traffic.pcap").filter(None::<&str>).open()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn filter<'a>(mut self, expr: impl Into<Option<&'a str>>) -> Self {
+        self.filter = expr.into().map(|s| FilterSpec::String(s.to_owned()));
         self
     }
 
