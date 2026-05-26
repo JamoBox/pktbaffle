@@ -17,7 +17,7 @@ services:
   # Or:   docker compose run --rm test cargo test -- --nocapture
   test:
     <<: *base
-    command: cargo test
+    command: cargo test --workspace
 
   # ── Live BPF socket tests ────────────────────────────────────────────────────
   # Attaches compiled BPF programs to real sockets and sends packets through them.
@@ -29,14 +29,14 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
-    command: cargo run --example bpf_live_test
+    command: cargo run -p pktbaffle --example bpf_live_test
 
   # ── Compile and pretty-print a filter expression ─────────────────────────────
   # Run:  docker compose run --rm dump "tcp port 80"
   # Run:  docker compose run --rm dump "not host 1.2.3.4 and tcp port 443"
   dump:
     <<: *base
-    entrypoint: ["cargo", "run", "--example", "dump_filter", "--"]
+    entrypoint: ["cargo", "run", "-p", "pktbaffle", "--example", "dump_filter", "--"]
     command: "tcp port 80"
 
   # ── Interactive development shell ────────────────────────────────────────────
