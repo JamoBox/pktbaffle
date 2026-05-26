@@ -6,6 +6,10 @@ description = "Compile libpcap-style packet filter expressions to classic BPF pr
 license = "MIT"
 keywords = ["bpf", "pcap", "network", "packet", "filter"]
 categories = ["network-programming", "parser-implementations"]
+repository = "https://github.com/JamoBox/pktbaffle"
+documentation = "https://docs.rs/pktbaffle"
+readme = "README.md"
+exclude = ["docs/"]
 
 [features]
 vm = []

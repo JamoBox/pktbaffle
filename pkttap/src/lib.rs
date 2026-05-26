@@ -44,6 +44,18 @@ pub fn interfaces() -> Result<Vec<String>> {
     live::list_interfaces()
 }
 
+/// Return the name of the default network interface for live capture.
+///
+/// This is the first non-loopback interface the OS makes available — the
+/// same device `pcap_lookupdev` would return. Useful as a sensible default
+/// in CLIs or UIs when the user has not specified an interface.
+///
+/// Returns `Err` if no usable interface is found, or if the platform capture
+/// backend (e.g. Npcap on Windows) is not available.
+pub fn default_interface() -> Result<String> {
+    live::default_interface()
+}
+
 /// Write `packets` to a pcap or pcapng file in one call.
 ///
 /// The format is chosen by file extension (`.pcap` or `.pcapng`).

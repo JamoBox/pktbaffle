@@ -389,3 +389,12 @@ pub fn list_interfaces() -> Result<Vec<String>> {
     unsafe { (lib.pcap_freealldevs)(alldevs) };
     Ok(names)
 }
+
+/// Return the default interface for live capture: the first device Npcap reports.
+/// Npcap lists active physical adapters first, so this matches pcap_lookupdev behaviour.
+pub fn default_interface() -> Result<String> {
+    list_interfaces()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Platform("no interfaces found".into()))
+}

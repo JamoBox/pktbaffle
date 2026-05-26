@@ -221,3 +221,12 @@ pub fn list_interfaces() -> Result<Vec<String>> {
     }
     Ok(ifaces)
 }
+
+/// Return the default interface for live capture: the first non-loopback
+/// interface reported by the kernel.
+pub fn default_interface() -> Result<String> {
+    list_interfaces()?
+        .into_iter()
+        .find(|name| name != "lo")
+        .ok_or_else(|| Error::Platform("no non-loopback interface found".into()))
+}

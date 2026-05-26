@@ -15,7 +15,7 @@ Parses the same filter syntax used by `tcpdump` and Wireshark and produces class
 
 ```toml
 [dependencies]
-pktbaffle = { path = "pktbaffle" }
+pktbaffle = "0.1"
 ```
 
 ```rust
@@ -34,7 +34,7 @@ Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows N
 
 ```toml
 [dependencies]
-pkttap = { path = "pkttap" }
+pkttap = "0.1"
 ```
 
 ```rust
@@ -51,3 +51,9 @@ while let Some(pkt) = cap.next()? {
 ```
 
 See [pkttap/README.md](pkttap/README.md) for full documentation.
+
+---
+
+## License
+
+Licensed under the [MIT license](LICENSE-MIT).

@@ -6,11 +6,11 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub use linux::{list_interfaces, query_link_type, LinuxLive as PlatformLive};
+pub use linux::{default_interface, list_interfaces, query_link_type, LinuxLive as PlatformLive};
 #[cfg(target_os = "macos")]
-pub use macos::{list_interfaces, query_link_type, MacosLive as PlatformLive};
+pub use macos::{default_interface, list_interfaces, query_link_type, MacosLive as PlatformLive};
 #[cfg(target_os = "windows")]
-pub use windows::{list_interfaces, query_link_type, WindowsLive as PlatformLive};
+pub use windows::{default_interface, list_interfaces, query_link_type, WindowsLive as PlatformLive};
 
 #[cfg(unix)]
 use crate::error::Error;
