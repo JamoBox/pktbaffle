@@ -257,3 +257,12 @@ pub fn list_interfaces() -> Result<Vec<String>> {
     unsafe { libc::freeifaddrs(ifap) };
     Ok(names)
 }
+
+/// Return the default interface for live capture: the first non-loopback
+/// interface reported by getifaddrs. Loopback interfaces are named lo, lo0, etc.
+pub fn default_interface() -> Result<String> {
+    list_interfaces()?
+        .into_iter()
+        .find(|name| !name.starts_with("lo"))
+        .ok_or_else(|| Error::Platform("no non-loopback interface found".into()))
+}

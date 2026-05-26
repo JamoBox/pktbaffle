@@ -613,3 +613,9 @@ ether host aa:bb:cc:dd:ee:ff       # specific MAC address
 ```
 
 See the [pktbaffle README](../pktbaffle/README.md) for the complete filter expression reference, including raw byte access, named constants, VLAN/MPLS, and all supported primitives.
+
+---
+
+## License
+
+Licensed under the [MIT license](../LICENSE-MIT).

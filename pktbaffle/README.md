@@ -630,7 +630,7 @@ See [`pkttap/README.md`](../pkttap/README.md) for full documentation.
 
 ```toml
 [dependencies]
-pkttap = { path = "../pkttap" }  # or a crates.io version once published
+pkttap = "0.1"
 ```
 
 ```rust
@@ -650,4 +650,4 @@ while let Some(pkt) = cap.next()? {
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under the [MIT license](../LICENSE-MIT).

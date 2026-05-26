@@ -3,10 +3,15 @@ name = "pkttap"
 version = "0.1.0"
 edition = "2021"
 description = "Cross-platform packet capture with pktbaffle filter expressions"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+keywords = ["pcap", "packet-capture", "network", "capture", "bpf"]
+categories = ["network-programming"]
+repository = "https://github.com/JamoBox/pktbaffle"
+documentation = "https://docs.rs/pkttap"
+readme = "README.md"
 
 [dependencies]
-pktbaffle = { path = "../pktbaffle", features = ["vm"] }
+pktbaffle = { version = "0.1.0", path = "../pktbaffle", features = ["vm"] }
 pcap-file = "2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
