@@ -166,7 +166,10 @@ fn filter_none_captures_all_packets() {
     let tmp = common::temp_file(&common::pcap_bytes(1, &[&tcp, &udp]));
 
     // None is equivalent to no filter — both packets should arrive
-    let mut cap = Capture::from_file(tmp.path()).filter(None::<&str>).open().unwrap();
+    let mut cap = Capture::from_file(tmp.path())
+        .filter(None::<&str>)
+        .open()
+        .unwrap();
     assert!(cap.next().unwrap().is_some());
     assert!(cap.next().unwrap().is_some());
     assert!(cap.next().unwrap().is_none());

@@ -91,14 +91,10 @@ fn parse_args() -> Result<Args> {
             }
             "--count" => {
                 i += 1;
-                count = Some(
-                    raw.get(i)
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or_else(|| {
-                            eprintln!("error: --count requires an integer");
-                            std::process::exit(1);
-                        }),
-                );
+                count = Some(raw.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                    eprintln!("error: --count requires an integer");
+                    std::process::exit(1);
+                }));
             }
             other => {
                 eprintln!("error: unknown argument `{other}`");
@@ -108,7 +104,12 @@ fn parse_args() -> Result<Args> {
         i += 1;
     }
 
-    Ok(Args { source, output, filter, count })
+    Ok(Args {
+        source,
+        output,
+        filter,
+        count,
+    })
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -156,9 +157,7 @@ fn run() -> Result<()> {
     // readers know how to interpret the link-layer framing of each packet.
     //
     // Dump::to_file() returns a builder; .open() creates (or truncates) the file.
-    let mut dump = Dump::to_file(&args.output)
-        .link_type(link_type)
-        .open()?;
+    let mut dump = Dump::to_file(&args.output).link_type(link_type).open()?;
 
     eprintln!("writing to: {}", args.output);
 
