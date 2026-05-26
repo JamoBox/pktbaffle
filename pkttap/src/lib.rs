@@ -1,9 +1,9 @@
-//! **pktcap** — cross-platform packet capture with pktbaffle filter expressions.
+//! **pkttap** — cross-platform packet capture with pktbaffle filter expressions.
 //!
 //! # Quick start
 //!
 //! ```no_run
-//! use pktcap::Capture;
+//! use pkttap::Capture;
 //!
 //! // Live capture
 //! let mut cap = Capture::live("eth0")
@@ -23,7 +23,7 @@
 //! while let Some(pkt) = cap.next()? {
 //!     println!("{} bytes at {:?}", pkt.data.len(), pkt.timestamp);
 //! }
-//! # Ok::<(), pktcap::Error>(())
+//! # Ok::<(), pkttap::Error>(())
 //! ```
 
 mod capture;

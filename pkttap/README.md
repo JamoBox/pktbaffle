@@ -1,4 +1,4 @@
-# pktcap
+# pkttap
 
 Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture live traffic from a network interface or read packets from a `.pcap` / `.pcapng` file — through the same API, on Linux, macOS, and Windows.
 
@@ -40,7 +40,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
 
 ```toml
 [dependencies]
-pktcap = "0.1"
+pkttap = "0.1"
 ```
 
 **Runtime dependencies by platform:**
@@ -71,7 +71,7 @@ pktcap = "0.1"
 ## Quick start
 
 ```rust
-use pktcap::{Capture, Dump, LinkType};
+use pkttap::{Capture, Dump, LinkType};
 
 // ── Live capture ──────────────────────────────────────────────────────────────
 let mut cap = Capture::live("eth0")
@@ -109,7 +109,7 @@ dump.write_packet(&pkt)?;
 Before starting a capture you can enumerate the available interfaces:
 
 ```rust
-let interfaces = pktcap::interfaces()?;
+let interfaces = pkttap::interfaces()?;
 for name in &interfaces {
     println!("{name}");
 }
@@ -129,7 +129,7 @@ wlan0
 ### Basic capture
 
 ```rust
-use pktcap::Capture;
+use pkttap::Capture;
 
 let mut cap = Capture::live("eth0").open()?;
 
@@ -214,7 +214,7 @@ If you already have a compiled `pktbaffle::bpf::Program`, attach it directly:
 
 ```rust
 use pktbaffle::{compile, LinkType, Target};
-use pktcap::Capture;
+use pkttap::Capture;
 
 let prog = compile("tcp port 22", LinkType::Ethernet, Target::Classic)?;
 let cbpf = match prog {
@@ -233,12 +233,12 @@ This is useful when you want to compile the filter once and reuse it across mult
 
 ## File capture
 
-pktcap reads both classic pcap (`.pcap`) and next-generation pcap (`.pcapng`) files. The format is detected automatically from the file's magic bytes, not the extension.
+pkttap reads both classic pcap (`.pcap`) and next-generation pcap (`.pcapng`) files. The format is detected automatically from the file's magic bytes, not the extension.
 
 ### Reading a pcap file
 
 ```rust
-use pktcap::Capture;
+use pkttap::Capture;
 
 let mut cap = Capture::from_file("traffic.pcap").open()?;
 
@@ -309,7 +309,7 @@ The `Dump` type writes packets to a `.pcap` or `.pcapng` file. The format is sel
 ### Streaming writes
 
 ```rust
-use pktcap::{Capture, Dump, LinkType};
+use pkttap::{Capture, Dump, LinkType};
 
 let mut cap = Capture::live("eth0")
     .filter("tcp port 443")
@@ -340,7 +340,7 @@ while count < 1000 {
 For writing a collected set of packets in one call:
 
 ```rust
-use pktcap::{dump_packets, LinkType, Packet};
+use pkttap::{dump_packets, LinkType, Packet};
 
 let packets: Vec<Packet> = collect_packets()?;
 dump_packets("output.pcap", &packets, LinkType::Ethernet)?;
@@ -348,7 +348,7 @@ dump_packets("output.pcap", &packets, LinkType::Ethernet)?;
 
 ### pcapng output
 
-Use a `.pcapng` extension to write next-generation format. pktcap writes an Interface Description Block followed by Enhanced Packet Blocks — fully compatible with Wireshark and `tcpdump`.
+Use a `.pcapng` extension to write next-generation format. pkttap writes an Interface Description Block followed by Enhanced Packet Blocks — fully compatible with Wireshark and `tcpdump`.
 
 ```rust
 let mut dump = Dump::to_file("output.pcapng")
@@ -418,10 +418,10 @@ while let Some(pkt) = cap.next()? {
 
 ## Error handling
 
-All fallible operations return `Result<T, pktcap::Error>`:
+All fallible operations return `Result<T, pkttap::Error>`:
 
 ```rust
-use pktcap::Error;
+use pkttap::Error;
 
 match Capture::live("eth0").open() {
     Ok(cap) => { /* use cap */ }
@@ -469,7 +469,7 @@ The `Error` type implements `std::error::Error` and `Display`, so it works with 
 
 ### Linux
 
-pktcap uses `AF_PACKET` / `SOCK_RAW` sockets with `SO_ATTACH_FILTER` for kernel-level cBPF filtering. No C libraries are required.
+pkttap uses `AF_PACKET` / `SOCK_RAW` sockets with `SO_ATTACH_FILTER` for kernel-level cBPF filtering. No C libraries are required.
 
 **Privileges:** The process needs `CAP_NET_RAW`. Either run as root or grant the capability:
 
@@ -488,7 +488,7 @@ let mut cap = Capture::live("lo").filter("icmp").open()?;
 
 ### macOS
 
-pktcap uses `/dev/bpf*` character devices with `BIOCSETF` for kernel-level cBPF filtering. No C libraries are required.
+pkttap uses `/dev/bpf*` character devices with `BIOCSETF` for kernel-level cBPF filtering. No C libraries are required.
 
 **Privileges:** `/dev/bpf*` is typically root-only. Either run as root or use Wireshark's `ChmodBPF` helper to grant access to a group.
 
@@ -505,13 +505,13 @@ let mut cap = Capture::live("en0")
 
 ### Windows
 
-pktcap uses Npcap via dynamically-loaded `wpcap.dll`. The binary compiles and starts without Npcap present; `open()` and `interfaces()` return a clear error if Npcap is not installed.
+pkttap uses Npcap via dynamically-loaded `wpcap.dll`. The binary compiles and starts without Npcap present; `open()` and `interfaces()` return a clear error if Npcap is not installed.
 
 **Prerequisites:** Install [Npcap](https://npcap.com) (free for personal use). Enable "WinPcap API-compatible mode" or use the Npcap SDK header path during installation.
 
 **Privileges:** Live capture requires Administrator privileges or membership in the `NPF_Users` group (Npcap can be configured to allow non-admin access during install).
 
-**Interface names:** pktcap exposes Npcap's friendly interface descriptions (e.g., `"Wi-Fi"`, `"Ethernet"`, `"Local Area Connection"`). You can also pass the raw `\Device\NPF_{GUID}` device path directly.
+**Interface names:** pkttap exposes Npcap's friendly interface descriptions (e.g., `"Wi-Fi"`, `"Ethernet"`, `"Local Area Connection"`). You can also pass the raw `\Device\NPF_{GUID}` device path directly.
 
 ```rust
 // Friendly name (preferred)
@@ -521,12 +521,12 @@ let mut cap = Capture::live("Wi-Fi").filter("tcp port 443").open()?;
 let mut cap = Capture::live(r"\Device\NPF_{4B5B2D9C-...}").open()?;
 
 // List available interfaces
-for name in pktcap::interfaces()? {
+for name in pkttap::interfaces()? {
     println!("{name}");
 }
 ```
 
-**DLL search order:** pktcap looks for `wpcap.dll` in:
+**DLL search order:** pkttap looks for `wpcap.dll` in:
 1. `%SystemRoot%\System32\Npcap\` (Npcap's default install path)
 2. `%SystemRoot%\System32\` (WinPcap legacy / manually placed)
 3. Directories on `%PATH%`
@@ -535,10 +535,10 @@ for name in pktcap::interfaces()? {
 
 ## The inspect example
 
-The `inspect` example reads from a live interface or a pcap/pcapng file and prints each packet as a hex + ASCII dump. It demonstrates all major pktcap features.
+The `inspect` example reads from a live interface or a pcap/pcapng file and prints each packet as a hex + ASCII dump. It demonstrates all major pkttap features.
 
 ```
-$ cargo run --example inspect -p pktcap -- --help
+$ cargo run --example inspect -p pkttap -- --help
 
 inspect — packet inspector
 
@@ -553,19 +553,19 @@ USAGE:
 
 ```bash
 # Capture all traffic on eth0
-cargo run --example inspect -p pktcap -- eth0
+cargo run --example inspect -p pkttap -- eth0
 
 # Capture HTTPS traffic only
-cargo run --example inspect -p pktcap -- eth0 "tcp port 443"
+cargo run --example inspect -p pkttap -- eth0 "tcp port 443"
 
 # Inspect a pcap file
-cargo run --example inspect -p pktcap -- traffic.pcap
+cargo run --example inspect -p pkttap -- traffic.pcap
 
 # Inspect a pcap file with a filter
-cargo run --example inspect -p pktcap -- traffic.pcap "udp port 53"
+cargo run --example inspect -p pkttap -- traffic.pcap "udp port 53"
 
 # List available interfaces
-cargo run --example inspect -p pktcap -- -l
+cargo run --example inspect -p pkttap -- -l
 ```
 
 **Sample output:**
@@ -595,7 +595,7 @@ Each packet shows:
 
 ## Filter expression language
 
-pktcap uses [pktbaffle](../) to compile filter expressions. The same libpcap / `tcpdump` syntax applies:
+pkttap uses [pktbaffle](../) to compile filter expressions. The same libpcap / `tcpdump` syntax applies:
 
 ```
 tcp port 443                       # HTTPS
@@ -612,4 +612,4 @@ len > 1200                         # large packets
 ether host aa:bb:cc:dd:ee:ff       # specific MAC address
 ```
 
-See the [pktbaffle README](../README.md) for the complete filter expression reference, including raw byte access, named constants, VLAN/MPLS, and all supported primitives.
+See the [pktbaffle README](../pktbaffle/README.md) for the complete filter expression reference, including raw byte access, named constants, VLAN/MPLS, and all supported primitives.

@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use pktcap::{Capture, Packet};
+use pkttap::{Capture, Packet};
 
 // ── Packet byte builders ──────────────────────────────────────────────────────
 

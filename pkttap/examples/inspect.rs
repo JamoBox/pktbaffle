@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use pktcap::{Capture, Result};
+use pkttap::{Capture, Result};
 
 const HELP: &str = "\
 inspect — packet inspector
@@ -52,7 +52,7 @@ fn run() -> Result<()> {
     }
 
     if args[1] == "-l" || args[1] == "--list-interfaces" {
-        for iface in pktcap::interfaces()? {
+        for iface in pkttap::interfaces()? {
             println!("{iface}");
         }
         return Ok(());

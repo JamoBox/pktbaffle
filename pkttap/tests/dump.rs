@@ -1,6 +1,6 @@
 mod common;
 
-use pktcap::{Dump, LinkType};
+use pkttap::{Dump, LinkType};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ fn dump_pcap_link_type_written_to_header() {
     dump.write_packet(&src_pkts[0]).unwrap();
     drop(dump);
 
-    let cap = pktcap::Capture::from_file(out.path()).open().unwrap();
+    let cap = pkttap::Capture::from_file(out.path()).open().unwrap();
     assert_eq!(cap.link_type(), LinkType::Ethernet);
 }
 
@@ -241,7 +241,7 @@ fn convenience_dump_packets_roundtrip() {
         common::read_all(&common::temp_file(&common::pcap_bytes(1, &refs)).into_temp_path());
 
     let out = pcap_tmp();
-    pktcap::dump_packets(out.path(), &src_pkts, LinkType::Ethernet).unwrap();
+    pkttap::dump_packets(out.path(), &src_pkts, LinkType::Ethernet).unwrap();
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 2);

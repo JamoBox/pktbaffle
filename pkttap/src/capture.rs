@@ -65,12 +65,12 @@ impl CaptureBuilder {
     /// optional filter from a variable without a separate `if let`:
     ///
     /// ```no_run
-    /// use pktcap::Capture;
+    /// use pkttap::Capture;
     ///
     /// let expr: Option<&str> = Some("tcp port 443");
     ///
     /// // Works for all three: &str, Option<&str>, or None
-    /// # fn example(expr: Option<&str>) -> pktcap::Result<()> {
+    /// # fn example(expr: Option<&str>) -> pkttap::Result<()> {
     /// let _cap = Capture::from_file("traffic.pcap").filter(expr).open()?;
     /// let _cap = Capture::from_file("traffic.pcap").filter("tcp port 80").open()?;
     /// let _cap = Capture::from_file("traffic.pcap").filter(None::<&str>).open()?;

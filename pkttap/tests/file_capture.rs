@@ -1,6 +1,6 @@
 mod common;
 
-use pktcap::{Capture, LinkType};
+use pkttap::{Capture, LinkType};
 
 #[test]
 fn pcap_single_packet_roundtrip() {
