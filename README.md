@@ -51,9 +51,3 @@ while let Some(pkt) = cap.next()? {
 ```
 
 See [pkttap/README.md](pkttap/README.md) for full documentation.
-
----
-
-## License
-
-MIT OR Apache-2.0
