@@ -1,46 +1,48 @@
-# ── Build environment for pktbaffle ──────────────────────────────────────────
+# ── Build environment for the pktbaffle workspace ────────────────────────────
 #
-# Single stage: the source tree is mounted as a volume at /workspace so
-# changes on the host are visible immediately without rebuilding the image.
-# The image only needs to install Rust, system libs, and network debugging tools.
+# The source tree is mounted as a volume at /workspace so changes on the host
+# are visible immediately without rebuilding the image.  The image pre-fetches
+# all workspace dependencies so the first `cargo test` doesn't hit the network.
 #
 # Build:  docker compose build
 # Use:    docker compose run --rm test
 #         docker compose run --rm live-test
 #         docker compose run --rm dev
 
-FROM rust:1.78-slim-bookworm
+FROM rust:slim-bookworm
 
 # System packages needed for building and network testing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        # BPF / network capability inspection
         iproute2 \
         iputils-ping \
         netcat-openbsd \
         tcpdump \
         libcap2-bin \
-        # General dev tools
         curl \
         git \
-        && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Pre-warm the cargo registry by building a throwaway project that pulls in
-# the same dev-dependencies we use (libc).  This layer is cached as long as
-# the dependency list doesn't change.
-RUN cargo new --lib /tmp/_warmup && \
-    cat >> /tmp/_warmup/Cargo.toml <<'EOF'
-[dev-dependencies]
-libc = "0.2"
-EOF
-RUN cd /tmp/_warmup && cargo test 2>/dev/null || true && \
-    rm -rf /tmp/_warmup
-
-WORKDIR /workspace
-
-# The source tree is mounted here at runtime.
-# CARGO_HOME is kept inside the named Docker volume (see docker-compose.yml)
-# so that the registry and compiled dependencies survive container restarts.
 ENV CARGO_HOME=/cargo-cache
 ENV RUST_BACKTRACE=1
 
-CMD ["cargo", "test"]
+WORKDIR /workspace
+
+# Pre-fetch all workspace dependencies into the cargo cache.
+# Only manifests and the lock file are copied — this layer is only invalidated
+# when dependencies change, not when source files change.
+COPY Cargo.toml Cargo.lock ./
+COPY pktbaffle/Cargo.toml pktbaffle/Cargo.toml
+COPY pkttap/Cargo.toml pkttap/Cargo.toml
+
+# Stub out the minimum source structure Cargo needs to resolve the workspace,
+# then fetch all dependencies. The real source is mounted at runtime.
+RUN mkdir -p pktbaffle/src pkttap/src \
+    && echo > pktbaffle/src/lib.rs \
+    && echo > pkttap/src/lib.rs \
+    && cargo fetch \
+    && rm -rf pktbaffle pkttap
+
+# The source tree is mounted here at runtime (see docker-compose.yml volumes).
+# CARGO_HOME lives in a named Docker volume so the registry and compiled
+# artifacts survive container restarts without re-downloading.
+CMD ["cargo", "test", "--workspace"]
