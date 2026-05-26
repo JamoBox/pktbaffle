@@ -1,0 +1,9 @@
+# Normalise all text files to LF in the repo.
+# Git converts to CRLF on Windows checkout if core.autocrlf=true,
+# but the stored form is always LF — no more staging warnings.
+* text=auto eol=lf
+
+# Binaries — never touch line endings.
+*.png binary
+*.jpg binary
+*.ico binary

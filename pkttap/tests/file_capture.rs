@@ -1,6 +1,6 @@
 mod common;
 
-use pktcap::{Capture, LinkType};
+use pkttap::{Capture, LinkType};
 
 #[test]
 fn pcap_single_packet_roundtrip() {
@@ -154,6 +154,52 @@ fn precompiled_filter_program_works() {
         .unwrap()
         .expect("pre-compiled filter should accept TCP");
     assert_eq!(got.data, tcp);
+    assert!(cap.next().unwrap().is_none());
+}
+
+// ── filter() accepts Option<&str> ────────────────────────────────────────────
+
+#[test]
+fn filter_none_captures_all_packets() {
+    let tcp = common::tcp_frame(80);
+    let udp = common::udp_frame(53);
+    let tmp = common::temp_file(&common::pcap_bytes(1, &[&tcp, &udp]));
+
+    // None is equivalent to no filter — both packets should arrive
+    let mut cap = Capture::from_file(tmp.path())
+        .filter(None::<&str>)
+        .open()
+        .unwrap();
+    assert!(cap.next().unwrap().is_some());
+    assert!(cap.next().unwrap().is_some());
+    assert!(cap.next().unwrap().is_none());
+}
+
+#[test]
+fn filter_option_some_filters_matching() {
+    let tcp = common::tcp_frame(80);
+    let udp = common::udp_frame(53);
+    let tmp = common::temp_file(&common::pcap_bytes(1, &[&udp, &tcp]));
+
+    // Option<&str> containing Some should filter exactly as a bare &str would
+    let expr: Option<&str> = Some("tcp port 80");
+    let mut cap = Capture::from_file(tmp.path()).filter(expr).open().unwrap();
+    let got = cap.next().unwrap().expect("should return TCP packet");
+    assert_eq!(got.data, tcp);
+    assert!(cap.next().unwrap().is_none());
+}
+
+#[test]
+fn filter_option_none_captures_all_packets() {
+    let tcp = common::tcp_frame(80);
+    let udp = common::udp_frame(53);
+    let tmp = common::temp_file(&common::pcap_bytes(1, &[&tcp, &udp]));
+
+    // Option<&str> containing None should pass all packets through
+    let expr: Option<&str> = None;
+    let mut cap = Capture::from_file(tmp.path()).filter(expr).open().unwrap();
+    assert!(cap.next().unwrap().is_some());
+    assert!(cap.next().unwrap().is_some());
     assert!(cap.next().unwrap().is_none());
 }
 

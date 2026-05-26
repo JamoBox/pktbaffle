@@ -4,14 +4,14 @@
 Accepted
 
 ## Context
-`pktcap` can read packets from live interfaces and pcap/pcapng files via `Capture`, but had no way to write packets to disk. Users need to record captures for offline analysis.
+`pkttap` can read packets from live interfaces and pcap/pcapng files via `Capture`, but had no way to write packets to disk. Users need to record captures for offline analysis.
 
 ## Decision
 Add a `Dump` type as the write-side counterpart to `Capture`, with the following design:
 
 **Format**: both pcap and pcapng, selected automatically by file extension (`.pcap` → pcap, `.pcapng` → pcapng). The `pcap-file` crate provides both writers.
 
-**API**: builder + streaming. `Dump::to_file(path).link_type(lt).open()?` opens the file and writes the format header immediately. `dump.write_packet(&pkt)?` writes one packet at a time with no internal buffering. A convenience wrapper `pktcap::dump_packets(path, &packets, lt)` is provided for one-shot use.
+**API**: builder + streaming. `Dump::to_file(path).link_type(lt).open()?` opens the file and writes the format header immediately. `dump.write_packet(&pkt)?` writes one packet at a time with no internal buffering. A convenience wrapper `pkttap::dump_packets(path, &packets, lt)` is provided for one-shot use.
 
 **LinkType**: required explicitly on the builder — `.open()` errors if omitted. Both pcap and pcapng must record the link type before any packets (global header / IDB). Deferring to the first packet would delay header writes and complicate multi-threaded use.
 

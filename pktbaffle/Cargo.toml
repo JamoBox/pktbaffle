@@ -1,0 +1,25 @@
+[package]
+name = "pktbaffle"
+version = "0.1.0"
+edition = "2021"
+description = "Compile libpcap-style packet filter expressions to classic BPF programs"
+license = "MIT"
+keywords = ["bpf", "pcap", "network", "packet", "filter"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+vm = []
+
+[dependencies]
+
+[dev-dependencies]
+# Used by the live BPF socket test (Linux only).
+libc = "0.2"
+
+[[example]]
+name = "dump_filter"
+path = "examples/dump_filter.rs"
+
+[[example]]
+name = "bpf_live_test"
+path = "examples/bpf_live_test.rs"

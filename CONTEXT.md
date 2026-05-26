@@ -1,6 +1,9 @@
-# pktbaffle / pktcap
+# pktbaffle
 
 A pure-Rust ecosystem for compiling libpcap-style packet filter expressions into BPF programs and capturing packets from live interfaces or pcap/pcapng files.
+
+**pktbaffle** — BPF compiler and VM library.  
+**pkttap** — cross-platform packet capture using pktbaffle filters.
 
 ## Language
 
@@ -21,7 +24,7 @@ The link-layer framing of captured packets — `Ethernet`, `RawIp`, or `LinuxSll
 _Avoid_: datalink, layer, medium
 
 **Capture**:
-The unified source type in `pktcap` that yields packets from either a live interface or a pcap/pcapng file. A single enum type, not a trait.
+The unified source type in `pkttap` that yields packets from either a live interface or a pcap/pcapng file. A single enum type, not a trait.
 _Avoid_: handle, session, reader, socket
 
 **Dump**:

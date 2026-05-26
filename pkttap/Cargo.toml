@@ -1,12 +1,12 @@
 [package]
-name = "pktcap"
+name = "pkttap"
 version = "0.1.0"
 edition = "2021"
 description = "Cross-platform packet capture with pktbaffle filter expressions"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-pktbaffle = { path = "..", features = ["vm"] }
+pktbaffle = { path = "../pktbaffle", features = ["vm"] }
 pcap-file = "2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -17,4 +17,4 @@ libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
-pktbaffle = { path = "..", features = ["vm"] }
+pktbaffle = { path = "../pktbaffle", features = ["vm"] }
