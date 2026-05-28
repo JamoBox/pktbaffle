@@ -144,6 +144,17 @@ impl Insn {
         }
     }
 
+    /// Load 32-bit immediate into X.
+    #[inline]
+    pub fn ldx_imm(k: u32) -> Self {
+        Self {
+            code: BPF_LDX | BPF_W | BPF_IMM,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
     /// Load immediate into A.
     #[inline]
     pub fn ld_imm(k: u32) -> Self {

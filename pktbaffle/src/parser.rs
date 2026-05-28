@@ -293,6 +293,12 @@ impl Parser<'_> {
             }
             Some(Token::Sctp) => {
                 self.advance();
+                if self.eat(&Token::Port) {
+                    return self.parse_port(Dir::SrcOrDst, Some(Proto::Sctp));
+                }
+                if self.eat(&Token::PortRange) {
+                    return self.parse_portrange(Dir::SrcOrDst, Some(Proto::Sctp));
+                }
                 Ok(Primitive::Proto(Proto::Sctp))
             }
 
@@ -301,12 +307,24 @@ impl Parser<'_> {
                 if self.cur_tok() == Some(&Token::LBracket) {
                     return self.parse_byte_access(Layer::Trans);
                 }
+                if self.eat(&Token::Port) {
+                    return self.parse_port(Dir::SrcOrDst, Some(Proto::Tcp));
+                }
+                if self.eat(&Token::PortRange) {
+                    return self.parse_portrange(Dir::SrcOrDst, Some(Proto::Tcp));
+                }
                 Ok(Primitive::Proto(Proto::Tcp))
             }
             Some(Token::Udp) => {
                 self.advance();
                 if self.cur_tok() == Some(&Token::LBracket) {
                     return self.parse_byte_access(Layer::Trans);
+                }
+                if self.eat(&Token::Port) {
+                    return self.parse_port(Dir::SrcOrDst, Some(Proto::Udp));
+                }
+                if self.eat(&Token::PortRange) {
+                    return self.parse_portrange(Dir::SrcOrDst, Some(Proto::Udp));
                 }
                 Ok(Primitive::Proto(Proto::Udp))
             }
@@ -499,18 +517,42 @@ impl Parser<'_> {
             Some(Token::PortRange) => { self.advance(); self.parse_portrange(dir, None) }
             Some(Token::Tcp) => {
                 self.advance();
-                self.expect(&Token::Port)?;
-                self.parse_port(dir, Some(Proto::Tcp))
+                if self.eat(&Token::Port) {
+                    self.parse_port(dir, Some(Proto::Tcp))
+                } else if self.eat(&Token::PortRange) {
+                    self.parse_portrange(dir, Some(Proto::Tcp))
+                } else {
+                    Err(self.err(format!(
+                        "expected 'port' or 'portrange' after 'tcp', got {:?}",
+                        self.cur_tok()
+                    )))
+                }
             }
             Some(Token::Udp) => {
                 self.advance();
-                self.expect(&Token::Port)?;
-                self.parse_port(dir, Some(Proto::Udp))
+                if self.eat(&Token::Port) {
+                    self.parse_port(dir, Some(Proto::Udp))
+                } else if self.eat(&Token::PortRange) {
+                    self.parse_portrange(dir, Some(Proto::Udp))
+                } else {
+                    Err(self.err(format!(
+                        "expected 'port' or 'portrange' after 'udp', got {:?}",
+                        self.cur_tok()
+                    )))
+                }
             }
             Some(Token::Sctp) => {
                 self.advance();
-                self.expect(&Token::Port)?;
-                self.parse_port(dir, Some(Proto::Sctp))
+                if self.eat(&Token::Port) {
+                    self.parse_port(dir, Some(Proto::Sctp))
+                } else if self.eat(&Token::PortRange) {
+                    self.parse_portrange(dir, Some(Proto::Sctp))
+                } else {
+                    Err(self.err(format!(
+                        "expected 'port' or 'portrange' after 'sctp', got {:?}",
+                        self.cur_tok()
+                    )))
+                }
             }
             Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => {
                 let addr = self.parse_ip()?;
