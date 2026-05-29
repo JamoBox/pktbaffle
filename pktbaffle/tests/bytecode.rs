@@ -271,7 +271,10 @@ fn port_no_proto_tcp_shortcut_resolves_to_frag_check_not_accept() {
     assert_eq!(prog[3], insn(LDB_ABS, 0, 0, 23));
     assert_eq!(prog[4].code, JEQ_K);
     assert_eq!(prog[4].k, 6);
-    assert_eq!(prog[4].jt, 1, "TCP shortcut must skip UDP check, not jump to ACCEPT");
+    assert_eq!(
+        prog[4].jt, 1,
+        "TCP shortcut must skip UDP check, not jump to ACCEPT"
+    );
     assert_eq!(prog[5].code, JEQ_K);
     assert_eq!(prog[5].k, 17);
 
@@ -363,9 +366,19 @@ fn portrange_no_proto_tcp_shortcut_resolves_correctly() {
 #[test]
 fn tcp_port_emits_ethertype_check_exactly_once() {
     let prog = eth("tcp port 80");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
-    assert_eq!(eth_loads, 1, "ethertype check must appear exactly once in tcp port 80");
-    assert_eq!(prog.len(), 18, "tcp port 80 must compile to 18 instructions");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in tcp port 80"
+    );
+    assert_eq!(
+        prog.len(),
+        18,
+        "tcp port 80 must compile to 18 instructions"
+    );
 }
 
 #[test]
@@ -410,16 +423,32 @@ fn tcp_port_80_exact_bytecode() {
 #[test]
 fn udp_port_emits_ethertype_check_exactly_once() {
     let prog = eth("udp port 53");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
-    assert_eq!(eth_loads, 1, "ethertype check must appear exactly once in udp port 53");
-    assert_eq!(prog.len(), 18, "udp port 53 must compile to 18 instructions");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in udp port 53"
+    );
+    assert_eq!(
+        prog.len(),
+        18,
+        "udp port 53 must compile to 18 instructions"
+    );
 }
 
 #[test]
 fn sctp_port_emits_ethertype_check_exactly_once() {
     let prog = eth("sctp port 9000");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
-    assert_eq!(eth_loads, 1, "ethertype check must appear exactly once in sctp port 9000");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in sctp port 9000"
+    );
 }
 
 // Directed forms: `src tcp port`, `dst udp port`.
@@ -427,7 +456,10 @@ fn sctp_port_emits_ethertype_check_exactly_once() {
 #[test]
 fn src_tcp_port_emits_single_ethertype_check() {
     let prog = eth("src tcp port 80");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
     assert_eq!(eth_loads, 1);
     // 12 prereq + 2 port (src only) + 2 terminals = 16
     assert_eq!(prog.len(), 16);
@@ -436,7 +468,10 @@ fn src_tcp_port_emits_single_ethertype_check() {
 #[test]
 fn dst_udp_port_emits_single_ethertype_check() {
     let prog = eth("dst udp port 53");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
     assert_eq!(eth_loads, 1);
     assert_eq!(prog.len(), 16);
 }
@@ -445,8 +480,14 @@ fn dst_udp_port_emits_single_ethertype_check() {
 #[test]
 fn tcp_portrange_emits_ethertype_check_exactly_once() {
     let prog = eth("tcp portrange 1024-65535");
-    let eth_loads = prog.iter().filter(|i| i.code == LDH_ABS && i.k == 12).count();
-    assert_eq!(eth_loads, 1, "ethertype check must appear exactly once in tcp portrange");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in tcp portrange"
+    );
 }
 
 #[test]
@@ -483,7 +524,10 @@ fn tcp_port_ipv6_path_loads_fixed_header_length() {
     assert_eq!(prog[11], insn(LDX_IMM, 0, 0, 40), "IPv6 path must set X=40");
     // IPv6 branch at [1] must jump to instruction 9.
     let ipv6_target = 1 + 1 + prog[1].jt as usize;
-    assert_eq!(ipv6_target, 9, "jeq 0x86dd jt must branch to IPv6 path start");
+    assert_eq!(
+        ipv6_target, 9,
+        "jeq 0x86dd jt must branch to IPv6 path start"
+    );
 }
 
 // `port 80` (no proto qualifier) must also have both frag guard and IPv6 path.
@@ -506,7 +550,10 @@ fn port_no_proto_has_frag_guard_and_ipv6_path() {
 fn tcp_port_ipv4_ja_resolves_to_port_check() {
     let prog = eth("tcp port 80");
     // JA is at index 8; port check starts at index 12.
-    assert_eq!(prog[8].code, JA, "IPv4 path must end with ja to skip IPv6 section");
+    assert_eq!(
+        prog[8].code, JA,
+        "IPv4 path must end with ja to skip IPv6 section"
+    );
     let ja_target = 8 + 1 + prog[8].k as usize;
     assert_eq!(ja_target, 12, "JA must jump to port check start at [12]");
 }

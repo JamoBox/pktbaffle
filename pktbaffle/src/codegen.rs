@@ -552,8 +552,8 @@ impl Codegen {
         let mut p = Patches::default();
         let net_off = self.link.net_offset();
         let ip4_proto_off = net_off + 9; // IP protocol byte
-        let ip4_frag_off = net_off + 6;  // IP flags + fragment offset (ip[6:2])
-        let ip6_nh_off = net_off + 6;   // IPv6 next-header (byte 6 of IPv6 header)
+        let ip4_frag_off = net_off + 6; // IP flags + fragment offset (ip[6:2])
+        let ip6_nh_off = net_off + 6; // IPv6 next-header (byte 6 of IPv6 header)
 
         if let Some(ether_off) = self.link.ether_proto_offset() {
             // Load ethertype once; IPv6 branches away, IPv4 check falls through.
@@ -601,7 +601,11 @@ impl Codegen {
     /// Emit L4 protocol match against A (which must already be loaded).
     /// For `None`, accepts TCP (6) or UDP (17); the TCP jeq's jt is resolved
     /// immediately to jump past the UDP check so it doesn't leak into p.success.
-    fn emit_l4_proto_check(&mut self, proto: Option<Proto>, failure: &mut Vec<Patch>) -> Result<()> {
+    fn emit_l4_proto_check(
+        &mut self,
+        proto: Option<Proto>,
+        failure: &mut Vec<Patch>,
+    ) -> Result<()> {
         match proto {
             Some(Proto::Tcp) => {
                 let i = self.push(Insn::jeq_k(6, 0, 0xff));
