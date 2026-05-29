@@ -7,6 +7,7 @@
 //! Opcode constants are computed from the BPF building blocks in bpf.rs.
 
 use pktbaffle::bpf::Insn;
+use pktbaffle::optimizer::dedup_loads;
 use pktbaffle::{compile, LinkType, Target};
 
 // ── derived opcode constants ─────────────────────────────────────────────────
@@ -20,6 +21,7 @@ const LDH_ABS: u16 = 0x28; // BPF_LD | BPF_H | BPF_ABS
 const LDB_ABS: u16 = 0x30; // BPF_LD | BPF_B | BPF_ABS
 const LDW_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
 const LDH_IND: u16 = 0x48; // BPF_LD | BPF_H | BPF_IND
+const LDB_IND: u16 = 0x50; // BPF_LD | BPF_B | BPF_IND
 const LDX_MSH: u16 = 0xb1; // BPF_LDX | BPF_B | BPF_MSH
 const LDX_IMM: u16 = 0x01; // BPF_LDX | BPF_W | BPF_IMM
 const LD_LEN: u16 = 0x80; // BPF_LD | BPF_W | BPF_LEN
@@ -621,4 +623,87 @@ fn less_n_equals_len_le_n() {
 #[test]
 fn greater_n_equals_len_ge_n() {
     assert_eq!(eth("greater 1500"), eth("len >= 1500"));
+}
+
+// ── transport-layer byte access uses indirect load (issue #11) ────────────────
+
+// `tcp[0] = 8` must emit ldb [x + 14] (BPF_LD|BPF_B|BPF_IND), not ldb [14].
+// X holds the IP header length (loaded by MSH), so [x+14] resolves to the
+// first byte of the TCP header — not the first byte of the IP header.
+#[test]
+fn tcp_byte_access_uses_ldb_ind() {
+    let prog = eth("tcp[0] = 8");
+    // [0] ldxb 4*([14]&0xf)  — MSH loads IP IHL into X
+    // [1] ldb [x + 14]       — BPF_LD | BPF_B | BPF_IND  ← must NOT be LDB_ABS
+    // [2] jeq 8, jf→DROP
+    // [3] ACCEPT
+    // [4] DROP
+    assert_eq!(prog[0], insn(LDX_MSH, 0, 0, 14));
+    assert_eq!(
+        prog[1].code, LDB_IND,
+        "tcp[0] must use indirect byte load (ldb [x+k]), got code 0x{:02x}",
+        prog[1].code
+    );
+    assert_eq!(prog[1].k, 14, "indirect offset must be net_offset (14)");
+    assert_eq!(prog[2].code, JEQ_K);
+    assert_eq!(prog[2].k, 8);
+    assert_eq!(prog[3], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[4], insn(RET_K, 0, 0, DROP));
+    assert_eq!(prog.len(), 5);
+}
+
+// ── peephole optimizer wiring ────────────────────────────────────────────────
+
+// dedup_loads must remove a consecutive identical ldh (halfword) load.
+// This fails before the mask fix because is_load() does not recognise LDH_ABS.
+#[test]
+fn dedup_removes_consecutive_ldh_abs() {
+    let ldh = Insn::ldh_abs(12);
+    // [0] ldh[12]  [1] ldh[12] (dup)  [2] jeq jf=1→[4]  [3] ACCEPT  [4] DROP
+    let jeq = insn(JEQ_K, 0, 1, 0x0800);
+    let mut insns = vec![
+        ldh,
+        ldh,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
+    dedup_loads(&mut insns);
+    // Second ldh removed; jump offsets must remain valid.
+    assert_eq!(insns.len(), 4, "consecutive ldh[12] must be deduplicated");
+    assert_eq!(insns[0], ldh);
+    assert_eq!(insns[1], jeq);
+    assert_eq!(insns[2], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(insns[3], insn(RET_K, 0, 0, DROP));
+}
+
+// dedup_loads must also remove consecutive identical ldb (byte) loads.
+#[test]
+fn dedup_removes_consecutive_ldb_abs() {
+    let ldb = Insn::ldb_abs(23);
+    let jeq = insn(JEQ_K, 0, 1, 6);
+    let mut insns = vec![
+        ldb,
+        ldb,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
+    dedup_loads(&mut insns);
+    assert_eq!(insns.len(), 4, "consecutive ldb[23] must be deduplicated");
+    assert_eq!(insns[0], ldb);
+    assert_eq!(insns[1], jeq);
+}
+
+// After dedup_loads is wired into compile(), compiling tcp and port 80 must
+// succeed and produce a valid program (regression guard — the optimizer must
+// not corrupt jump offsets).
+#[test]
+fn tcp_and_port_80_compiles_and_has_correct_terminals() {
+    let prog = eth("tcp and port 80");
+    // Program must end with ACCEPT then DROP.
+    let n = prog.len();
+    assert!(n >= 2, "program must have at least two instructions");
+    assert_eq!(prog[n - 2], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[n - 1], insn(RET_K, 0, 0, DROP));
 }

@@ -122,6 +122,17 @@ impl Insn {
         }
     }
 
+    /// Load a byte from the packet at (X + `k`).
+    #[inline]
+    pub fn ldb_ind(k: u32) -> Self {
+        Self {
+            code: BPF_LD | BPF_B | BPF_IND,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
     /// Load a 16-bit half-word from the packet at (X + `k`).
     #[inline]
     pub fn ldh_ind(k: u32) -> Self {

@@ -190,6 +190,49 @@ impl Codegen {
         Ok(p)
     }
 
+    /// Dual-stack L4 protocol check: accepts packets that are either IPv4 with
+    /// `proto_num` in the protocol byte, or IPv6 with `proto_num` as next-header.
+    ///
+    /// For `RawIp` captures (no ethertype field) this falls back to IPv4-only.
+    fn emit_dual_l4(&mut self, proto_num: u8) -> Result<Patches> {
+        let Some(ether_off) = self.link.ether_proto_offset() else {
+            return self.emit_ip4_l4(proto_num);
+        };
+        let net_off = self.link.net_offset();
+        let mut p = Patches::default();
+
+        // Load ethertype (bounds-check + half into R4).
+        let bc_et = self.emit_load_half(ether_off);
+        p.failure.push(bc_et);
+
+        // jeq 0x0800 → ipv4_path
+        let jmp_to_ipv4 = self.push(Insn::jeq_imm(R4, 0x0800, 0));
+
+        // jne 0x86dd → drop (not IPv4, not IPv6)
+        let not_ipv6 = Patch(self.push(Insn::jne_imm(R4, 0x86dd, 0)));
+        p.failure.push(not_ipv6);
+
+        // IPv6: check next-header at net_off + 6.
+        let q6 = self.check_byte(net_off + 6, proto_num as u32);
+        p.failure.extend(q6.failure);
+
+        // JA past IPv4 block.
+        let ja = self.push(Insn::ja(0));
+
+        // IPv4 path.
+        let ipv4_start = self.insns.len();
+        self.resolve(Patch(jmp_to_ipv4), ipv4_start);
+
+        // IPv4: check protocol byte at net_off + 9.
+        let q4 = self.check_byte(net_off + 9, proto_num as u32);
+        p.failure.extend(q4.failure);
+
+        let after = self.insns.len();
+        self.resolve(Patch(ja), after);
+
+        Ok(p)
+    }
+
     // ── Expression dispatch ───────────────────────────────────────────────────
 
     fn emit_expr(&mut self, expr: &Expr) -> Result<Patches> {
@@ -279,11 +322,13 @@ impl Codegen {
             Proto::Ip6 => self.emit_ethertype(0x86dd),
             Proto::Arp => self.emit_ethertype(0x0806),
             Proto::Rarp => self.emit_ethertype(0x8035),
-            Proto::Tcp => self.emit_ip4_l4(6),
-            Proto::Udp => self.emit_ip4_l4(17),
+            // TCP, UDP, and SCTP run over both IPv4 and IPv6 — use dual-stack.
+            Proto::Tcp => self.emit_dual_l4(6),
+            Proto::Udp => self.emit_dual_l4(17),
+            Proto::Sctp => self.emit_dual_l4(132),
+            // ICMP and IGMP are IPv4-only; ICMPv6 and ip6proto are IPv6-only.
             Proto::Icmp => self.emit_ip4_l4(1),
             Proto::Igmp => self.emit_ip4_l4(2),
-            Proto::Sctp => self.emit_ip4_l4(132),
             Proto::Icmp6 => self.emit_ip6_l4(58),
             Proto::Num(n) => self.emit_ip4_l4(*n),
             Proto::Ip6Proto(n) => self.emit_ip6_l4(*n),
@@ -431,27 +476,125 @@ impl Codegen {
 
     // ── Port ─────────────────────────────────────────────────────────────────
 
-    /// Emit protocol prereqs + MSH-equivalent for eBPF.
-    /// Returns patches and sets R6 = pointer to start of transport header.
+    /// Emit protocol prereqs + transport header pointer setup for eBPF.
+    ///
+    /// For link types with an ethertype field (Ethernet, LinuxSll) this emits a
+    /// dual-stack IPv4/IPv6 OR path so that both `tcp port 80` and
+    /// `ip6 and tcp port 80` work correctly.  For `RawIp` (no ethertype) the
+    /// IPv4-only path is used unchanged.
+    ///
+    /// On return R6 points to the start of the transport header.
     fn emit_port_prereqs(&mut self, proto: Option<Proto>) -> Result<Patches> {
-        let mut p = self.ip4_guard()?;
-        let proto_off = self.link.net_offset() + 9;
+        // RawIp carries no ethertype; IPv4 is implicit — keep old path.
+        let Some(ether_off) = self.link.ether_proto_offset() else {
+            return self.emit_port_prereqs_ipv4_only(proto);
+        };
 
+        let net_off = self.link.net_offset();
+        let mut p = Patches::default();
+
+        // Load ethertype (bounds-check + halfword load into R4).
+        let bc_et = self.emit_load_half(ether_off);
+        p.failure.push(bc_et);
+
+        // jeq R4, 0x0800 → ipv4_path  (if IPv4, jump forward to IPv4 block)
+        let jmp_to_ipv4 = self.push(Insn::jeq_imm(R4, 0x0800, 0));
+
+        // jne R4, 0x86dd → drop  (neither IPv4 nor IPv6)
+        let not_ipv6 = Patch(self.push(Insn::jne_imm(R4, 0x86dd, 0)));
+        p.failure.push(not_ipv6);
+
+        // ── IPv6 path (fall-through) ──────────────────────────────────────────
+        // Check next-header field at net_off + 6.
+        self.emit_l4_proto_check(net_off + 6, proto, &mut p)?;
+
+        // R6 = R2 + net_off + 40  (fixed IPv6 header size)
+        self.push(Insn::mov64_reg(R6, R2));
+        self.push(Insn::add64_imm(R6, (net_off + 40) as i32));
+
+        // Bounds-check: transport header needs ≥4 bytes for port fields.
+        self.push(Insn::mov64_reg(R5, R6));
+        self.push(Insn::add64_imm(R5, 4));
+        let bc_v6 = Patch(self.push(Insn::jgt_reg(R5, R3, 0)));
+        p.failure.push(bc_v6);
+
+        // Unconditional jump past IPv4 block → port comparison.
+        let ja_skip_v4 = self.push(Insn::ja(0));
+
+        // ── IPv4 path ─────────────────────────────────────────────────────────
+        let ipv4_start = self.insns.len();
+        self.resolve(Patch(jmp_to_ipv4), ipv4_start);
+
+        // Check protocol byte at net_off + 9.
+        self.emit_l4_proto_check(net_off + 9, proto, &mut p)?;
+
+        // Compute R6 = R2 + net_off + IHL*4.
+        let bc_ihl = self.emit_load_byte(net_off);
+        p.failure.push(bc_ihl);
+        self.push(Insn::and32_imm(R4, 0x0f));
+        self.push(Insn::lsh32_imm(R4, 2));
+        self.push(Insn::mov64_reg(R6, R2));
+        self.push(Insn::add64_imm(R6, net_off as i32));
+        self.push(Insn::add64_reg(R6, R4));
+
+        // Bounds-check: transport header needs ≥4 bytes for port fields.
+        self.push(Insn::mov64_reg(R5, R6));
+        self.push(Insn::add64_imm(R5, 4));
+        let bc_v4 = Patch(self.push(Insn::jgt_reg(R5, R3, 0)));
+        p.failure.push(bc_v4);
+
+        // Resolve the IPv6-path JA to the port-comparison start.
+        let port_check_start = self.insns.len();
+        self.resolve(Patch(ja_skip_v4), port_check_start);
+
+        Ok(p)
+    }
+
+    /// IPv4-only prereqs used for `RawIp` captures (no ethertype field).
+    fn emit_port_prereqs_ipv4_only(&mut self, proto: Option<Proto>) -> Result<Patches> {
+        let mut p = self.ip4_guard()?;
+        let net_off = self.link.net_offset();
+        self.emit_l4_proto_check(net_off + 9, proto, &mut p)?;
+
+        // Compute transport header pointer into R6 via IHL.
+        let bc_ihl = self.emit_load_byte(net_off);
+        p.failure.push(bc_ihl);
+        self.push(Insn::and32_imm(R4, 0x0f));
+        self.push(Insn::lsh32_imm(R4, 2));
+        self.push(Insn::mov64_reg(R6, R2));
+        self.push(Insn::add64_imm(R6, net_off as i32));
+        self.push(Insn::add64_reg(R6, R4));
+
+        self.push(Insn::mov64_reg(R5, R6));
+        self.push(Insn::add64_imm(R5, 4));
+        let bc_trans = Patch(self.push(Insn::jgt_reg(R5, R3, 0)));
+        p.failure.push(bc_trans);
+
+        Ok(p)
+    }
+
+    /// Emit an L4 protocol check at `proto_off`.
+    ///
+    /// For a specific proto: emit a single-byte equality check.
+    /// For `None`: accept TCP (6) or UDP (17).
+    fn emit_l4_proto_check(
+        &mut self,
+        proto_off: u32,
+        proto: Option<Proto>,
+        p: &mut Patches,
+    ) -> Result<()> {
         match proto {
             Some(Proto::Tcp) => {
-                let q = self.check_byte(proto_off, 6);
-                p.failure.extend(q.failure);
+                p.failure.extend(self.check_byte(proto_off, 6).failure);
             }
             Some(Proto::Udp) => {
-                let q = self.check_byte(proto_off, 17);
-                p.failure.extend(q.failure);
+                p.failure.extend(self.check_byte(proto_off, 17).failure);
             }
             Some(Proto::Sctp) => {
-                let q = self.check_byte(proto_off, 132);
-                p.failure.extend(q.failure);
+                p.failure.extend(self.check_byte(proto_off, 132).failure);
             }
             None => {
-                // TCP (6) or UDP (17).
+                // TCP (6) or UDP (17): jeq 6 skips the UDP check on match.
                 let bc = self.emit_load_byte(proto_off);
                 let eq_tcp = Patch(self.push(Insn::jeq_imm(R4, 6, 0)));
                 let cmp_udp = Patch(self.push(Insn::jne_imm(R4, 17, 0)));
@@ -465,30 +608,7 @@ impl Codegen {
                 });
             }
         }
-
-        // Compute transport header pointer into R6.
-        // R6 = R2 + net_offset + IHL*4
-        let net_off = self.link.net_offset();
-
-        // Bounds-check at least the IP header (need IHL byte at net_offset).
-        let bc_ihl = self.emit_load_byte(net_off); // R4 = IHL byte (e.g. 0x45)
-        p.failure.push(bc_ihl);
-        self.push(Insn::and32_imm(R4, 0x0f)); // R4 = IHL field (e.g. 5)
-        self.push(Insn::lsh32_imm(R4, 2)); // R4 = IHL * 4 (e.g. 20)
-
-        // R6 = R2 + net_offset + R4 (transport header start)
-        self.push(Insn::mov64_reg(R6, R2));
-        self.push(Insn::add64_imm(R6, net_off as i32));
-        self.push(Insn::add64_reg(R6, R4)); // R6 = data + net_offset + IHL*4
-
-        // Bounds-check: transport header needs at least 4 bytes (for port fields).
-        // R5 = R6 + 4; if R5 > R3 → drop
-        self.push(Insn::mov64_reg(R5, R6));
-        self.push(Insn::add64_imm(R5, 4));
-        let bc_trans = Patch(self.push(Insn::jgt_reg(R5, R3, 0)));
-        p.failure.push(bc_trans);
-
-        Ok(p)
+        Ok(())
     }
 
     fn emit_port(&mut self, port: u16, dir: Dir, proto: Option<Proto>) -> Result<Patches> {
