@@ -359,6 +359,12 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
             return Ok(Token::Ipv4(addr.octets()));
         }
     }
+    // IPv6 (contains "::" or two or more colons)
+    if raw.contains("::") || raw.chars().filter(|&c| c == ':').count() >= 2 {
+        if let Ok(addr) = raw.parse::<std::net::Ipv6Addr>() {
+            return Ok(Token::Ipv6(addr));
+        }
+    }
     // MAC (five colons)
     if raw.chars().filter(|&c| c == ':').count() == 5 {
         if let Some(mac) = parse_mac(raw) {
@@ -468,5 +474,42 @@ fn keyword_or_ident(s: &str) -> Token {
         "icmp-maskreq" => Token::Num(17),
         "icmp-maskreply" => Token::Num(18),
         s => Token::Ident(s.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_digit_first_double_colon() {
+        // 2001:db8::1 starts with a digit — the bug caused a LexError here.
+        let tokens = lex("2001:db8::1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_digit_first_full_address() {
+        let tokens = lex("2001:0db8:0000:0000:0000:0000:0000:0001").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_letter_first_still_works() {
+        // fe80::1 starts with a letter; this path already worked before the fix.
+        let tokens = lex("fe80::1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_in_host_filter() {
+        // Digit-first IPv6 used inside a filter expression.
+        let tokens = lex("host 2001:db8::1").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token, Token::Host);
+        assert_eq!(tokens[1].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
     }
 }
