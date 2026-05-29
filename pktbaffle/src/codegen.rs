@@ -17,6 +17,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::ast::*;
 use crate::bpf::{Insn, Program, BPF_ACCEPT, BPF_DROP, BPF_LD, BPF_LEN};
 use crate::error::{Error, Result};
+use crate::optimizer::dedup_loads;
 
 // ── Link type ────────────────────────────────────────────────────────────────
 
@@ -814,6 +815,10 @@ enum PatchField {
 pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     let mut cg = Codegen::new(link);
     let patches = cg.emit_expr(expr)?;
+
+    // Run peephole optimizations before emitting terminals so that jump
+    // offsets inserted below reflect the final instruction count.
+    dedup_loads(&mut cg.insns);
 
     // Emit terminal instructions.
     let accept_idx = cg.insns.len();
