@@ -198,7 +198,7 @@ fn byte_range_no_spaces_compiles() {
 fn byte_range_various_no_spaces() {
     // A few representative range sizes to make sure the fix is general.
     eth_prog("ip[6:2] & 0x1fff != 0"); // IP fragment offset
-    eth_prog("tcp[0:4] = 0");          // first 4 bytes of TCP header
+    eth_prog("tcp[0:4] = 0"); // first 4 bytes of TCP header
 }
 
 // ── Named field constants ─────────────────────────────────────────────────────
