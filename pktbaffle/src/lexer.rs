@@ -486,20 +486,14 @@ mod tests {
         // 2001:db8::1 starts with a digit — the bug caused a LexError here.
         let tokens = lex("2001:db8::1").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert_eq!(
-            tokens[0].token,
-            Token::Ipv6("2001:db8::1".parse().unwrap())
-        );
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
     }
 
     #[test]
     fn ipv6_digit_first_full_address() {
         let tokens = lex("2001:0db8:0000:0000:0000:0000:0000:0001").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert_eq!(
-            tokens[0].token,
-            Token::Ipv6("2001:db8::1".parse().unwrap())
-        );
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
     }
 
     #[test]
@@ -507,10 +501,7 @@ mod tests {
         // fe80::1 starts with a letter; this path already worked before the fix.
         let tokens = lex("fe80::1").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert_eq!(
-            tokens[0].token,
-            Token::Ipv6("fe80::1".parse().unwrap())
-        );
+        assert_eq!(tokens[0].token, Token::Ipv6("fe80::1".parse().unwrap()));
     }
 
     #[test]
@@ -519,9 +510,6 @@ mod tests {
         let tokens = lex("host 2001:db8::1").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].token, Token::Host);
-        assert_eq!(
-            tokens[1].token,
-            Token::Ipv6("2001:db8::1".parse().unwrap())
-        );
+        assert_eq!(tokens[1].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
     }
 }
