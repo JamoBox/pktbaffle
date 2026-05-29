@@ -10,7 +10,9 @@ pub use linux::{default_interface, list_interfaces, query_link_type, LinuxLive a
 #[cfg(target_os = "macos")]
 pub use macos::{default_interface, list_interfaces, query_link_type, MacosLive as PlatformLive};
 #[cfg(target_os = "windows")]
-pub use windows::{default_interface, list_interfaces, query_link_type, WindowsLive as PlatformLive};
+pub use windows::{
+    default_interface, list_interfaces, query_link_type, WindowsLive as PlatformLive,
+};
 
 #[cfg(unix)]
 use crate::error::Error;

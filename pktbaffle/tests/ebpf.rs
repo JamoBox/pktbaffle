@@ -7,8 +7,8 @@
 //! 4. Logical combinators (AND, OR, NOT) produce non-empty programs.
 
 use pktbaffle::ebpf::{
-    Insn, BPF_ALU64, BPF_EXIT, BPF_JGT, BPF_JMP, BPF_JNE, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV,
-    BPF_W, BPF_X, R1, R2, R3, XDP_DROP, XDP_PASS,
+    Insn, BPF_ALU64, BPF_EXIT, BPF_JGT, BPF_JMP, BPF_JNE, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV, BPF_W,
+    BPF_X, R1, R2, R3, XDP_DROP, XDP_PASS,
 };
 use pktbaffle::{compile, LinkType, Target};
 
@@ -351,8 +351,7 @@ fn ip6_and_tcp_port_no_ipv4_guard() {
         .filter(|i| i.code == jne_k && i.imm == 0x0800)
         .count();
     assert_eq!(
-        bad,
-        0,
+        bad, 0,
         "ip6 and tcp port 80 must not emit jne 0x0800; found {bad} such instruction(s)"
     );
 }
@@ -367,8 +366,7 @@ fn ip6_and_udp_port_no_ipv4_guard() {
         .filter(|i| i.code == jne_k && i.imm == 0x0800)
         .count();
     assert_eq!(
-        bad,
-        0,
+        bad, 0,
         "ip6 and udp port 53 must not emit jne 0x0800; found {bad} such instruction(s)"
     );
 }
@@ -383,8 +381,7 @@ fn ip6_and_portrange_no_ipv4_guard() {
         .filter(|i| i.code == jne_k && i.imm == 0x0800)
         .count();
     assert_eq!(
-        bad,
-        0,
+        bad, 0,
         "ip6 and portrange must not emit jne 0x0800; found {bad} such instruction(s)"
     );
 }
