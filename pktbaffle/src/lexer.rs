@@ -262,11 +262,43 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
         // ── numeric / IPv4 / MAC starts with a digit ─────────────────────────
         if bytes[pos].is_ascii_digit() {
             let start = pos;
-            // Consume digits, dots, and colons (for MACs).
-            while pos < len
-                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'.' || bytes[pos] == b':')
-            {
+            // Consume alphanumeric and dots, but NOT colons.  A colon after a
+            // number is usually the range separator in byte-access syntax
+            // (e.g. tcp[0:2]) and must not be greedily consumed here.
+            while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'.') {
                 pos += 1;
+            }
+            // Digit-starting MACs (e.g. 00:11:22:33:44:55) still need colon
+            // support.  Speculatively extend when followed by exactly five
+            // ":XX" segments and the whole thing parses as a MAC.
+            if pos < len && bytes[pos] == b':' {
+                let mut tmp = pos;
+                let mut ok = true;
+                for _ in 0..5 {
+                    if tmp >= len || bytes[tmp] != b':' {
+                        ok = false;
+                        break;
+                    }
+                    tmp += 1;
+                    let seg_start = tmp;
+                    while tmp < len && bytes[tmp].is_ascii_hexdigit() {
+                        tmp += 1;
+                    }
+                    if tmp == seg_start || tmp - seg_start > 2 {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    if let Some(mac) = parse_mac(&src[start..tmp]) {
+                        tokens.push(Spanned {
+                            token: Token::Mac(mac),
+                            offset: start,
+                        });
+                        pos = tmp;
+                        continue;
+                    }
+                }
             }
             let raw = &src[start..pos];
             let tok = parse_numlike(raw, start)?;
