@@ -94,10 +94,23 @@ fn is_rsh(insn: bpf::Insn) -> bool {
 
 #[test]
 fn compile_sanity_protocols() {
-    for f in &["tcp", "udp", "icmp", "icmp6", "igmp", "sctp",
-               "ip", "ip6", "arp", "rarp",
-               "ip proto 6", "ip proto 17", "ip proto 1", "ip proto 89",
-               "ip6 proto 58"] {
+    for f in &[
+        "tcp",
+        "udp",
+        "icmp",
+        "icmp6",
+        "igmp",
+        "sctp",
+        "ip",
+        "ip6",
+        "arp",
+        "rarp",
+        "ip proto 6",
+        "ip proto 17",
+        "ip proto 1",
+        "ip proto 89",
+        "ip6 proto 58",
+    ] {
         let insns = cbpf(f);
         assert!(!insns.is_empty(), "empty program for {f:?}");
     }
@@ -208,17 +221,17 @@ fn compile_sanity_special_primitives() {
 #[test]
 fn compile_sanity_byte_access() {
     for f in &[
-        "tcp[13] & 0x02 != 0",       // SYN
-        "tcp[13] & 0x10 != 0",       // ACK
-        "tcp[13] & 0x01 != 0",       // FIN
-        "tcp[13] & 0x04 != 0",       // RST
-        "tcp[13] = 0x12",            // SYN+ACK exact
-        "ip[9] = 6",                 // IP proto TCP
-        "ip[0] & 0x0f > 5",         // IP IHL > 5 (has options)
-        "ip[6:2] & 0x1fff != 0",    // IP fragment offset != 0
-        "ip[8] < 10",               // IP TTL < 10
-        "tcp[12] & 0xf0 != 0x50",   // TCP data offset != 20
-        // Note: raw link-layer byte access `[0:2]` is not yet supported by the parser.
+        "tcp[13] & 0x02 != 0",   // SYN
+        "tcp[13] & 0x10 != 0",   // ACK
+        "tcp[13] & 0x01 != 0",   // FIN
+        "tcp[13] & 0x04 != 0",   // RST
+        "tcp[13] = 0x12",        // SYN+ACK exact
+        "ip[9] = 6",             // IP proto TCP
+        "ip[0] & 0x0f > 5",      // IP IHL > 5 (has options)
+        "ip[6:2] & 0x1fff != 0", // IP fragment offset != 0
+        "ip[8] < 10",            // IP TTL < 10
+        "tcp[12] & 0xf0 != 0x50", // TCP data offset != 20
+                                 // Note: raw link-layer byte access `[0:2]` is not yet supported by the parser.
     ] {
         let insns = cbpf(f);
         assert!(!insns.is_empty(), "empty program for {f:?}");
@@ -270,11 +283,13 @@ fn assert_well_formed(filter: &str, insns: &[bpf::Insn]) {
     );
     // Penultimate RET must be ACCEPT (0xffff_ffff), last must be DROP (0).
     assert_eq!(
-        insns[n - 2].k, bpf::BPF_ACCEPT,
+        insns[n - 2].k,
+        bpf::BPF_ACCEPT,
         "{filter:?}: accept RET has wrong k"
     );
     assert_eq!(
-        insns[n - 1].k, bpf::BPF_DROP,
+        insns[n - 1].k,
+        bpf::BPF_DROP,
         "{filter:?}: drop RET has wrong k"
     );
     // No instruction may appear after a RET (besides the terminal pair).
@@ -289,17 +304,36 @@ fn assert_well_formed(filter: &str, insns: &[bpf::Insn]) {
 #[test]
 fn program_structure_all_primitives() {
     let filters = [
-        "tcp", "udp", "icmp", "icmp6", "igmp", "sctp",
-        "ip", "ip6", "arp",
-        "host 1.2.3.4", "src host 10.0.0.1",
-        "net 10.0.0.0/8", "src net 192.168.0.0/24",
-        "port 80", "src port 53", "dst port 443",
-        "tcp port 80", "udp port 53",
-        "portrange 1024-65535", "tcp portrange 8000-9000",
-        "ether host aa:bb:cc:dd:ee:ff", "ether multicast",
-        "ip multicast", "ip broadcast",
-        "vlan", "vlan 100", "mpls",
-        "less 64", "greater 1500", "len = 60",
+        "tcp",
+        "udp",
+        "icmp",
+        "icmp6",
+        "igmp",
+        "sctp",
+        "ip",
+        "ip6",
+        "arp",
+        "host 1.2.3.4",
+        "src host 10.0.0.1",
+        "net 10.0.0.0/8",
+        "src net 192.168.0.0/24",
+        "port 80",
+        "src port 53",
+        "dst port 443",
+        "tcp port 80",
+        "udp port 53",
+        "portrange 1024-65535",
+        "tcp portrange 8000-9000",
+        "ether host aa:bb:cc:dd:ee:ff",
+        "ether multicast",
+        "ip multicast",
+        "ip broadcast",
+        "vlan",
+        "vlan 100",
+        "mpls",
+        "less 64",
+        "greater 1500",
+        "len = 60",
         "tcp[13] & 0x02 != 0",
         "tcp and port 80",
         "tcp or udp",
@@ -345,14 +379,22 @@ fn assert_jumps_in_bounds(filter: &str, insns: &[bpf::Insn]) {
 #[test]
 fn jumps_in_bounds_for_all_filters() {
     let filters = [
-        "tcp", "udp", "icmp", "ip",
-        "host 1.2.3.4", "host 2001:db8::1",
+        "tcp",
+        "udp",
+        "icmp",
+        "ip",
+        "host 1.2.3.4",
+        "host 2001:db8::1",
         "net 10.0.0.0/8",
-        "port 80", "portrange 1000-2000",
-        "tcp port 80", "udp portrange 53-53",
+        "port 80",
+        "portrange 1000-2000",
+        "tcp port 80",
+        "udp portrange 53-53",
         "ether host aa:bb:cc:dd:ee:ff",
-        "vlan 100", "mpls 42",
-        "ip multicast", "ip broadcast",
+        "vlan 100",
+        "mpls 42",
+        "ip multicast",
+        "ip broadcast",
         "tcp and port 80",
         "tcp or udp",
         "not tcp",
@@ -404,7 +446,10 @@ fn assert_all_paths_terminate(filter: &str, insns: &[bpf::Insn]) {
     let reachable = reachable_from(insns, 0);
     // Every reachable instruction must be in-bounds.
     for &idx in &reachable {
-        assert!(idx < n, "{filter:?}: reachable index {idx} is out-of-bounds");
+        assert!(
+            idx < n,
+            "{filter:?}: reachable index {idx} is out-of-bounds"
+        );
     }
     // At least one of the two terminal RET instructions must be reachable.
     let accept_idx = n - 2;
@@ -418,11 +463,18 @@ fn assert_all_paths_terminate(filter: &str, insns: &[bpf::Insn]) {
 #[test]
 fn all_paths_terminate() {
     let filters = [
-        "tcp", "udp", "ip", "arp",
-        "host 1.2.3.4", "net 10.0.0.0/8",
-        "port 80", "portrange 1-1024",
-        "tcp port 443", "udp portrange 1000-2000",
-        "vlan 100", "mpls",
+        "tcp",
+        "udp",
+        "ip",
+        "arp",
+        "host 1.2.3.4",
+        "net 10.0.0.0/8",
+        "port 80",
+        "portrange 1-1024",
+        "tcp port 443",
+        "udp portrange 1000-2000",
+        "vlan 100",
+        "mpls",
         "tcp and port 80",
         "tcp or udp",
         "not tcp",
@@ -446,26 +498,26 @@ fn instruction_count_low_complexity() {
     // Simple single-primitive filters. Bounds are loose enough to survive
     // minor refactors but tight enough to catch gross regressions.
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp",          4,  12),
-        ("udp",          4,  12),
-        ("icmp",         4,  12),
-        ("igmp",         4,  12),
-        ("ip",           2,   6),
-        ("ip6",          2,   6),
-        ("arp",          2,   6),
-        ("host 1.2.3.4", 8,  30),
+        ("tcp", 4, 12),
+        ("udp", 4, 12),
+        ("icmp", 4, 12),
+        ("igmp", 4, 12),
+        ("ip", 2, 6),
+        ("ip6", 2, 6),
+        ("arp", 2, 6),
+        ("host 1.2.3.4", 8, 30),
         ("src host 10.0.0.1", 6, 20),
         ("dst host 10.0.0.1", 6, 20),
-        ("port 80",      16, 50),
-        ("src port 80",  14, 40),
-        ("dst port 80",  14, 40),
-        ("tcp port 80",  14, 30),
-        ("len = 60",     2,   6),
-        ("less 64",      2,   6),
-        ("greater 1500", 2,   6),
-        ("vlan",         2,   6),
-        ("vlan 100",     5,  14),
-        ("mpls",         4,  10),
+        ("port 80", 16, 50),
+        ("src port 80", 14, 40),
+        ("dst port 80", 14, 40),
+        ("tcp port 80", 14, 30),
+        ("len = 60", 2, 6),
+        ("less 64", 2, 6),
+        ("greater 1500", 2, 6),
+        ("vlan", 2, 6),
+        ("vlan 100", 5, 14),
+        ("mpls", 4, 10),
     ];
     for &(filter, lo, hi) in cases {
         let n = cbpf(filter).len();
@@ -479,21 +531,21 @@ fn instruction_count_low_complexity() {
 #[test]
 fn instruction_count_medium_complexity() {
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp and port 80",                              14, 35),
-        ("udp and port 53",                              14, 35),
-        ("tcp or udp",                                   8,  18),
-        ("not tcp",                                      6,  16),
-        ("net 192.168.0.0/16",                           6,  22),
-        ("src net 10.0.0.0/8",                           5,  18),
-        ("portrange 1024-65535",                         18, 50),
-        ("tcp portrange 8000-9000",                      16, 45),
-        ("tcp[13] & 0x02 != 0",                          4,  35),
-        ("tcp[13] & 0x12 = 0x12",                        4,  35),
-        ("ip[0] & 0x0f > 5",                             3,  22),
-        ("tcp and not port 22",                          16, 40),
-        ("ether host aa:bb:cc:dd:ee:ff",                 5,  16),
-        ("ip multicast",                                 5,  16),
-        ("ip broadcast",                                 4,  12),
+        ("tcp and port 80", 14, 35),
+        ("udp and port 53", 14, 35),
+        ("tcp or udp", 8, 18),
+        ("not tcp", 6, 16),
+        ("net 192.168.0.0/16", 6, 22),
+        ("src net 10.0.0.0/8", 5, 18),
+        ("portrange 1024-65535", 18, 50),
+        ("tcp portrange 8000-9000", 16, 45),
+        ("tcp[13] & 0x02 != 0", 4, 35),
+        ("tcp[13] & 0x12 = 0x12", 4, 35),
+        ("ip[0] & 0x0f > 5", 3, 22),
+        ("tcp and not port 22", 16, 40),
+        ("ether host aa:bb:cc:dd:ee:ff", 5, 16),
+        ("ip multicast", 5, 16),
+        ("ip broadcast", 4, 12),
     ];
     for &(filter, lo, hi) in cases {
         let n = cbpf(filter).len();
@@ -507,17 +559,17 @@ fn instruction_count_medium_complexity() {
 #[test]
 fn instruction_count_high_complexity() {
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp and (port 80 or port 443)",                     25, 65),
-        ("(tcp and port 80) or (udp and port 53)",            35, 100),
-        ("tcp and (port 80 or port 443) and host 10.0.0.1",  35, 100),
-        ("not (tcp and port 80)",                             16, 45),
-        ("ip and not (tcp or udp)",                           8,  22),
+        ("tcp and (port 80 or port 443)", 25, 65),
+        ("(tcp and port 80) or (udp and port 53)", 35, 100),
+        ("tcp and (port 80 or port 443) and host 10.0.0.1", 35, 100),
+        ("not (tcp and port 80)", 16, 45),
+        ("ip and not (tcp or udp)", 8, 22),
         ("host 10.0.0.1 or host 10.0.0.2 or host 10.0.0.3", 18, 70),
-        ("vlan 100 and ip and tcp port 80",                   20, 55),
-        ("ip6 and tcp port 443",                              14, 40),
-        ("src host 1.2.3.4 or dst host 5.6.7.8",             8,  50),
-        ("tcp and src port 1024 and dst port 80",             20, 55),
-        ("(tcp or udp) and portrange 1024-65535",             28, 110),
+        ("vlan 100 and ip and tcp port 80", 20, 55),
+        ("ip6 and tcp port 443", 14, 40),
+        ("src host 1.2.3.4 or dst host 5.6.7.8", 8, 50),
+        ("tcp and src port 1024 and dst port 80", 20, 55),
+        ("(tcp or udp) and portrange 1024-65535", 28, 110),
     ];
     for &(filter, lo, hi) in cases {
         let n = cbpf(filter).len();
@@ -619,7 +671,10 @@ fn tcp_filter_has_proto_check_for_6() {
 fn udp_filter_has_proto_check_for_17() {
     let insns = cbpf("udp");
     let has_proto17 = insns.iter().any(|i| is_jeq(*i) && i.k == 17);
-    assert!(has_proto17, "no jeq #17 (UDP proto) in udp filter: {insns:?}");
+    assert!(
+        has_proto17,
+        "no jeq #17 (UDP proto) in udp filter: {insns:?}"
+    );
 }
 
 /// `icmp` must emit a proto check for 1.
@@ -627,7 +682,10 @@ fn udp_filter_has_proto_check_for_17() {
 fn icmp_filter_has_proto_check_for_1() {
     let insns = cbpf("icmp");
     let has_proto1 = insns.iter().any(|i| is_jeq(*i) && i.k == 1);
-    assert!(has_proto1, "no jeq #1 (ICMP proto) in icmp filter: {insns:?}");
+    assert!(
+        has_proto1,
+        "no jeq #1 (ICMP proto) in icmp filter: {insns:?}"
+    );
 }
 
 /// Port filters use indirect loads (X + offset) — must include MSH instruction.
@@ -781,9 +839,7 @@ fn src_and_dst_host_checks_both_addresses() {
 fn src_or_dst_host_has_success_shortcut_jt() {
     // For SrcOrDst, the src jeq uses jt as a forward success jump.
     let insns = cbpf("host 1.2.3.4");
-    let has_jt_success = insns
-        .iter()
-        .any(|i| is_jeq(*i) && i.jt != 0);
+    let has_jt_success = insns.iter().any(|i| is_jeq(*i) && i.jt != 0);
     assert!(
         has_jt_success,
         "SrcOrDst host should have a jt-based success shortcut, got: {insns:?}"
@@ -828,11 +884,7 @@ fn portrange_direction_variants_all_compile() {
 
 #[test]
 fn net_direction_variants_all_compile() {
-    let filters = [
-        "net 10.0.0.0/8",
-        "src net 10.0.0.0/8",
-        "dst net 10.0.0.0/8",
-    ];
+    let filters = ["net 10.0.0.0/8", "src net 10.0.0.0/8", "dst net 10.0.0.0/8"];
     for f in &filters {
         let insns = cbpf(f);
         assert_well_formed(f, &insns);
@@ -862,14 +914,22 @@ fn ether_host_direction_variants_all_compile() {
 fn ethernet_link_offsets_are_correct() {
     // On Ethernet, ethertype is at offset 12.
     let insns = cbpf_link("ip", LinkType::Ethernet);
-    assert!(insns[0].k == 12, "Ethernet ethertype offset should be 12, got {}", insns[0].k);
+    assert!(
+        insns[0].k == 12,
+        "Ethernet ethertype offset should be 12, got {}",
+        insns[0].k
+    );
 }
 
 #[test]
 fn linux_sll_link_offsets_are_correct() {
     // On Linux SLL, ethertype is at offset 14.
     let insns = cbpf_link("ip", LinkType::LinuxSll);
-    assert!(insns[0].k == 14, "LinuxSll ethertype offset should be 14, got {}", insns[0].k);
+    assert!(
+        insns[0].k == 14,
+        "LinuxSll ethertype offset should be 14, got {}",
+        insns[0].k
+    );
 }
 
 #[test]
@@ -899,9 +959,9 @@ fn rawip_net_offset_is_zero() {
     // On RawIp, the IP src address should be at offset 12 (no Ethernet header).
     let insns = cbpf_link("src host 1.2.3.4", LinkType::RawIp);
     // Look for a word load at offset 12 (IP src on RawIp = 0 + 12).
-    let has_offset12 = insns.iter().any(|i| {
-        (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 12
-    });
+    let has_offset12 = insns
+        .iter()
+        .any(|i| (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 12);
     assert!(
         has_offset12,
         "RawIp src host should load from offset 12, got: {insns:?}"
@@ -912,9 +972,9 @@ fn rawip_net_offset_is_zero() {
 fn ethernet_net_offset_is_14() {
     // On Ethernet, the IP src address should be at offset 26 (14 + 12).
     let insns = cbpf_link("src host 1.2.3.4", LinkType::Ethernet);
-    let has_offset26 = insns.iter().any(|i| {
-        (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 26
-    });
+    let has_offset26 = insns
+        .iter()
+        .any(|i| (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 26);
     assert!(
         has_offset26,
         "Ethernet src host should load from offset 26, got: {insns:?}"
@@ -925,9 +985,9 @@ fn ethernet_net_offset_is_14() {
 fn linux_sll_net_offset_is_16() {
     // On LinuxSll, net offset is 16. IP src = 16 + 12 = 28.
     let insns = cbpf_link("src host 1.2.3.4", LinkType::LinuxSll);
-    let has_offset28 = insns.iter().any(|i| {
-        (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 28
-    });
+    let has_offset28 = insns
+        .iter()
+        .any(|i| (i.code & 0xff) == (bpf::BPF_LD | bpf::BPF_W | bpf::BPF_ABS) && i.k == 28);
     assert!(
         has_offset28,
         "LinuxSll src host should load from offset 28, got: {insns:?}"
@@ -961,9 +1021,18 @@ fn ebpf_is_jmp(insn: ebpf::Insn) -> bool {
 
 #[test]
 fn ebpf_programs_compile_for_all_basic_filters() {
-    let filters = ["tcp", "udp", "icmp", "ip", "ip6",
-                   "host 1.2.3.4", "port 80", "tcp port 443",
-                   "tcp and port 80", "tcp or udp"];
+    let filters = [
+        "tcp",
+        "udp",
+        "icmp",
+        "ip",
+        "ip6",
+        "host 1.2.3.4",
+        "port 80",
+        "tcp port 443",
+        "tcp and port 80",
+        "tcp or udp",
+    ];
     for f in &filters {
         let insns = ebpf(f);
         assert!(!insns.is_empty(), "empty eBPF program for {f:?}");
@@ -996,13 +1065,16 @@ fn ebpf_programs_contain_bounds_checks_against_r3() {
     ];
     for f in &filters {
         let insns = ebpf(f);
-        let bounds_checks = insns.iter().filter(|i| {
-            let class = i.code & 0x07;
-            let is_jmp = class == ebpf::BPF_JMP || class == ebpf::BPF_JMP32;
-            let src = (i.regs >> 4) & 0xf;
-            let dst = i.regs & 0xf;
-            is_jmp && (src == ebpf::R3 || dst == ebpf::R3)
-        }).count();
+        let bounds_checks = insns
+            .iter()
+            .filter(|i| {
+                let class = i.code & 0x07;
+                let is_jmp = class == ebpf::BPF_JMP || class == ebpf::BPF_JMP32;
+                let src = (i.regs >> 4) & 0xf;
+                let dst = i.regs & 0xf;
+                is_jmp && (src == ebpf::R3 || dst == ebpf::R3)
+            })
+            .count();
         assert!(
             bounds_checks > 0,
             "eBPF {f:?}: no bounds check against R3 (data_end)"
@@ -1013,14 +1085,14 @@ fn ebpf_programs_contain_bounds_checks_against_r3() {
 #[test]
 fn ebpf_instruction_count_baselines() {
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp",                                     15, 40),
-        ("udp",                                     15, 40),
-        ("icmp",                                    15, 40),
-        ("port 80",                                 30, 70),
-        ("tcp port 80",                             30, 70),
-        ("host 1.2.3.4",                            20, 55),
-        ("tcp and port 80",                         35, 80),
-        ("tcp and (port 80 or port 443)",           50, 130),
+        ("tcp", 15, 40),
+        ("udp", 15, 40),
+        ("icmp", 15, 40),
+        ("port 80", 30, 70),
+        ("tcp port 80", 30, 70),
+        ("host 1.2.3.4", 20, 55),
+        ("tcp and port 80", 35, 80),
+        ("tcp and (port 80 or port 443)", 50, 130),
         ("(tcp and port 80) or (udp and port 53)", 70, 160),
     ];
     for &(filter, lo, hi) in cases {
@@ -1232,7 +1304,10 @@ fn complex_expressions_compile_to_ebpf() {
 fn logical_and_double_ampersand_alias() {
     let a = cbpf("tcp && port 80");
     let b = cbpf("tcp and port 80");
-    assert_eq!(a, b, "'tcp && port 80' and 'tcp and port 80' must produce identical programs");
+    assert_eq!(
+        a, b,
+        "'tcp && port 80' and 'tcp and port 80' must produce identical programs"
+    );
 }
 
 /// libpcap accepts `||` as a synonym for `or`.
@@ -1240,7 +1315,10 @@ fn logical_and_double_ampersand_alias() {
 fn logical_or_double_pipe_alias() {
     let a = cbpf("tcp || udp");
     let b = cbpf("tcp or udp");
-    assert_eq!(a, b, "'tcp || udp' and 'tcp or udp' must produce identical programs");
+    assert_eq!(
+        a, b,
+        "'tcp || udp' and 'tcp or udp' must produce identical programs"
+    );
 }
 
 /// libpcap accepts `!` as a synonym for `not`.
@@ -1248,7 +1326,10 @@ fn logical_or_double_pipe_alias() {
 fn logical_not_bang_alias() {
     let a = cbpf("! tcp");
     let b = cbpf("not tcp");
-    assert_eq!(a, b, "'! tcp' and 'not tcp' must produce identical programs");
+    assert_eq!(
+        a, b,
+        "'! tcp' and 'not tcp' must produce identical programs"
+    );
 }
 
 /// Compound expression with all three operator aliases.
@@ -1411,7 +1492,7 @@ fn all_icmp_named_constants_compile() {
 /// ICMPv6 type/code offset aliases.
 #[test]
 fn icmp6_offset_aliases() {
-    let a = cbpf("icmp6[icmp6type] = 135");  // Neighbor Solicitation
+    let a = cbpf("icmp6[icmp6type] = 135"); // Neighbor Solicitation
     let b = cbpf("icmp6[0] = 135");
     assert_eq!(a, b);
 }
@@ -1433,7 +1514,10 @@ fn esp_protocol_keyword() {
     let insns = cbpf("esp");
     assert_well_formed("esp", &insns);
     let has_proto50 = insns.iter().any(|i| is_jeq(*i) && i.k == 50);
-    assert!(has_proto50, "esp filter should check IP proto 50: {insns:?}");
+    assert!(
+        has_proto50,
+        "esp filter should check IP proto 50: {insns:?}"
+    );
 }
 
 /// `pim` is Protocol Independent Multicast (IP proto 103).
@@ -1442,7 +1526,10 @@ fn pim_protocol_keyword() {
     let insns = cbpf("pim");
     assert_well_formed("pim", &insns);
     let has_proto103 = insns.iter().any(|i| is_jeq(*i) && i.k == 103);
-    assert!(has_proto103, "pim filter should check IP proto 103: {insns:?}");
+    assert!(
+        has_proto103,
+        "pim filter should check IP proto 103: {insns:?}"
+    );
 }
 
 /// `vrrp` is Virtual Router Redundancy Protocol (IP proto 112).
@@ -1451,7 +1538,10 @@ fn vrrp_protocol_keyword() {
     let insns = cbpf("vrrp");
     assert_well_formed("vrrp", &insns);
     let has_proto112 = insns.iter().any(|i| is_jeq(*i) && i.k == 112);
-    assert!(has_proto112, "vrrp filter should check IP proto 112: {insns:?}");
+    assert!(
+        has_proto112,
+        "vrrp filter should check IP proto 112: {insns:?}"
+    );
 }
 
 /// `igrp` is Interior Gateway Routing Protocol (IP proto 9).
@@ -1469,14 +1559,21 @@ fn sctp_protocol_keyword() {
     let insns = cbpf("sctp");
     assert_well_formed("sctp", &insns);
     let has_proto132 = insns.iter().any(|i| is_jeq(*i) && i.k == 132);
-    assert!(has_proto132, "sctp filter should check IP proto 132: {insns:?}");
+    assert!(
+        has_proto132,
+        "sctp filter should check IP proto 132: {insns:?}"
+    );
 }
 
 /// `sctp port` and `sctp portrange` compile correctly.
 #[test]
 fn sctp_port_and_portrange() {
-    for f in &["sctp port 9899", "sctp portrange 5000-6000",
-               "src sctp port 9899", "dst sctp portrange 5000-6000"] {
+    for f in &[
+        "sctp port 9899",
+        "sctp portrange 5000-6000",
+        "src sctp port 9899",
+        "dst sctp portrange 5000-6000",
+    ] {
         let insns = cbpf(f);
         assert_well_formed(f, &insns);
         assert_jumps_in_bounds(f, &insns);
@@ -1487,16 +1584,19 @@ fn sctp_port_and_portrange() {
 #[test]
 fn raw_proto_numbers() {
     for (filter, expected_proto) in [
-        ("proto 6",   6u32),   // TCP
-        ("proto 17",  17),     // UDP
-        ("proto 41",  41),     // IPv6-in-IPv4
-        ("proto 89",  89),     // OSPF
-        ("proto 132", 132),    // SCTP
+        ("proto 6", 6u32),  // TCP
+        ("proto 17", 17),   // UDP
+        ("proto 41", 41),   // IPv6-in-IPv4
+        ("proto 89", 89),   // OSPF
+        ("proto 132", 132), // SCTP
     ] {
         let insns = cbpf(filter);
         assert_well_formed(filter, &insns);
         let has_proto = insns.iter().any(|i| is_jeq(*i) && i.k == expected_proto);
-        assert!(has_proto, "'{filter}' should check IP proto {expected_proto}");
+        assert!(
+            has_proto,
+            "'{filter}' should check IP proto {expected_proto}"
+        );
     }
 }
 
@@ -1527,7 +1627,10 @@ fn ether_proto_ip_keyword() {
 fn ether_proto_ip6_keyword() {
     let a = cbpf("ether proto ip6");
     let b = cbpf("ip6");
-    assert_eq!(a, b, "'ether proto ip6' should produce the same BPF as 'ip6'");
+    assert_eq!(
+        a, b,
+        "'ether proto ip6' should produce the same BPF as 'ip6'"
+    );
     let c = cbpf("ether proto 0x86dd");
     assert_eq!(a, c, "'ether proto ip6' should equal 'ether proto 0x86dd'");
 }
@@ -1537,7 +1640,10 @@ fn ether_proto_ip6_keyword() {
 fn ether_proto_arp_keyword() {
     let a = cbpf("ether proto arp");
     let b = cbpf("arp");
-    assert_eq!(a, b, "'ether proto arp' should produce the same BPF as 'arp'");
+    assert_eq!(
+        a, b,
+        "'ether proto arp' should produce the same BPF as 'arp'"
+    );
     let c = cbpf("ether proto 0x0806");
     assert_eq!(a, c, "'ether proto arp' should equal 'ether proto 0x0806'");
 }
@@ -1547,7 +1653,10 @@ fn ether_proto_arp_keyword() {
 fn ether_proto_rarp_keyword() {
     let a = cbpf("ether proto rarp");
     let b = cbpf("rarp");
-    assert_eq!(a, b, "'ether proto rarp' should produce the same BPF as 'rarp'");
+    assert_eq!(
+        a, b,
+        "'ether proto rarp' should produce the same BPF as 'rarp'"
+    );
     let c = cbpf("ether proto 0x8035");
     assert_eq!(a, c, "'ether proto rarp' should equal 'ether proto 0x8035'");
 }
@@ -1556,10 +1665,10 @@ fn ether_proto_rarp_keyword() {
 #[test]
 fn ether_proto_arbitrary_ethertypes() {
     for (filter, ethertype) in [
-        ("ether proto 0x88cc", 0x88ccu32),  // LLDP
-        ("ether proto 0x8847", 0x8847),      // MPLS unicast
-        ("ether proto 0x8100", 0x8100),      // VLAN 802.1Q
-        ("ether proto 0x86dd", 0x86dd),      // IPv6
+        ("ether proto 0x88cc", 0x88ccu32), // LLDP
+        ("ether proto 0x8847", 0x8847),    // MPLS unicast
+        ("ether proto 0x8100", 0x8100),    // VLAN 802.1Q
+        ("ether proto 0x86dd", 0x86dd),    // IPv6
     ] {
         let insns = cbpf(filter);
         assert_well_formed(filter, &insns);
@@ -1594,7 +1703,10 @@ fn broadcast_bare_keyword() {
     assert_well_formed("broadcast", &insns);
     // Should check dst MAC bytes for 0xff patterns.
     let has_ff_word = insns.iter().any(|i| is_jeq(*i) && i.k == 0xffff_ffff);
-    assert!(has_ff_word, "'broadcast' should check for 0xffffffff in destination MAC");
+    assert!(
+        has_ff_word,
+        "'broadcast' should check for 0xffffffff in destination MAC"
+    );
 }
 
 /// Bare `multicast` keyword matches multicast bit in destination MAC.
@@ -1625,8 +1737,10 @@ fn net_classful_single_octet_infers_slash8() {
     let a = cbpf("net 10.0.0.0/8");
     assert_well_formed("net 10.0.0.0/8", &a);
     // Document the libpcap shorthand is not yet supported:
-    assert!(compile("net 10", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 10: single-octet classful notation is a libpcap parity gap");
+    assert!(
+        compile("net 10", LinkType::Ethernet, Target::Classic).is_err(),
+        "net 10: single-octet classful notation is a libpcap parity gap"
+    );
 }
 
 /// Classful network inference: `net 192.168` → /16.
@@ -1635,8 +1749,10 @@ fn net_classful_single_octet_infers_slash8() {
 fn net_classful_double_octet_infers_slash16() {
     let a = cbpf("net 192.168.0.0/16");
     assert_well_formed("net 192.168.0.0/16", &a);
-    assert!(compile("net 192.168", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 192.168: dotted-pair classful notation is a libpcap parity gap");
+    assert!(
+        compile("net 192.168", LinkType::Ethernet, Target::Classic).is_err(),
+        "net 192.168: dotted-pair classful notation is a libpcap parity gap"
+    );
 }
 
 /// Classful network inference: `net 10.0.1` → /24.
@@ -1645,8 +1761,10 @@ fn net_classful_double_octet_infers_slash16() {
 fn net_classful_triple_octet_infers_slash24() {
     let a = cbpf("net 10.0.1.0/24");
     assert_well_formed("net 10.0.1.0/24", &a);
-    assert!(compile("net 10.0.1", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 10.0.1: dotted-triple classful notation is a libpcap parity gap");
+    assert!(
+        compile("net 10.0.1", LinkType::Ethernet, Target::Classic).is_err(),
+        "net 10.0.1: dotted-triple classful notation is a libpcap parity gap"
+    );
 }
 
 /// `net <addr> mask <netmask>` explicit mask notation.
@@ -1654,7 +1772,10 @@ fn net_classful_triple_octet_infers_slash24() {
 fn net_explicit_mask_notation() {
     let a = cbpf("net 192.168.0.0 mask 255.255.0.0");
     let b = cbpf("net 192.168.0.0/16");
-    assert_eq!(a, b, "'net <addr> mask <netmask>' should equal CIDR notation");
+    assert_eq!(
+        a, b,
+        "'net <addr> mask <netmask>' should equal CIDR notation"
+    );
 }
 
 /// Non-contiguous mask is supported via explicit `mask` syntax.
@@ -1666,7 +1787,10 @@ fn net_non_contiguous_mask_notation() {
     assert_jumps_in_bounds("net 10.0.0.0 mask 255.0.255.0", &insns);
     // Mask 0xff00ff00 should appear as an AND instruction.
     let has_mask = insns.iter().any(|i| is_and_k(*i) && i.k == 0xff00_ff00);
-    assert!(has_mask, "non-contiguous mask should appear as AND 0xff00ff00");
+    assert!(
+        has_mask,
+        "non-contiguous mask should appear as AND 0xff00ff00"
+    );
 }
 
 // ── §15i `ip proto N` and `ip6 proto N` ──────────────────────────────────────
@@ -1675,10 +1799,10 @@ fn net_non_contiguous_mask_notation() {
 #[test]
 fn ip_proto_number_variants() {
     for (filter, proto) in [
-        ("ip proto 6",   6u32),
-        ("ip proto 17",  17),
-        ("ip proto 89",  89),   // OSPF
-        ("ip proto 41",  41),   // 6-in-4
+        ("ip proto 6", 6u32),
+        ("ip proto 17", 17),
+        ("ip proto 89", 89), // OSPF
+        ("ip proto 41", 41), // 6-in-4
     ] {
         let insns = cbpf(filter);
         assert_well_formed(filter, &insns);
@@ -1691,10 +1815,10 @@ fn ip_proto_number_variants() {
 #[test]
 fn ip6_proto_number_variants() {
     for (filter, nh) in [
-        ("ip6 proto 6",  6u32),
+        ("ip6 proto 6", 6u32),
         ("ip6 proto 17", 17),
-        ("ip6 proto 58", 58),   // ICMPv6
-        ("ip6 proto 43", 43),   // Routing header
+        ("ip6 proto 58", 58), // ICMPv6
+        ("ip6 proto 43", 43), // Routing header
     ] {
         let insns = cbpf(filter);
         assert_well_formed(filter, &insns);
@@ -1730,10 +1854,10 @@ fn src_or_dst_port_explicit_direction() {
 fn byte_access_all_size_variants() {
     // These are complete filters (with comparison operators):
     let filters = [
-        ("tcp[13] != 0",   "byte, no size"),
+        ("tcp[13] != 0", "byte, no size"),
         ("tcp[13:1] != 0", "explicit byte"),
-        ("tcp[0:2] != 0",  "halfword"),
-        ("ip[12:4] != 0",  "word from net layer"),
+        ("tcp[0:2] != 0", "halfword"),
+        ("ip[12:4] != 0", "word from net layer"),
     ];
     for (f, desc) in &filters {
         let insns = cbpf(f);
@@ -1741,8 +1865,10 @@ fn byte_access_all_size_variants() {
         assert_jumps_in_bounds(desc, &insns);
     }
     // Incomplete byte access (no comparison) is not a valid filter:
-    assert!(compile("tcp[13]", LinkType::Ethernet, Target::Classic).is_err(),
-        "bare byte access without comparison is not a valid filter");
+    assert!(
+        compile("tcp[13]", LinkType::Ethernet, Target::Classic).is_err(),
+        "bare byte access without comparison is not a valid filter"
+    );
 }
 
 /// All comparison operators work in byte access expressions.
@@ -1751,13 +1877,13 @@ fn byte_access_all_size_variants() {
 #[test]
 fn byte_access_all_comparison_operators() {
     let ops = [
-        ("ip[8] = 64",         "eq"),
-        ("ip[8] != 64",        "ne"),
-        ("ip[8] > 64",         "gt"),
-        ("ip[8] >= 64",        "ge"),
-        ("ip[8] < 64",         "lt"),
-        ("ip[8] <= 64",        "le"),
-        ("ip[8] & 0x0f != 0",  "bitand-with-comparison"),
+        ("ip[8] = 64", "eq"),
+        ("ip[8] != 64", "ne"),
+        ("ip[8] > 64", "gt"),
+        ("ip[8] >= 64", "ge"),
+        ("ip[8] < 64", "lt"),
+        ("ip[8] <= 64", "le"),
+        ("ip[8] & 0x0f != 0", "bitand-with-comparison"),
     ];
     for (f, desc) in &ops {
         let insns = cbpf(f);
@@ -1765,8 +1891,10 @@ fn byte_access_all_comparison_operators() {
         assert_jumps_in_bounds(desc, &insns);
     }
     // Incomplete: bit-and without trailing comparison is not valid:
-    assert!(compile("ip[8] & 0x0f", LinkType::Ethernet, Target::Classic).is_err(),
-        "ip[8] & 0x0f without comparison is not a valid filter");
+    assert!(
+        compile("ip[8] & 0x0f", LinkType::Ethernet, Target::Classic).is_err(),
+        "ip[8] & 0x0f without comparison is not a valid filter"
+    );
 }
 
 /// Byte access at the transport layer uses indirect loads.
@@ -1774,7 +1902,10 @@ fn byte_access_all_comparison_operators() {
 fn transport_byte_access_uses_indirect_load() {
     let insns = cbpf("tcp[0:2] != 0");
     let has_ind = insns.iter().any(|i| is_ld_ind(*i));
-    assert!(has_ind, "tcp[...] should use indirect load (X-relative): {insns:?}");
+    assert!(
+        has_ind,
+        "tcp[...] should use indirect load (X-relative): {insns:?}"
+    );
     let has_msh = insns.iter().any(|i| is_msh(*i));
     assert!(has_msh, "tcp[...] should set X via MSH: {insns:?}");
 }
@@ -1845,8 +1976,10 @@ fn ipv6_letter_first_double_colon() {
 fn ipv6_loopback_full_form() {
     // Full all-zero with trailing 1: pktbaffle lexer mis-parses this as MAC.
     // Document the gap — the address should be expressed as 2 x fully-qualified groups:
-    assert!(compile("host 0:0:0:0:0:0:0:1", LinkType::Ethernet, Target::Classic).is_err(),
-        "host 0:0:0:0:0:0:0:1: lexer confuses all-zero IPv6 segments with a MAC (known gap)");
+    assert!(
+        compile("host 0:0:0:0:0:0:0:1", LinkType::Ethernet, Target::Classic).is_err(),
+        "host 0:0:0:0:0:0:0:1: lexer confuses all-zero IPv6 segments with a MAC (known gap)"
+    );
     // The compressed form with enough non-zero segments does work:
     let insns = cbpf("host 2001:db8::1");
     assert_well_formed("host 2001:db8::1", &insns);
@@ -1858,9 +1991,10 @@ fn ipv6_host_generates_eight_segment_checks() {
     // 2001:db8::1 — check for 8 x jeq_k each matching a 16-bit segment.
     let insns = cbpf("host 2001:db8::1");
     // Count ldh (halfword) instructions — should have 8 loads per address check.
-    let ldh_count = insns.iter().filter(|i| {
-        is_ld_abs(**i) && (i.code & 0x18) == bpf::BPF_H
-    }).count();
+    let ldh_count = insns
+        .iter()
+        .filter(|i| is_ld_abs(**i) && (i.code & 0x18) == bpf::BPF_H)
+        .count();
     assert!(
         ldh_count >= 8,
         "IPv6 host filter should load at least 8 halfwords, got {ldh_count}"
@@ -1911,12 +2045,18 @@ fn inbound_outbound_return_errors() {
 #[test]
 fn ether_port_returns_error() {
     let result = compile("ether port 80", LinkType::Ethernet, Target::Classic);
-    assert!(result.is_err(), "ether port should fail (Ethernet has no ports)");
+    assert!(
+        result.is_err(),
+        "ether port should fail (Ethernet has no ports)"
+    );
 }
 
 /// A completely empty filter string is invalid.
 #[test]
 fn empty_filter_returns_error() {
     let result = compile("", LinkType::Ethernet, Target::Classic);
-    assert!(result.is_err(), "empty filter string should return an error");
+    assert!(
+        result.is_err(),
+        "empty filter string should return an error"
+    );
 }
