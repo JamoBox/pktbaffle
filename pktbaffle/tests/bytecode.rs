@@ -21,6 +21,7 @@ const LDH_ABS: u16 = 0x28; // BPF_LD | BPF_H | BPF_ABS
 const LDB_ABS: u16 = 0x30; // BPF_LD | BPF_B | BPF_ABS
 const LDW_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
 const LDH_IND: u16 = 0x48; // BPF_LD | BPF_H | BPF_IND
+const LDB_IND: u16 = 0x50; // BPF_LD | BPF_B | BPF_IND
 const LDX_MSH: u16 = 0xb1; // BPF_LDX | BPF_B | BPF_MSH
 const LD_LEN: u16 = 0x80; // BPF_LD | BPF_W | BPF_LEN
 const AND_K: u16 = 0x54; // BPF_ALU | BPF_AND | BPF_K
@@ -404,6 +405,33 @@ fn less_n_equals_len_le_n() {
 #[test]
 fn greater_n_equals_len_ge_n() {
     assert_eq!(eth("greater 1500"), eth("len >= 1500"));
+}
+
+// ── transport-layer byte access uses indirect load (issue #11) ────────────────
+
+// `tcp[0] = 8` must emit ldb [x + 14] (BPF_LD|BPF_B|BPF_IND), not ldb [14].
+// X holds the IP header length (loaded by MSH), so [x+14] resolves to the
+// first byte of the TCP header — not the first byte of the IP header.
+#[test]
+fn tcp_byte_access_uses_ldb_ind() {
+    let prog = eth("tcp[0] = 8");
+    // [0] ldxb 4*([14]&0xf)  — MSH loads IP IHL into X
+    // [1] ldb [x + 14]       — BPF_LD | BPF_B | BPF_IND  ← must NOT be LDB_ABS
+    // [2] jeq 8, jf→DROP
+    // [3] ACCEPT
+    // [4] DROP
+    assert_eq!(prog[0], insn(LDX_MSH, 0, 0, 14));
+    assert_eq!(
+        prog[1].code, LDB_IND,
+        "tcp[0] must use indirect byte load (ldb [x+k]), got code 0x{:02x}",
+        prog[1].code
+    );
+    assert_eq!(prog[1].k, 14, "indirect offset must be net_offset (14)");
+    assert_eq!(prog[2].code, JEQ_K);
+    assert_eq!(prog[2].k, 8);
+    assert_eq!(prog[3], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[4], insn(RET_K, 0, 0, DROP));
+    assert_eq!(prog.len(), 5);
 }
 
 // ── peephole optimizer wiring ────────────────────────────────────────────────

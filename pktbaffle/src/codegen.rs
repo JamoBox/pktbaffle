@@ -765,7 +765,7 @@ impl Codegen {
             (AccessSize::Byte, false) => Insn::ldb_abs(off),
             (AccessSize::Half, false) => Insn::ldh_abs(off),
             (AccessSize::Word, false) => Insn::ldw_abs(off),
-            (AccessSize::Byte, true) => Insn::ldb_abs(off), // BPF_IND byte is non-standard; use ABS
+            (AccessSize::Byte, true) => Insn::ldb_ind(off),
             (AccessSize::Half, true) => Insn::ldh_ind(off),
             (AccessSize::Word, true) => Insn::ldw_ind(off),
         };

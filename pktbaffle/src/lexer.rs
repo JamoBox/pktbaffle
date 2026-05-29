@@ -300,6 +300,28 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     }
                 }
             }
+            // Digit-first IPv6 (e.g. 2001:db8::1): MAC detection above didn't
+            // match, but a trailing ':' may still begin an IPv6 address.
+            // Speculatively extend through hex digits and colons; commit only
+            // when the candidate contains '::' or two or more colons.
+            if pos < len && bytes[pos] == b':' {
+                let mut tmp = pos;
+                while tmp < len && (bytes[tmp].is_ascii_hexdigit() || bytes[tmp] == b':') {
+                    tmp += 1;
+                }
+                let candidate = &src[start..tmp];
+                if candidate.contains("::") || candidate.chars().filter(|&c| c == ':').count() >= 2
+                {
+                    if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
+                        tokens.push(Spanned {
+                            token: Token::Ipv6(addr),
+                            offset: start,
+                        });
+                        pos = tmp;
+                        continue;
+                    }
+                }
+            }
             let raw = &src[start..pos];
             let tok = parse_numlike(raw, start)?;
             tokens.push(Spanned {
