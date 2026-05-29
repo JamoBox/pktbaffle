@@ -415,7 +415,13 @@ fn dedup_removes_consecutive_ldh_abs() {
     let ldh = Insn::ldh_abs(12);
     // [0] ldh[12]  [1] ldh[12] (dup)  [2] jeq jf=1→[4]  [3] ACCEPT  [4] DROP
     let jeq = insn(JEQ_K, 0, 1, 0x0800);
-    let mut insns = vec![ldh, ldh, jeq, insn(RET_K, 0, 0, ACCEPT), insn(RET_K, 0, 0, DROP)];
+    let mut insns = vec![
+        ldh,
+        ldh,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
     dedup_loads(&mut insns);
     // Second ldh removed; jump offsets must remain valid.
     assert_eq!(insns.len(), 4, "consecutive ldh[12] must be deduplicated");
@@ -430,7 +436,13 @@ fn dedup_removes_consecutive_ldh_abs() {
 fn dedup_removes_consecutive_ldb_abs() {
     let ldb = Insn::ldb_abs(23);
     let jeq = insn(JEQ_K, 0, 1, 6);
-    let mut insns = vec![ldb, ldb, jeq, insn(RET_K, 0, 0, ACCEPT), insn(RET_K, 0, 0, DROP)];
+    let mut insns = vec![
+        ldb,
+        ldb,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
     dedup_loads(&mut insns);
     assert_eq!(insns.len(), 4, "consecutive ldb[23] must be deduplicated");
     assert_eq!(insns[0], ldb);
