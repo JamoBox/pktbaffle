@@ -23,9 +23,11 @@ const LDW_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
 const LDH_IND: u16 = 0x48; // BPF_LD | BPF_H | BPF_IND
 const LDB_IND: u16 = 0x50; // BPF_LD | BPF_B | BPF_IND
 const LDX_MSH: u16 = 0xb1; // BPF_LDX | BPF_B | BPF_MSH
+const LDX_IMM: u16 = 0x01; // BPF_LDX | BPF_W | BPF_IMM
 const LD_LEN: u16 = 0x80; // BPF_LD | BPF_W | BPF_LEN
 const AND_K: u16 = 0x54; // BPF_ALU | BPF_AND | BPF_K
 const RSH_K: u16 = 0x74; // BPF_ALU | BPF_RSH | BPF_K
+const JA: u16 = 0x05; // BPF_JMP | BPF_JA
 const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
 const JGT_K: u16 = 0x25; // BPF_JMP | BPF_JGT | BPF_K
 const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
@@ -230,67 +232,330 @@ fn mpls_with_label_uses_rsh_12() {
 // ── port 80 bug fix ──────────────────────────────────────────────────────────
 
 // Critical regression guard: `port 80` with no proto qualifier must not treat
-// the TCP protocol-match shortcut as an ACCEPT jump.  The TCP jeq's jt field
-// must point to the MSH instruction (which loads the IP IHL), NOT to ACCEPT.
+// the TCP protocol-match shortcut as an ACCEPT jump. The TCP jeq's jt field
+// must point to the fragment check (ldh ip[6:2]), NOT to ACCEPT.
+//
+// New layout with IPv4+IPv6 dual-path and fragmentation guard (20 instructions):
+//  [0]  ldh[12]          — ethertype
+//  [1]  jeq 0x86dd jt→[10] — branch to IPv6 path
+//  [2]  jeq 0x0800 jf→DROP — IPv4 check
+//  [3]  ldb[23]          — IPv4 protocol
+//  [4]  jeq 6, jt=1      — TCP: skip [5] to [6]=frag check
+//  [5]  jeq 17 jf→DROP   — UDP check
+//  [6]  ldh[20]          — IP flags + fragment offset
+//  [7]  jset 0x1fff jt→DROP — non-first fragment → drop
+//  [8]  ldxb 4*([14]&0xf) — MSH: X = IHL*4
+//  [9]  ja → [14]        — skip IPv6 section
+//  [10] ldb[20]          — IPv6 next-header
+//  [11] jeq 6, jt=1      — TCP: skip [12] to [13]=ldx
+//  [12] jeq 17 jf→DROP   — UDP check
+//  [13] ldx #40          — X = IPv6 header length (fixed)
+//  [14] ldh[x+14]        — src port
+//  [15] jeq 80 jt→ACCEPT
+//  [16] ldh[x+16]        — dst port
+//  [17] jeq 80 jf→DROP
+//  [18] ACCEPT  [19] DROP
 #[test]
-fn port_no_proto_tcp_shortcut_resolves_to_msh_not_accept() {
+fn port_no_proto_tcp_shortcut_resolves_to_frag_check_not_accept() {
     let prog = eth("port 80");
-    // Expected layout:
-    //  [0]  ldh[12]          — IPv4 guard
-    //  [1]  jeq 0x0800       — jf→DROP
-    //  [2]  ldb[23]          — IP proto (14+9)
-    //  [3]  jeq 6, jt=1, jf=0  — TCP: jt skips [4] to [5]=MSH
-    //  [4]  jeq 17           — UDP: jf→DROP
-    //  [5]  ldxb 4*([14]&0xf) — MSH
-    //  [6]  ldh[x+14]        — src port
-    //  [7]  jeq 80, jt→ACCEPT
-    //  [8]  ldh[x+16]        — dst port
-    //  [9]  jeq 80, jf→DROP
-    //  [10] ACCEPT
-    //  [11] DROP
-    assert_eq!(prog[2], insn(LDB_ABS, 0, 0, 23));
-    assert_eq!(prog[3].code, JEQ_K);
-    assert_eq!(prog[3].k, 6);
-    // jt=1 means skip one instruction ([4]) to land at [5]=MSH, not ACCEPT.
-    assert_eq!(prog[3].jt, 1, "TCP shortcut must jump to MSH, not ACCEPT");
+    assert_eq!(prog.len(), 20, "port 80 must compile to 20 instructions");
+
+    // Ethertype section.
+    assert_eq!(prog[0], insn(LDH_ABS, 0, 0, 12));
+    assert_eq!(prog[1].code, JEQ_K);
+    assert_eq!(prog[1].k, 0x86dd);
+    assert_eq!(prog[2].code, JEQ_K);
+    assert_eq!(prog[2].k, 0x0800);
+
+    // IPv4 protocol check: TCP jeq (jt skips UDP check to land on frag check).
+    assert_eq!(prog[3], insn(LDB_ABS, 0, 0, 23));
     assert_eq!(prog[4].code, JEQ_K);
-    assert_eq!(prog[4].k, 17);
-    assert_eq!(prog[5], insn(LDX_MSH, 0, 0, 14));
-    assert_eq!(prog[6], insn(LDH_IND, 0, 0, 14));
-    assert_eq!(prog[7].code, JEQ_K);
-    assert_eq!(prog[7].k, 80);
-    assert_eq!(prog[8], insn(LDH_IND, 0, 0, 16));
-    assert_eq!(prog[9].code, JEQ_K);
-    assert_eq!(prog[9].k, 80);
-    assert_eq!(prog[10], insn(RET_K, 0, 0, ACCEPT));
-    assert_eq!(prog[11], insn(RET_K, 0, 0, DROP));
-    assert_eq!(prog.len(), 12);
+    assert_eq!(prog[4].k, 6);
+    assert_eq!(
+        prog[4].jt, 1,
+        "TCP shortcut must skip UDP check, not jump to ACCEPT"
+    );
+    assert_eq!(prog[5].code, JEQ_K);
+    assert_eq!(prog[5].k, 17);
+
+    // Fragmentation guard: ip[6:2] & 0x1fff != 0 → drop.
+    assert_eq!(prog[6], insn(LDH_ABS, 0, 0, 20)); // net_offset(14)+6=20
+    assert_eq!(prog[7].code, JSET_K);
+    assert_eq!(prog[7].k, 0x1fff);
+
+    // MSH and jump past IPv6 section.
+    assert_eq!(prog[8], insn(LDX_MSH, 0, 0, 14));
+    assert_eq!(prog[9].code, JA);
+
+    // IPv6 path: next-header at net_offset(14)+6=20.
+    assert_eq!(prog[10], insn(LDB_ABS, 0, 0, 20));
+    assert_eq!(prog[11].code, JEQ_K);
+    assert_eq!(prog[11].k, 6); // TCP
+    assert_eq!(prog[11].jt, 1, "IPv6 TCP shortcut must skip UDP check");
+    assert_eq!(prog[12].code, JEQ_K);
+    assert_eq!(prog[12].k, 17); // UDP
+    assert_eq!(prog[13], insn(LDX_IMM, 0, 0, 40)); // X = 40
+
+    // Port check (same indirect loads work for both IPv4 and IPv6 via X).
+    assert_eq!(prog[14], insn(LDH_IND, 0, 0, 14));
+    assert_eq!(prog[15].code, JEQ_K);
+    assert_eq!(prog[15].k, 80);
+    assert_eq!(prog[16], insn(LDH_IND, 0, 0, 16));
+    assert_eq!(prog[17].code, JEQ_K);
+    assert_eq!(prog[17].k, 80);
+    assert_eq!(prog[18], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[19], insn(RET_K, 0, 0, DROP));
 }
 
-// Same bug must not exist in portrange.
+// Same guard for portrange: TCP shortcut must not escape to ACCEPT.
 #[test]
-fn portrange_no_proto_tcp_shortcut_resolves_to_msh() {
+fn portrange_no_proto_tcp_shortcut_resolves_correctly() {
     let prog = eth("portrange 1024-65535");
-    // [3] is the TCP jeq; its jt must not be 0xff (unresolved to ACCEPT).
-    assert_eq!(prog[3].code, JEQ_K);
-    assert_eq!(prog[3].k, 6);
+    // IPv4 TCP jeq is now at index 4 (after ethertype+ipv6-branch+ipv4-check+ldb-proto).
+    assert_eq!(prog[4].code, JEQ_K);
+    assert_eq!(prog[4].k, 6);
     assert_ne!(
-        prog[3].jt, 0xff,
-        "TCP shortcut must be resolved to MSH, not left as 0xff"
+        prog[4].jt, 0xff,
+        "TCP shortcut must be resolved, not left as 0xff placeholder"
     );
-    // MSH must appear before the port range check.
+    // TCP jt must not jump to ACCEPT (second-to-last instruction).
+    let accept_idx = prog.len() - 2;
+    let tcp_target = 4 + 1 + prog[4].jt as usize;
+    assert_ne!(
+        tcp_target, accept_idx,
+        "TCP shortcut must not jump directly to ACCEPT"
+    );
+    // MSH must appear in the IPv4 path, before the port range check.
     let msh_pos = prog
         .iter()
         .position(|i| i.code == LDX_MSH)
-        .expect("MSH missing");
+        .expect("MSH missing from IPv4 path");
     assert!(
         msh_pos < prog.len() - 2,
         "MSH should appear before accept/drop"
     );
-    // TCP jt must resolve to the MSH instruction.
-    let tcp_idx = 3usize;
-    let target = tcp_idx + 1 + prog[tcp_idx].jt as usize;
-    assert_eq!(prog[target].code, LDX_MSH, "TCP jt must land on MSH");
+    // ldx_imm(40) must appear in the IPv6 path.
+    assert!(
+        prog.iter().any(|i| i.code == LDX_IMM && i.k == 40),
+        "IPv6 path must load X=40"
+    );
+}
+
+// ── proto-qualified port parsing (no duplicate prerequisite checks) ──────────
+
+// `tcp port 80` must not duplicate the IPv4+TCP guard (parser fix), and must
+// now emit both an IPv4 frag check and an IPv6 path (codegen fix):
+//
+//  [0]  ldh[12]              ethertype
+//  [1]  jeq 0x86dd jt→[9]   branch to IPv6 path
+//  [2]  jeq 0x0800 jf→DROP   IPv4 check
+//  [3]  ldb[23]              IPv4 protocol
+//  [4]  jeq 6 jf→DROP        TCP only
+//  [5]  ldh[20]              ip[6:2] flags + fragment offset
+//  [6]  jset 0x1fff jt→DROP  non-first fragment → drop
+//  [7]  ldxb 4*([14]&0xf)    MSH: X = IHL*4
+//  [8]  ja → [12]            skip IPv6 section
+//  [9]  ldb[20]              IPv6 next-header
+//  [10] jeq 6 jf→DROP        TCP only
+//  [11] ldx #40              X = IPv6 header length (fixed)
+//  [12] ldh[x+14]            src port
+//  [13] jeq 80 jt→ACCEPT
+//  [14] ldh[x+16]            dst port
+//  [15] jeq 80 jf→DROP
+//  [16] ACCEPT  [17] DROP
+#[test]
+fn tcp_port_emits_ethertype_check_exactly_once() {
+    let prog = eth("tcp port 80");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in tcp port 80"
+    );
+    assert_eq!(
+        prog.len(),
+        18,
+        "tcp port 80 must compile to 18 instructions"
+    );
+}
+
+#[test]
+fn tcp_port_80_exact_bytecode() {
+    let prog = eth("tcp port 80");
+    assert_eq!(prog.len(), 18);
+
+    // Ethertype: load once, branch to IPv6 or check for IPv4.
+    assert_eq!(prog[0], insn(LDH_ABS, 0, 0, 12));
+    assert_eq!(prog[1].code, JEQ_K);
+    assert_eq!(prog[1].k, 0x86dd); // IPv6 ethertype
+    assert_eq!(prog[2].code, JEQ_K);
+    assert_eq!(prog[2].k, 0x0800); // IPv4 ethertype
+
+    // IPv4 path: protocol + frag guard + MSH + skip.
+    assert_eq!(prog[3], insn(LDB_ABS, 0, 0, 23)); // net_offset(14)+9=23
+    assert_eq!(prog[4].code, JEQ_K);
+    assert_eq!(prog[4].k, 6); // TCP
+    assert_eq!(prog[5], insn(LDH_ABS, 0, 0, 20)); // net_offset(14)+6=20
+    assert_eq!(prog[6].code, JSET_K);
+    assert_eq!(prog[6].k, 0x1fff); // fragment offset bits
+    assert_eq!(prog[7], insn(LDX_MSH, 0, 0, 14));
+    assert_eq!(prog[8].code, JA); // jump over IPv6 section
+
+    // IPv6 path: next-header check + load fixed header length.
+    assert_eq!(prog[9], insn(LDB_ABS, 0, 0, 20)); // net_offset(14)+6=20
+    assert_eq!(prog[10].code, JEQ_K);
+    assert_eq!(prog[10].k, 6); // TCP next-header
+    assert_eq!(prog[11], insn(LDX_IMM, 0, 0, 40)); // X = 40 (IPv6 hdr len)
+
+    // Port check (same indirect loads for both IPv4 via MSH and IPv6 via X=40).
+    assert_eq!(prog[12], insn(LDH_IND, 0, 0, 14));
+    assert_eq!(prog[13].code, JEQ_K);
+    assert_eq!(prog[13].k, 80);
+    assert_eq!(prog[14], insn(LDH_IND, 0, 0, 16));
+    assert_eq!(prog[15].code, JEQ_K);
+    assert_eq!(prog[15].k, 80);
+    assert_eq!(prog[16], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[17], insn(RET_K, 0, 0, DROP));
+}
+
+#[test]
+fn udp_port_emits_ethertype_check_exactly_once() {
+    let prog = eth("udp port 53");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in udp port 53"
+    );
+    assert_eq!(
+        prog.len(),
+        18,
+        "udp port 53 must compile to 18 instructions"
+    );
+}
+
+#[test]
+fn sctp_port_emits_ethertype_check_exactly_once() {
+    let prog = eth("sctp port 9000");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in sctp port 9000"
+    );
+}
+
+// Directed forms: `src tcp port`, `dst udp port`.
+// Prereqs are the same 12-instruction dual-path block; only the port check shrinks.
+#[test]
+fn src_tcp_port_emits_single_ethertype_check() {
+    let prog = eth("src tcp port 80");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(eth_loads, 1);
+    // 12 prereq + 2 port (src only) + 2 terminals = 16
+    assert_eq!(prog.len(), 16);
+}
+
+#[test]
+fn dst_udp_port_emits_single_ethertype_check() {
+    let prog = eth("dst udp port 53");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(eth_loads, 1);
+    assert_eq!(prog.len(), 16);
+}
+
+// Proto-qualified portrange forms.
+#[test]
+fn tcp_portrange_emits_ethertype_check_exactly_once() {
+    let prog = eth("tcp portrange 1024-65535");
+    let eth_loads = prog
+        .iter()
+        .filter(|i| i.code == LDH_ABS && i.k == 12)
+        .count();
+    assert_eq!(
+        eth_loads, 1,
+        "ethertype check must appear exactly once in tcp portrange"
+    );
+}
+
+#[test]
+fn src_tcp_portrange_is_valid() {
+    // Before the fix, `src tcp portrange N-M` would fail to parse because
+    // parse_after_dir only accepted `port`, not `portrange`, after a proto keyword.
+    let prog = eth("src tcp portrange 1024-65535");
+    assert_eq!(
+        prog.last().unwrap(),
+        &insn(RET_K, 0, 0, DROP),
+        "program must end with DROP sentinel"
+    );
+}
+
+// ── fragmentation and IPv6 structural guards ─────────────────────────────────
+
+// `tcp port 80` must include a fragment-offset check in the IPv4 path.
+// BPF: jset #0x1fff → drop (non-first fragment has non-zero fragment offset).
+#[test]
+fn tcp_port_ipv4_path_has_frag_guard() {
+    let prog = eth("tcp port 80");
+    // The IPv4 frag check is at index 6: jset 0x1fff jt→DROP
+    assert_eq!(prog[6].code, JSET_K, "frag guard must be jset");
+    assert_eq!(prog[6].k, 0x1fff, "frag guard must mask ip[6:2] & 0x1fff");
+    // jt must be non-zero (resolves to DROP) — packet is fragmented → fail.
+    assert_ne!(prog[6].jt, 0, "jset jt must jump to DROP on fragment");
+}
+
+// `tcp port 80` must include an IPv6 path that sets X = 40.
+#[test]
+fn tcp_port_ipv6_path_loads_fixed_header_length() {
+    let prog = eth("tcp port 80");
+    // IPv6 path: ldb next-header [9], jeq 6 [10], ldx #40 [11].
+    assert_eq!(prog[11], insn(LDX_IMM, 0, 0, 40), "IPv6 path must set X=40");
+    // IPv6 branch at [1] must jump to instruction 9.
+    let ipv6_target = 1 + 1 + prog[1].jt as usize;
+    assert_eq!(
+        ipv6_target, 9,
+        "jeq 0x86dd jt must branch to IPv6 path start"
+    );
+}
+
+// `port 80` (no proto qualifier) must also have both frag guard and IPv6 path.
+#[test]
+fn port_no_proto_has_frag_guard_and_ipv6_path() {
+    let prog = eth("port 80");
+    assert!(
+        prog.iter().any(|i| i.code == JSET_K && i.k == 0x1fff),
+        "port 80 must include a fragment-offset guard"
+    );
+    assert!(
+        prog.iter().any(|i| i.code == LDX_IMM && i.k == 40),
+        "port 80 must include an IPv6 path that sets X=40"
+    );
+}
+
+// The JA (unconditional jump) that bridges the IPv4 and IPv6 paths must
+// correctly skip the entire IPv6 section and land on the port check.
+#[test]
+fn tcp_port_ipv4_ja_resolves_to_port_check() {
+    let prog = eth("tcp port 80");
+    // JA is at index 8; port check starts at index 12.
+    assert_eq!(
+        prog[8].code, JA,
+        "IPv4 path must end with ja to skip IPv6 section"
+    );
+    let ja_target = 8 + 1 + prog[8].k as usize;
+    assert_eq!(ja_target, 12, "JA must jump to port check start at [12]");
 }
 
 // ── equivalence: named synonyms produce identical programs ──────────────────

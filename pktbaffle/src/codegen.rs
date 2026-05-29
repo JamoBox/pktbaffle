@@ -536,38 +536,96 @@ impl Codegen {
         Ok(p)
     }
 
-    /// Emit the prerequisites for a port filter: IP guard + optional proto
-    /// check + MSH to load IP header length into X.
+    /// Emit prerequisites for a port/portrange filter.
+    ///
+    /// On return X holds the L4 header offset relative to `net_offset`:
+    /// IHL*4 for IPv4 packets, 40 for IPv6 packets. The fall-through path
+    /// leads directly into the port-number check. Failure patches are set for
+    /// wrong ethertype, wrong protocol, or a non-first IPv4 fragment.
+    ///
+    /// For Ethernet/SLL the emitted layout is:
+    ///   [ldh ethertype] [jeq 0x86dd → ipv6] [jeq 0x0800 jf→FAIL]
+    ///   — IPv4 path: ldb proto, proto check, ldh frag, jset 0x1fff→FAIL, ldxb MSH, ja→port
+    ///   — IPv6 path: ldb next-header, nh check, ldx #40
+    ///   — port check (fall-through from both paths)
     fn emit_port_prereqs(&mut self, proto: Option<Proto>) -> Result<Patches> {
-        let mut p = self.ip4_guard()?;
-        let proto_off = self.link.net_offset() + 9;
+        let mut p = Patches::default();
+        let net_off = self.link.net_offset();
+        let ip4_proto_off = net_off + 9; // IP protocol byte
+        let ip4_frag_off = net_off + 6; // IP flags + fragment offset (ip[6:2])
+        let ip6_nh_off = net_off + 6; // IPv6 next-header (byte 6 of IPv6 header)
 
+        if let Some(ether_off) = self.link.ether_proto_offset() {
+            // Load ethertype once; IPv6 branches away, IPv4 check falls through.
+            self.push(Insn::ldh_abs(ether_off));
+            let i_is_ip6 = self.push(Insn::jeq_k(0x86dd, 0xff, 0)); // jt → IPv6 (patched below)
+            let i_is_ip4 = self.push(Insn::jeq_k(0x0800, 0, 0xff)); // jf → FAIL
+            p.failure.push(Patch::Jf(i_is_ip4));
+
+            // ── IPv4 path ──────────────────────────────────────────────────────
+            self.push(Insn::ldb_abs(ip4_proto_off));
+            self.emit_l4_proto_check(proto, &mut p.failure)?;
+
+            // Non-first fragments lack the L4 header at the expected offset.
+            self.push(Insn::ldh_abs(ip4_frag_off));
+            let i_frag = self.push(Insn::jset_k(0x1fff, 0xff, 0)); // jt → FAIL
+            p.failure.push(Patch::Jt(i_frag));
+
+            self.push(Insn::ldx_msh(net_off)); // X = IHL * 4
+            let ja_skip_ip6 = self.push(Insn::ja(0)); // jump over IPv6 section (patched below)
+
+            // ── IPv6 path ──────────────────────────────────────────────────────
+            let ip6_start = self.insns.len();
+            self.resolve(Patch::Jt(i_is_ip6), ip6_start);
+
+            self.push(Insn::ldb_abs(ip6_nh_off));
+            self.emit_l4_proto_check(proto, &mut p.failure)?;
+            self.push(Insn::ldx_imm(40)); // IPv6 header is always 40 bytes
+
+            // Both paths converge here; resolve IPv4 JA to this position.
+            let port_check_start = self.insns.len();
+            self.resolve(Patch::Ja(ja_skip_ip6), port_check_start);
+        } else {
+            // RawIp: always IPv4, no ethertype check, no IPv6.
+            self.push(Insn::ldb_abs(ip4_proto_off));
+            self.emit_l4_proto_check(proto, &mut p.failure)?;
+            self.push(Insn::ldh_abs(ip4_frag_off));
+            let i_frag = self.push(Insn::jset_k(0x1fff, 0xff, 0));
+            p.failure.push(Patch::Jt(i_frag));
+            self.push(Insn::ldx_msh(net_off));
+        }
+
+        Ok(p)
+    }
+
+    /// Emit L4 protocol match against A (which must already be loaded).
+    /// For `None`, accepts TCP (6) or UDP (17); the TCP jeq's jt is resolved
+    /// immediately to jump past the UDP check so it doesn't leak into p.success.
+    fn emit_l4_proto_check(
+        &mut self,
+        proto: Option<Proto>,
+        failure: &mut Vec<Patch>,
+    ) -> Result<()> {
         match proto {
             Some(Proto::Tcp) => {
-                let q = self.check_byte(proto_off, 6);
-                p.failure.extend(q.failure);
+                let i = self.push(Insn::jeq_k(6, 0, 0xff));
+                failure.push(Patch::Jf(i));
             }
             Some(Proto::Udp) => {
-                let q = self.check_byte(proto_off, 17);
-                p.failure.extend(q.failure);
+                let i = self.push(Insn::jeq_k(17, 0, 0xff));
+                failure.push(Patch::Jf(i));
             }
             Some(Proto::Sctp) => {
-                let q = self.check_byte(proto_off, 132);
-                p.failure.extend(q.failure);
+                let i = self.push(Insn::jeq_k(132, 0, 0xff));
+                failure.push(Patch::Jf(i));
             }
             None => {
-                // Accept TCP (6) or UDP (17).
-                self.push(Insn::ldb_abs(proto_off));
-                let i_tcp = self.push(Insn::jeq_k(6, 0xff, 0)); // jt skips UDP check
+                // Accept TCP (6) or UDP (17): jt on TCP shortcut jumps past UDP check.
+                let i_tcp = self.push(Insn::jeq_k(6, 0xff, 0));
                 let i_udp = self.push(Insn::jeq_k(17, 0, 0xff));
-                p.failure.push(Patch::Jf(i_udp));
-                // Resolve TCP jt now so it jumps to MSH (not to ACCEPT).
-                // Without this, the jt patch would leak into p.success and bypass
-                // the port number check entirely.
-                let msh_idx = self.insns.len();
-                self.push(Insn::ldx_msh(self.link.net_offset()));
-                self.resolve(Patch::Jt(i_tcp), msh_idx);
-                return Ok(p);
+                failure.push(Patch::Jf(i_udp));
+                let after = self.insns.len();
+                self.resolve(Patch::Jt(i_tcp), after);
             }
             Some(pr) => {
                 return Err(Error::CodegenError {
@@ -575,10 +633,7 @@ impl Codegen {
                 });
             }
         }
-
-        // Load IP IHL into X via BPF_MSH.
-        self.push(Insn::ldx_msh(self.link.net_offset()));
-        Ok(p)
+        Ok(())
     }
 
     // ── Ethernet host ─────────────────────────────────────────────────────────
