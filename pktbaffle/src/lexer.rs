@@ -310,7 +310,8 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
-                if candidate.contains("::") || candidate.chars().filter(|&c| c == ':').count() >= 2 {
+                if candidate.contains("::") || candidate.chars().filter(|&c| c == ':').count() >= 2
+                {
                     if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
                         tokens.push(Spanned {
                             token: Token::Ipv6(addr),
