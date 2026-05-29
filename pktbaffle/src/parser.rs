@@ -471,8 +471,14 @@ impl Parser<'_> {
             }
             Some(Token::Proto) => {
                 self.advance();
-                let n = self.parse_u32()?;
-                Ok(Primitive::EtherProto(n as u16))
+                let ethertype = match self.cur_tok() {
+                    Some(Token::Ip)   => { self.advance(); 0x0800 }
+                    Some(Token::Ip6)  => { self.advance(); 0x86dd }
+                    Some(Token::Arp)  => { self.advance(); 0x0806 }
+                    Some(Token::Rarp) => { self.advance(); 0x8035 }
+                    _ => self.parse_u32()? as u16,
+                };
+                Ok(Primitive::EtherProto(ethertype))
             }
             Some(Token::Ip)   => { self.advance(); Ok(Primitive::EtherProto(0x0800)) }
             Some(Token::Ip6)  => { self.advance(); Ok(Primitive::EtherProto(0x86dd)) }
