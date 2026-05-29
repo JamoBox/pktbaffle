@@ -180,6 +180,27 @@ fn byte_access_ip_ttl() {
     last_two_are_ret(&p);
 }
 
+// tcp[0:2] range syntax without spaces (issue #10 — greedy colon lexing)
+#[test]
+fn byte_range_no_spaces_compiles() {
+    // `tcp[0:2]` is identical in meaning to `tcp[0 : 2]`; both must compile.
+    let p_compact = eth_prog("tcp[0:2] = 8");
+    let p_spaced = eth_prog("tcp[0 : 2] = 8");
+    last_two_are_ret(&p_compact);
+    assert_eq!(
+        p_compact.instructions(),
+        p_spaced.instructions(),
+        "compact and spaced range syntax must produce identical bytecode"
+    );
+}
+
+#[test]
+fn byte_range_various_no_spaces() {
+    // A few representative range sizes to make sure the fix is general.
+    eth_prog("ip[6:2] & 0x1fff != 0"); // IP fragment offset
+    eth_prog("tcp[0:4] = 0"); // first 4 bytes of TCP header
+}
+
 // ── Named field constants ─────────────────────────────────────────────────────
 
 #[test]

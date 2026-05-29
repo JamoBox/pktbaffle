@@ -23,7 +23,10 @@ pub fn dedup_loads(insns: &mut Vec<Insn>) {
         // between the two; the jump-target check would require a full pass
         // and is deferred.  For now, only elide if the two are truly adjacent
         // with identical codes and keys, and neither has non-zero jt/jf.
-        let is_load = |insn: Insn| (insn.code & 0xf8) == load_mask;
+        //
+        // Mask 0xe7 clears the size bits (3–4), so ldw/ldh/ldb ABS are all
+        // recognised as absolute loads (0xf8 would only match ldw).
+        let is_load = |insn: Insn| (insn.code & 0xe7) == load_mask;
         if is_load(cur)
             && is_load(nxt)
             && cur.code == nxt.code
@@ -45,24 +48,31 @@ pub fn dedup_loads(insns: &mut Vec<Insn>) {
 ///
 /// Classic BPF jumps are forward-only and relative; an offset `o` at
 /// instruction index `src` means "skip `o` instructions" (target = src + 1 + o).
-/// If we remove the instruction at `removed_idx`, any jump whose target was
-/// beyond `removed_idx` must be decremented.
+/// If we remove the instruction at `removed_idx`, any jump whose source is
+/// *before* `removed_idx` and whose target is *at or after* `removed_idx` must
+/// have its offset decremented by 1.  Jumps whose source is at or after
+/// `removed_idx` had both source and target shift left by 1, so their relative
+/// offsets are unchanged and must not be touched.
 fn adjust_jumps(insns: &mut [Insn], removed_idx: usize) {
     let bpf_jmp = 0x05u16;
     for (src, insn) in insns.iter_mut().enumerate() {
         if (insn.code & 0x07) != bpf_jmp {
             continue;
         }
+        // Jumps at or after the removed index moved together with their targets.
+        if src >= removed_idx {
+            continue;
+        }
         let adjust = |field: &mut u8, src: usize| {
             let target = src + 1 + *field as usize;
-            if target > removed_idx {
+            if target >= removed_idx {
                 *field -= 1;
             }
         };
         let is_ja = (insn.code & 0xf0) == 0x00; // BPF_JA
         if is_ja {
             let target = src + 1 + insn.k as usize;
-            if target > removed_idx {
+            if target >= removed_idx {
                 insn.k -= 1;
             }
         } else {

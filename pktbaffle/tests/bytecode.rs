@@ -7,6 +7,7 @@
 //! Opcode constants are computed from the BPF building blocks in bpf.rs.
 
 use pktbaffle::bpf::Insn;
+use pktbaffle::optimizer::dedup_loads;
 use pktbaffle::{compile, LinkType, Target};
 
 // ── derived opcode constants ─────────────────────────────────────────────────
@@ -431,4 +432,60 @@ fn tcp_byte_access_uses_ldb_ind() {
     assert_eq!(prog[3], insn(RET_K, 0, 0, ACCEPT));
     assert_eq!(prog[4], insn(RET_K, 0, 0, DROP));
     assert_eq!(prog.len(), 5);
+}
+
+// ── peephole optimizer wiring ────────────────────────────────────────────────
+
+// dedup_loads must remove a consecutive identical ldh (halfword) load.
+// This fails before the mask fix because is_load() does not recognise LDH_ABS.
+#[test]
+fn dedup_removes_consecutive_ldh_abs() {
+    let ldh = Insn::ldh_abs(12);
+    // [0] ldh[12]  [1] ldh[12] (dup)  [2] jeq jf=1→[4]  [3] ACCEPT  [4] DROP
+    let jeq = insn(JEQ_K, 0, 1, 0x0800);
+    let mut insns = vec![
+        ldh,
+        ldh,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
+    dedup_loads(&mut insns);
+    // Second ldh removed; jump offsets must remain valid.
+    assert_eq!(insns.len(), 4, "consecutive ldh[12] must be deduplicated");
+    assert_eq!(insns[0], ldh);
+    assert_eq!(insns[1], jeq);
+    assert_eq!(insns[2], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(insns[3], insn(RET_K, 0, 0, DROP));
+}
+
+// dedup_loads must also remove consecutive identical ldb (byte) loads.
+#[test]
+fn dedup_removes_consecutive_ldb_abs() {
+    let ldb = Insn::ldb_abs(23);
+    let jeq = insn(JEQ_K, 0, 1, 6);
+    let mut insns = vec![
+        ldb,
+        ldb,
+        jeq,
+        insn(RET_K, 0, 0, ACCEPT),
+        insn(RET_K, 0, 0, DROP),
+    ];
+    dedup_loads(&mut insns);
+    assert_eq!(insns.len(), 4, "consecutive ldb[23] must be deduplicated");
+    assert_eq!(insns[0], ldb);
+    assert_eq!(insns[1], jeq);
+}
+
+// After dedup_loads is wired into compile(), compiling tcp and port 80 must
+// succeed and produce a valid program (regression guard — the optimizer must
+// not corrupt jump offsets).
+#[test]
+fn tcp_and_port_80_compiles_and_has_correct_terminals() {
+    let prog = eth("tcp and port 80");
+    // Program must end with ACCEPT then DROP.
+    let n = prog.len();
+    assert!(n >= 2, "program must have at least two instructions");
+    assert_eq!(prog[n - 2], insn(RET_K, 0, 0, ACCEPT));
+    assert_eq!(prog[n - 1], insn(RET_K, 0, 0, DROP));
 }

@@ -262,11 +262,43 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
         // ── numeric / IPv4 / MAC starts with a digit ─────────────────────────
         if bytes[pos].is_ascii_digit() {
             let start = pos;
-            // Consume digits, dots, and colons (for MACs).
-            while pos < len
-                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'.' || bytes[pos] == b':')
-            {
+            // Consume alphanumeric and dots, but NOT colons.  A colon after a
+            // number is usually the range separator in byte-access syntax
+            // (e.g. tcp[0:2]) and must not be greedily consumed here.
+            while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'.') {
                 pos += 1;
+            }
+            // Digit-starting MACs (e.g. 00:11:22:33:44:55) still need colon
+            // support.  Speculatively extend when followed by exactly five
+            // ":XX" segments and the whole thing parses as a MAC.
+            if pos < len && bytes[pos] == b':' {
+                let mut tmp = pos;
+                let mut ok = true;
+                for _ in 0..5 {
+                    if tmp >= len || bytes[tmp] != b':' {
+                        ok = false;
+                        break;
+                    }
+                    tmp += 1;
+                    let seg_start = tmp;
+                    while tmp < len && bytes[tmp].is_ascii_hexdigit() {
+                        tmp += 1;
+                    }
+                    if tmp == seg_start || tmp - seg_start > 2 {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    if let Some(mac) = parse_mac(&src[start..tmp]) {
+                        tokens.push(Spanned {
+                            token: Token::Mac(mac),
+                            offset: start,
+                        });
+                        pos = tmp;
+                        continue;
+                    }
+                }
             }
             let raw = &src[start..pos];
             let tok = parse_numlike(raw, start)?;
@@ -357,6 +389,12 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
         let addr_part = raw.split('/').next().unwrap();
         if let Ok(addr) = addr_part.parse::<std::net::Ipv4Addr>() {
             return Ok(Token::Ipv4(addr.octets()));
+        }
+    }
+    // IPv6 (contains "::" or two or more colons)
+    if raw.contains("::") || raw.chars().filter(|&c| c == ':').count() >= 2 {
+        if let Ok(addr) = raw.parse::<std::net::Ipv6Addr>() {
+            return Ok(Token::Ipv6(addr));
         }
     }
     // MAC (five colons)
@@ -468,5 +506,42 @@ fn keyword_or_ident(s: &str) -> Token {
         "icmp-maskreq" => Token::Num(17),
         "icmp-maskreply" => Token::Num(18),
         s => Token::Ident(s.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv6_digit_first_double_colon() {
+        // 2001:db8::1 starts with a digit — the bug caused a LexError here.
+        let tokens = lex("2001:db8::1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_digit_first_full_address() {
+        let tokens = lex("2001:0db8:0000:0000:0000:0000:0000:0001").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_letter_first_still_works() {
+        // fe80::1 starts with a letter; this path already worked before the fix.
+        let tokens = lex("fe80::1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_in_host_filter() {
+        // Digit-first IPv6 used inside a filter expression.
+        let tokens = lex("host 2001:db8::1").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token, Token::Host);
+        assert_eq!(tokens[1].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
     }
 }
