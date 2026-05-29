@@ -7,8 +7,8 @@
 //! 4. Logical combinators (AND, OR, NOT) produce non-empty programs.
 
 use pktbaffle::ebpf::{
-    Insn, BPF_ALU64, BPF_EXIT, BPF_JGT, BPF_JMP, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV, BPF_W, BPF_X,
-    R1, R2, R3, XDP_DROP, XDP_PASS,
+    Insn, BPF_ALU64, BPF_EXIT, BPF_JGT, BPF_JMP, BPF_JNE, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV,
+    BPF_W, BPF_X, R1, R2, R3, XDP_DROP, XDP_PASS,
 };
 use pktbaffle::{compile, LinkType, Target};
 
@@ -312,4 +312,111 @@ fn extended_program_has_no_classic() {
     let prog = compile("tcp", LinkType::Ethernet, Target::Extended).unwrap();
     assert!(prog.as_extended().is_some());
     assert!(prog.as_classic().is_none());
+}
+
+// ── IPv6 dual-stack port filters (issue #12) ──────────────────────────────────
+
+// tcp port 80 must reference the IPv6 ethertype (0x86dd) somewhere in its
+// instruction stream, proving that an IPv6 path is generated.
+#[test]
+fn tcp_port_has_ipv6_path() {
+    let prog = ebpf_eth("tcp port 80");
+    let has_ipv6 = prog.iter().any(|i| i.imm == 0x86dd);
+    assert!(
+        has_ipv6,
+        "tcp port 80 must include an IPv6 path (no imm == 0x86dd found)"
+    );
+}
+
+// udp port 53 must also carry an IPv6 path.
+#[test]
+fn udp_port_has_ipv6_path() {
+    let prog = ebpf_eth("udp port 53");
+    let has_ipv6 = prog.iter().any(|i| i.imm == 0x86dd);
+    assert!(
+        has_ipv6,
+        "udp port 53 must include an IPv6 path (no imm == 0x86dd found)"
+    );
+}
+
+// ip6 and tcp port 80 must NOT contain a JNE-imm(0x0800) instruction.
+// Such an instruction forces ethertype == IPv4, contradicting the outer ip6 guard
+// and making the filter drop every IPv6 packet.
+#[test]
+fn ip6_and_tcp_port_no_ipv4_guard() {
+    let jne_k = BPF_JMP | BPF_JNE | BPF_K;
+    let prog = ebpf_eth("ip6 and tcp port 80");
+    let bad = prog
+        .iter()
+        .filter(|i| i.code == jne_k && i.imm == 0x0800)
+        .count();
+    assert_eq!(
+        bad,
+        0,
+        "ip6 and tcp port 80 must not emit jne 0x0800; found {bad} such instruction(s)"
+    );
+}
+
+// ip6 and udp port 53 — same invariant.
+#[test]
+fn ip6_and_udp_port_no_ipv4_guard() {
+    let jne_k = BPF_JMP | BPF_JNE | BPF_K;
+    let prog = ebpf_eth("ip6 and udp port 53");
+    let bad = prog
+        .iter()
+        .filter(|i| i.code == jne_k && i.imm == 0x0800)
+        .count();
+    assert_eq!(
+        bad,
+        0,
+        "ip6 and udp port 53 must not emit jne 0x0800; found {bad} such instruction(s)"
+    );
+}
+
+// ip6 and portrange 1024-65535 — same invariant.
+#[test]
+fn ip6_and_portrange_no_ipv4_guard() {
+    let jne_k = BPF_JMP | BPF_JNE | BPF_K;
+    let prog = ebpf_eth("ip6 and portrange 1024-65535");
+    let bad = prog
+        .iter()
+        .filter(|i| i.code == jne_k && i.imm == 0x0800)
+        .count();
+    assert_eq!(
+        bad,
+        0,
+        "ip6 and portrange must not emit jne 0x0800; found {bad} such instruction(s)"
+    );
+}
+
+// ip6 and tcp port 80 must produce a structurally valid program.
+#[test]
+fn ip6_and_tcp_port_compiles() {
+    let prog = ebpf_eth("ip6 and tcp port 80");
+    assert!(prog.len() > 8, "ip6 and tcp port 80: program too short");
+    assert!(
+        count_bounds_checks(&prog) >= 2,
+        "ip6 and tcp port 80 must have at least 2 bounds checks"
+    );
+}
+
+// ip6 and udp port 53 compiles.
+#[test]
+fn ip6_and_udp_port_compiles() {
+    let prog = ebpf_eth("ip6 and udp port 53");
+    assert!(prog.len() > 8, "ip6 and udp port 53: program too short");
+}
+
+// ip6 and port 80 (no proto qualifier) compiles.
+#[test]
+fn ip6_and_port_no_proto_compiles() {
+    let prog = ebpf_eth("ip6 and port 80");
+    assert!(prog.len() > 8, "ip6 and port 80: program too short");
+}
+
+// ip6 and portrange 1024-65535 compiles.
+#[test]
+fn ip6_and_portrange_compiles() {
+    let prog = ebpf_eth("ip6 and portrange 1024-65535");
+    assert!(prog.len() > 8, "ip6 and portrange: program too short");
 }
