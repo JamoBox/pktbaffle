@@ -171,6 +171,7 @@ impl Parser<'_> {
                     | Token::Ipv4(_)
                     | Token::Ipv6(_)
                     | Token::Num(_)
+                    | Token::LBracket
             )
         )
     }
@@ -447,6 +448,9 @@ impl Parser<'_> {
                     dir: Dir::SrcOrDst,
                 })
             }
+
+            // ── raw link-layer byte access: [offset:size] op value ───────────
+            Some(Token::LBracket) => self.parse_byte_access(Layer::Raw),
 
             tok => Err(self.err(format!(
                 "unexpected token {:?} — expected a filter primitive",

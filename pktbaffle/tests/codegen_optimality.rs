@@ -2152,3 +2152,51 @@ fn pppoes_out_of_range_session_id_returns_error() {
         "pppoes 65536 should return an error (session ID exceeds 0xffff)"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §15f Raw link-layer byte access (`[offset:size]` without `ether` prefix)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Raw link-layer byte access `[0:1] & 1 != 0` compiles on Ethernet.
+/// The bare `[` form is syntactic sugar for `ether[...]`.
+#[test]
+fn raw_byte_access_multicast_compiles() {
+    let _ = cbpf("[0:1] & 1 != 0");
+}
+
+/// `[0:1] & 1 != 0` should produce the same BPF as `ether[0:1] & 1 != 0`.
+#[test]
+fn raw_byte_access_equals_ether_prefix_form() {
+    let a = cbpf("[0:1] & 1 != 0");
+    let b = cbpf("ether[0:1] & 1 != 0");
+    assert_eq!(
+        a, b,
+        "'[0:1] & 1 != 0' must produce the same BPF as 'ether[0:1] & 1 != 0'"
+    );
+}
+
+/// `[12:2] = 0x0800` should produce the same BPF as `ether[12:2] = 0x0800`.
+#[test]
+fn raw_byte_access_ethertype_equals_ether_prefix_form() {
+    let a = cbpf("[12:2] = 0x0800");
+    let b = cbpf("ether[12:2] = 0x0800");
+    assert_eq!(
+        a, b,
+        "'[12:2] = 0x0800' must produce the same BPF as 'ether[12:2] = 0x0800'"
+    );
+}
+
+/// Existing `ether[N:M]` syntax must be unaffected by the change.
+#[test]
+fn ether_prefix_byte_access_still_works() {
+    let _ = cbpf("ether[0] = 0x01");
+    let _ = cbpf("ether[12:2] = 0x0800");
+    let _ = cbpf("ether[0:1] & 1 != 0");
+}
+
+/// Raw link-layer byte access on `RawIp` must return a codegen error
+/// because there is no link-layer header to index into.
+#[test]
+fn raw_byte_access_rawip_returns_error() {
+    compile_err("[0:1] & 1 != 0", LinkType::RawIp);
+}
