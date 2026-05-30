@@ -305,7 +305,7 @@ impl Codegen {
             Primitive::Vlan { id } => self.emit_vlan(*id),
             Primitive::Mpls { label } => self.emit_mpls(*label),
             Primitive::PppoeDiscovery => self.emit_ethertype(0x8863),
-            Primitive::PppoeSession => self.emit_ethertype(0x8864),
+            Primitive::PppoeSession { session_id } => self.emit_pppoe_session(*session_id),
             Primitive::Len { op, value } => self.emit_len(*op, *value),
             Primitive::ByteAccess(ba) => self.emit_byte_access(ba),
             Primitive::Inbound | Primitive::Outbound => Err(Error::CodegenError {
@@ -824,6 +824,22 @@ impl Codegen {
             self.push(Insn::rsh32_imm(R4, 12));
             let cmp2 = Patch(self.push(Insn::jne_imm(R4, lbl as i32, 0)));
             p.failure.extend([bc2, cmp2]);
+        }
+        Ok(p)
+    }
+
+    // ── PPPoE session ─────────────────────────────────────────────────────────
+
+    fn emit_pppoe_session(&mut self, session_id: Option<u16>) -> Result<Patches> {
+        let mut p = self.emit_ethertype(0x8864)?;
+        if let Some(id) = session_id {
+            // PPPoE session ID is at bytes 2–3 of the PPPoE header, which
+            // immediately follows the 2-byte ethertype field.
+            // Absolute offset: ether_proto_offset + 4.
+            let sid_off = self.link.ether_proto_offset().unwrap_or(12) + 4;
+            let bc = self.emit_load_half(sid_off);
+            let cmp = Patch(self.push(Insn::jne_imm(R4, id as i32, 0)));
+            p.failure.extend([bc, cmp]);
         }
         Ok(p)
     }

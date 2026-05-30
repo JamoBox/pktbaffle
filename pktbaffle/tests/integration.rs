@@ -374,6 +374,18 @@ fn pppoe_session() {
     last_two_are_ret(&p);
 }
 
+#[test]
+fn pppoe_session_with_id() {
+    let p = eth_prog("pppoes 100");
+    last_two_are_ret(&p);
+}
+
+#[test]
+fn pppoe_session_with_id_zero() {
+    let p = eth_prog("pppoes 0");
+    last_two_are_ret(&p);
+}
+
 // ── len keyword ───────────────────────────────────────────────────────────────
 
 #[test]

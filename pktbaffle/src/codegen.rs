@@ -212,7 +212,7 @@ impl Codegen {
             Primitive::Vlan { id } => self.emit_vlan(*id),
             Primitive::Mpls { label } => self.emit_mpls(*label),
             Primitive::PppoeDiscovery => self.emit_ethertype(0x8863),
-            Primitive::PppoeSession => self.emit_ethertype(0x8864),
+            Primitive::PppoeSession { session_id } => self.emit_pppoe_session(*session_id),
             Primitive::Len { op, value } => self.emit_len(*op, *value),
             Primitive::Inbound | Primitive::Outbound => Err(Error::CodegenError {
                 message: "inbound/outbound direction cannot be expressed in standard BPF".into(),
@@ -772,6 +772,22 @@ impl Codegen {
                 message: "mpls cannot be matched on RawIp captures".into(),
             })
         }
+    }
+
+    // ── PPPoE session ─────────────────────────────────────────────────────────
+
+    fn emit_pppoe_session(&mut self, session_id: Option<u16>) -> Result<Patches> {
+        let mut p = self.emit_ethertype(0x8864)?;
+        if let Some(id) = session_id {
+            // PPPoE session ID is at bytes 2–3 of the PPPoE header, which
+            // immediately follows the 2-byte ethertype field.
+            // Absolute offset: ether_proto_offset + 4.
+            let sid_off = self.link.ether_proto_offset().unwrap_or(12) + 4;
+            self.push(Insn::ldh_abs(sid_off));
+            let idx = self.push(Insn::jeq_k(id as u32, 0, 0xff));
+            p.failure.push(Patch::Jf(idx));
+        }
+        Ok(p)
     }
 
     // ── length predicates ─────────────────────────────────────────────────────
