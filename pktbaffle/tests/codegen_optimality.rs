@@ -205,6 +205,8 @@ fn compile_sanity_special_primitives() {
         "mpls 100",
         "pppoed",
         "pppoes",
+        "pppoes 100",
+        "pppoes 0",
         "less 64",
         "greater 1500",
         "len = 60",
@@ -1942,6 +1944,35 @@ fn pppoes_checks_correct_ethertype() {
     assert!(has_et, "pppoes should check ethertype 0x8864: {insns:?}");
 }
 
+/// `pppoes 100` must check both ethertype 0x8864 and PPPoE session ID 100.
+#[test]
+fn pppoes_with_session_id_checks_ethertype() {
+    let insns = cbpf("pppoes 100");
+    assert_well_formed("pppoes 100", &insns);
+    let has_et = insns.iter().any(|i| is_jeq(*i) && i.k == 0x8864);
+    assert!(has_et, "pppoes 100 should check ethertype 0x8864: {insns:?}");
+}
+
+/// `pppoes 100` must emit a JEQ against session ID 100 after the ethertype check.
+#[test]
+fn pppoes_with_session_id_checks_id() {
+    let insns = cbpf("pppoes 100");
+    assert_well_formed("pppoes 100", &insns);
+    let has_sid = insns.iter().any(|i| is_jeq(*i) && i.k == 100);
+    assert!(has_sid, "pppoes 100 should check session ID 100: {insns:?}");
+}
+
+/// `pppoes 0` compiles correctly and checks session ID 0.
+#[test]
+fn pppoes_with_session_id_zero() {
+    let insns = cbpf("pppoes 0");
+    assert_well_formed("pppoes 0", &insns);
+    let has_et = insns.iter().any(|i| is_jeq(*i) && i.k == 0x8864);
+    assert!(has_et, "pppoes 0 should check ethertype 0x8864: {insns:?}");
+    let has_sid = insns.iter().any(|i| is_jeq(*i) && i.k == 0);
+    assert!(has_sid, "pppoes 0 should check session ID 0: {insns:?}");
+}
+
 // ── §15m IPv6 host addresses ─────────────────────────────────────────────────
 
 /// Full-form IPv6 addresses compile correctly.
@@ -2058,5 +2089,15 @@ fn empty_filter_returns_error() {
     assert!(
         result.is_err(),
         "empty filter string should return an error"
+    );
+}
+
+/// `pppoes 65536` has a session ID that exceeds u16::MAX — must return Err.
+#[test]
+fn pppoes_out_of_range_session_id_returns_error() {
+    let result = compile("pppoes 65536", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "pppoes 65536 should return an error (session ID exceeds 0xffff)"
     );
 }

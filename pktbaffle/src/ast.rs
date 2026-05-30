@@ -136,8 +136,8 @@ pub enum Primitive {
     Mpls { label: Option<u32> },
     /// PPPoE Discovery (ethertype 0x8863).
     PppoeDiscovery,
-    /// PPPoE Session (ethertype 0x8864).
-    PppoeSession,
+    /// PPPoE Session (ethertype 0x8864), optionally with a specific session ID.
+    PppoeSession { session_id: Option<u16> },
     /// Packet length comparison: `len relop value`; also used for `less` and `greater`.
     Len { op: CmpOp, value: u32 },
     /// Inbound direction — not expressible in standard BPF; codegen returns an error.
