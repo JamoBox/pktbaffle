@@ -514,3 +514,54 @@ fn linuxsll_tcp_port() {
     let p = compile("tcp port 443", LinkType::LinuxSll, Target::Classic).unwrap();
     last_two_are_ret(&p);
 }
+
+// ── Negative byte-access offsets must return an error, not panic (issue #26) ──
+
+#[test]
+fn negative_tcp_offset_returns_error() {
+    let result = compile("tcp[-1] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "tcp[-1] = 0 must return an error, not succeed or panic"
+    );
+}
+
+#[test]
+fn negative_ip_offset_with_size_returns_error() {
+    let result = compile("ip[-4:2] != 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "ip[-4:2] != 0 must return an error, not succeed or panic"
+    );
+}
+
+#[test]
+fn negative_ether_offset_returns_error() {
+    let result = compile("ether[-2:1] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "ether[-2:1] = 0 must return an error, not succeed or panic"
+    );
+}
+
+#[test]
+fn zero_offset_byte_access_is_valid() {
+    // Offset 0 is the minimum valid value and must compile successfully.
+    let result = compile("tcp[0] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0] = 0 must compile: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn positive_offset_byte_access_unaffected() {
+    // Existing positive-offset form must continue to work.
+    let result = compile("ip[8] < 64", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "ip[8] < 64 must compile: {:?}",
+        result.err()
+    );
+}
