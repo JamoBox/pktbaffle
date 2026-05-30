@@ -2116,13 +2116,37 @@ fn gateway_returns_error() {
     );
 }
 
-/// `::1` abbreviated IPv6 (single colon pair at start) is not currently
-/// parseable by pktbaffle — must reject cleanly, not panic.
+/// `::1` abbreviated IPv6 (leading double-colon) must compile and match IPv6 loopback.
 #[test]
-fn abbreviated_ipv6_loopback_returns_error_not_panic() {
-    // The lexer can't handle `::1` starting with a colon; verify it errors.
+fn leading_double_colon_ipv6_loopback_compiles() {
     let result = compile("host ::1", LinkType::Ethernet, Target::Classic);
-    assert!(result.is_err(), "host ::1 should return a parse/lex error");
+    assert!(
+        result.is_ok(),
+        "host ::1 should compile: {:?}",
+        result.err()
+    );
+}
+
+/// `::ffff:192.0.2.1` IPv4-mapped IPv6 with leading double-colon must compile.
+#[test]
+fn leading_double_colon_ipv4_mapped_compiles() {
+    let result = compile("host ::ffff:192.0.2.1", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "host ::ffff:192.0.2.1 should compile: {:?}",
+        result.err()
+    );
+}
+
+/// `src host ::1` — direction qualifier with leading-:: IPv6 must compile.
+#[test]
+fn src_host_leading_double_colon_ipv6_compiles() {
+    let result = compile("src host ::1", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "src host ::1 should compile: {:?}",
+        result.err()
+    );
 }
 
 /// `inbound` and `outbound` are unsupported in cBPF; must return Err.

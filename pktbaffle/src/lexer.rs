@@ -203,6 +203,27 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 continue;
             }
             b':' => {
+                // A leading `::` may begin an IPv6 address (e.g. `::1`, `::ffff:192.0.2.1`).
+                if pos + 1 < len && bytes[pos + 1] == b':' {
+                    let start = pos;
+                    let mut tmp = pos;
+                    while tmp < len
+                        && (bytes[tmp].is_ascii_hexdigit()
+                            || bytes[tmp] == b':'
+                            || bytes[tmp] == b'.')
+                    {
+                        tmp += 1;
+                    }
+                    let candidate = &src[start..tmp];
+                    if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
+                        tokens.push(Spanned {
+                            token: Token::Ipv6(addr),
+                            offset: start,
+                        });
+                        pos = tmp;
+                        continue;
+                    }
+                }
                 push!(Token::Colon);
                 pos += 1;
                 continue;
@@ -597,5 +618,45 @@ mod tests {
             tokens[0].token,
             Token::Mac([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
         );
+    }
+
+    #[test]
+    fn ipv6_leading_double_colon_loopback() {
+        let tokens = lex("::1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_leading_double_colon_all_zeros() {
+        let tokens = lex("::").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_leading_double_colon_ipv4_mapped() {
+        let tokens = lex("::ffff:192.0.2.1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(
+            tokens[0].token,
+            Token::Ipv6("::ffff:192.0.2.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn ipv6_leading_double_colon_in_host_filter() {
+        let tokens = lex("host ::1").unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].token, Token::Host);
+        assert_eq!(tokens[1].token, Token::Ipv6("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn single_colon_still_lexes_as_colon_token() {
+        // A bare `:` (not `::`) must still produce Token::Colon.
+        let tokens = lex(":").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Colon);
     }
 }
