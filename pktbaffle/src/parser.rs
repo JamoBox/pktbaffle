@@ -655,6 +655,12 @@ impl Parser<'_> {
     fn parse_byte_access(&mut self, layer: Layer) -> Result<Primitive> {
         self.expect(&Token::LBracket)?;
         let offset = self.parse_i32()?;
+        if offset < 0 {
+            return Err(self.err(format!(
+                "byte-access offset must be non-negative, got {}",
+                offset
+            )));
+        }
         let size = if self.eat(&Token::Colon) {
             match self.cur_tok() {
                 Some(Token::Num(1)) => {
