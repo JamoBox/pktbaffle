@@ -386,9 +386,9 @@ impl Parser<'_> {
                 self.advance();
                 let session_id = if let Some(&Token::Num(n)) = self.cur_tok() {
                     if n > 0xffff {
-                        return Err(self.err(format!(
-                            "pppoes session ID {n} out of range (max 65535)"
-                        )));
+                        return Err(
+                            self.err(format!("pppoes session ID {n} out of range (max 65535)"))
+                        );
                     }
                     self.advance();
                     Some(n as u16)

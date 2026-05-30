@@ -1950,7 +1950,10 @@ fn pppoes_with_session_id_checks_ethertype() {
     let insns = cbpf("pppoes 100");
     assert_well_formed("pppoes 100", &insns);
     let has_et = insns.iter().any(|i| is_jeq(*i) && i.k == 0x8864);
-    assert!(has_et, "pppoes 100 should check ethertype 0x8864: {insns:?}");
+    assert!(
+        has_et,
+        "pppoes 100 should check ethertype 0x8864: {insns:?}"
+    );
 }
 
 /// `pppoes 100` must emit a JEQ against session ID 100 after the ethertype check.
