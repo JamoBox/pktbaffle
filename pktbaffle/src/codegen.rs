@@ -460,7 +460,7 @@ impl Codegen {
         let prefix_len = net.prefix_len;
 
         let check_net6 = |cg: &mut Codegen, addr_off: u32, fail: &mut Vec<Patch>| {
-            for i in 0usize..8 {
+            for (i, &seg) in segs.iter().enumerate() {
                 let start_bit = i as u32 * 16;
                 if start_bit >= prefix_len as u32 {
                     break;
@@ -469,12 +469,12 @@ impl Codegen {
                 let off = addr_off + i as u32 * 2;
                 cg.push(Insn::ldh_abs(off));
                 if end_bit <= prefix_len as u32 {
-                    let idx = cg.push(Insn::jeq_k(segs[i] as u32, 0, 0xff));
+                    let idx = cg.push(Insn::jeq_k(seg as u32, 0, 0xff));
                     fail.push(Patch::Jf(idx));
                 } else {
                     let bits = prefix_len as u32 - start_bit;
                     let mask = (0xffffu32 << (16 - bits)) & 0xffff;
-                    let expected = (segs[i] as u32) & mask;
+                    let expected = (seg as u32) & mask;
                     cg.push(Insn::and_k(mask));
                     let idx = cg.push(Insn::jeq_k(expected, 0, 0xff));
                     fail.push(Patch::Jf(idx));
