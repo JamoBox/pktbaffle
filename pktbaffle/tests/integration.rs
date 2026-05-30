@@ -548,7 +548,11 @@ fn negative_ether_offset_returns_error() {
 fn zero_offset_byte_access_is_valid() {
     // Offset 0 is the minimum valid value and must compile successfully.
     let result = compile("tcp[0] = 0", LinkType::Ethernet, Target::Classic);
-    assert!(result.is_ok(), "tcp[0] = 0 must compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "tcp[0] = 0 must compile: {:?}",
+        result.err()
+    );
 }
 
 #[test]
