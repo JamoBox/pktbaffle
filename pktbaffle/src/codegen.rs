@@ -808,6 +808,12 @@ impl Codegen {
         // Calculate the absolute packet offset for non-transport layers.
         match ba.layer {
             Layer::Raw => {
+                if self.link == LinkType::RawIp {
+                    return Err(Error::CodegenError {
+                        message: "raw link-layer byte access cannot be used with RawIp link type"
+                            .into(),
+                    });
+                }
                 let off = ba.offset as u32;
                 self.load_sized(off, ba.size, false);
             }
