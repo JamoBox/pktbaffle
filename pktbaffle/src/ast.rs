@@ -40,6 +40,13 @@ pub struct IpNet {
     pub mask: u32,
 }
 
+/// An IPv6 network: address + prefix length (0–128).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ipv6Net {
+    pub addr: std::net::Ipv6Addr,
+    pub prefix_len: u8,
+}
+
 impl IpNet {
     /// Construct from a CIDR prefix length (0–32).
     ///
@@ -116,6 +123,8 @@ pub enum Primitive {
     },
     /// Match an IPv4 network.
     Net { net: IpNet, dir: Dir },
+    /// Match an IPv6 network prefix.
+    Net6 { net: Ipv6Net, dir: Dir },
     /// Match on L4 / L3 protocol.
     Proto(Proto),
     /// Match on Ethernet MAC address.
