@@ -438,6 +438,23 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
         if let Ok(addr) = addr_part.parse::<std::net::Ipv4Addr>() {
             return Ok(Token::Ipv4(addr.octets()));
         }
+        // Partial IPv4 (1–3 octets): zero-pad and emit as Ipv4 for classful net shorthand.
+        let parts: Vec<&str> = addr_part.split('.').collect();
+        if !parts.is_empty() && parts.len() <= 3 {
+            let mut octets = [0u8; 4];
+            let mut valid = true;
+            for (i, p) in parts.iter().enumerate() {
+                if let Ok(n) = p.parse::<u8>() {
+                    octets[i] = n;
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                return Ok(Token::Ipv4(octets));
+            }
+        }
     }
     // IPv6 (contains "::" or two or more colons)
     if raw.contains("::") || raw.chars().filter(|&c| c == ':').count() >= 2 {

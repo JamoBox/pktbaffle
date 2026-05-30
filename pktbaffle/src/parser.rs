@@ -597,57 +597,66 @@ impl Parser<'_> {
 
     fn parse_net(&mut self, dir: Dir) -> Result<Primitive> {
         let tok_desc = format!("{:?}", self.cur_tok());
-        match self.advance() {
-            Some(Token::Ipv4(octs)) => {
-                let octs = *octs;
-                let addr = std::net::Ipv4Addr::from(octs);
-                if self.eat(&Token::Minus) {
-                    return Err(
-                        self.err("net range syntax not supported; use CIDR or mask notation")
-                    );
+        let octs = match self.advance() {
+            Some(Token::Ipv4(octs)) => *octs,
+            // Single-octet classful shorthand: `net 10` → `net 10.0.0.0/8`.
+            Some(Token::Num(n)) => {
+                let n = *n;
+                if n > 0xff {
+                    return Err(self.err(format!(
+                        "expected IPv4 network after 'net', got {}",
+                        tok_desc
+                    )));
                 }
-                // CIDR prefix length immediately after the address (lexer splits on '/').
-                let mask = if let Some(Token::Num(n)) = self.cur_tok() {
-                    let n = *n as u8;
-                    self.advance();
-                    if n == 0 {
-                        0u32
-                    } else {
-                        !0u32 << (32 - n)
-                    }
-                } else if self.eat(&Token::Mask) {
-                    // `net <addr> mask <netmask>` syntax
-                    match self.advance() {
-                        Some(Token::Ipv4(m)) => u32::from_be_bytes(*m),
-                        _ => return Err(self.err("expected IPv4 netmask after 'mask'")),
-                    }
-                } else {
-                    // Classful inference from address bytes
-                    let m = if octs[3] != 0 {
-                        32u8
-                    } else if octs[2] != 0 {
-                        24
-                    } else if octs[1] != 0 {
-                        16
-                    } else {
-                        8
-                    };
-                    if m == 0 {
-                        0
-                    } else {
-                        !0u32 << (32 - m)
-                    }
-                };
-                Ok(Primitive::Net {
-                    net: IpNet { addr, mask },
-                    dir,
-                })
+                [n as u8, 0, 0, 0]
             }
-            _ => Err(self.err(format!(
-                "expected IPv4 network after 'net', got {}",
-                tok_desc
-            ))),
+            _ => {
+                return Err(self.err(format!(
+                    "expected IPv4 network after 'net', got {}",
+                    tok_desc
+                )))
+            }
+        };
+        let addr = std::net::Ipv4Addr::from(octs);
+        if self.eat(&Token::Minus) {
+            return Err(self.err("net range syntax not supported; use CIDR or mask notation"));
         }
+        // CIDR prefix length immediately after the address (lexer splits on '/').
+        let mask = if let Some(Token::Num(n)) = self.cur_tok() {
+            let n = *n as u8;
+            self.advance();
+            if n == 0 {
+                0u32
+            } else {
+                !0u32 << (32 - n)
+            }
+        } else if self.eat(&Token::Mask) {
+            // `net <addr> mask <netmask>` syntax
+            match self.advance() {
+                Some(Token::Ipv4(m)) => u32::from_be_bytes(*m),
+                _ => return Err(self.err("expected IPv4 netmask after 'mask'")),
+            }
+        } else {
+            // Classful inference from address bytes
+            let m = if octs[3] != 0 {
+                32u8
+            } else if octs[2] != 0 {
+                24
+            } else if octs[1] != 0 {
+                16
+            } else {
+                8
+            };
+            if m == 0 {
+                0
+            } else {
+                !0u32 << (32 - m)
+            }
+        };
+        Ok(Primitive::Net {
+            net: IpNet { addr, mask },
+            dir,
+        })
     }
 
     fn parse_port(&mut self, dir: Dir, proto: Option<Proto>) -> Result<Primitive> {
