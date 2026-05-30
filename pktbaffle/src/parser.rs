@@ -240,8 +240,8 @@ impl Parser<'_> {
                     return self.parse_byte_access(Layer::Net);
                 }
                 if self.eat(&Token::Proto) {
-                    let n = self.parse_u32()?;
-                    return Ok(Primitive::Proto(Proto::Num(n as u8)));
+                    let n = self.parse_proto_num()?;
+                    return Ok(Primitive::Proto(Proto::Num(n)));
                 }
                 if self.eat(&Token::Broadcast) {
                     return Ok(Primitive::IpBroadcast);
@@ -257,8 +257,8 @@ impl Parser<'_> {
                     return self.parse_byte_access(Layer::Net);
                 }
                 if self.eat(&Token::Proto) {
-                    let n = self.parse_u32()?;
-                    return Ok(Primitive::Proto(Proto::Ip6Proto(n as u8)));
+                    let n = self.parse_proto_num()?;
+                    return Ok(Primitive::Proto(Proto::Ip6Proto(n)));
                 }
                 if self.eat(&Token::Multicast) {
                     return Ok(Primitive::Ip6Multicast);
@@ -755,6 +755,63 @@ impl Parser<'_> {
                 tok_desc
             ))),
         }
+    }
+
+    fn parse_proto_num(&mut self) -> Result<u8> {
+        let n = match self.cur_tok() {
+            Some(Token::Tcp) => {
+                self.advance();
+                6
+            }
+            Some(Token::Udp) => {
+                self.advance();
+                17
+            }
+            Some(Token::Icmp) => {
+                self.advance();
+                1
+            }
+            Some(Token::Icmp6) => {
+                self.advance();
+                58
+            }
+            Some(Token::Igmp) => {
+                self.advance();
+                2
+            }
+            Some(Token::Sctp) => {
+                self.advance();
+                132
+            }
+            Some(Token::Ah) => {
+                self.advance();
+                51
+            }
+            Some(Token::Esp) => {
+                self.advance();
+                50
+            }
+            Some(Token::Pim) => {
+                self.advance();
+                103
+            }
+            Some(Token::Igrp) => {
+                self.advance();
+                9
+            }
+            Some(Token::Vrrp) => {
+                self.advance();
+                112
+            }
+            _ => {
+                let n = self.parse_u32()?;
+                if n > 0xff {
+                    return Err(self.err("IP protocol number out of range (0–255)"));
+                }
+                n as u8
+            }
+        };
+        Ok(n)
     }
 
     fn parse_u32(&mut self) -> Result<u32> {

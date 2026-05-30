@@ -1829,6 +1829,54 @@ fn ip6_proto_number_variants() {
     }
 }
 
+/// `ip proto <keyword>` produces identical BPF to `ip proto <N>`.
+#[test]
+fn ip_proto_named_keywords() {
+    for (named, numeric) in [
+        ("ip proto tcp", "ip proto 6"),
+        ("ip proto udp", "ip proto 17"),
+        ("ip proto icmp", "ip proto 1"),
+        ("ip proto icmp6", "ip proto 58"),
+        ("ip proto igmp", "ip proto 2"),
+        ("ip proto sctp", "ip proto 132"),
+        ("ip proto ah", "ip proto 51"),
+        ("ip proto esp", "ip proto 50"),
+        ("ip proto pim", "ip proto 103"),
+        ("ip proto igrp", "ip proto 9"),
+        ("ip proto vrrp", "ip proto 112"),
+    ] {
+        assert_eq!(
+            cbpf(named),
+            cbpf(numeric),
+            "'{named}' should produce identical BPF to '{numeric}'"
+        );
+    }
+}
+
+/// `ip6 proto <keyword>` produces identical BPF to `ip6 proto <N>`.
+#[test]
+fn ip6_proto_named_keywords() {
+    for (named, numeric) in [
+        ("ip6 proto tcp", "ip6 proto 6"),
+        ("ip6 proto udp", "ip6 proto 17"),
+        ("ip6 proto icmp", "ip6 proto 1"),
+        ("ip6 proto icmp6", "ip6 proto 58"),
+        ("ip6 proto igmp", "ip6 proto 2"),
+        ("ip6 proto sctp", "ip6 proto 132"),
+        ("ip6 proto ah", "ip6 proto 51"),
+        ("ip6 proto esp", "ip6 proto 50"),
+        ("ip6 proto pim", "ip6 proto 103"),
+        ("ip6 proto igrp", "ip6 proto 9"),
+        ("ip6 proto vrrp", "ip6 proto 112"),
+    ] {
+        assert_eq!(
+            cbpf(named),
+            cbpf(numeric),
+            "'{named}' should produce identical BPF to '{numeric}'"
+        );
+    }
+}
+
 // ── §15j `src or dst` direction qualifier ───────────────────────────────────
 
 /// libpcap allows explicit `src or dst` direction qualifier.
