@@ -2051,20 +2051,29 @@ fn ipv6_letter_first_double_colon() {
 }
 
 /// IPv6 loopback in full 8-group form.
-/// NOTE: `0:0:0:0:0:0:0:1` is misidentified by the lexer as a MAC address
-/// (6 segments each being 0). Use the `0::1` or `::1` forms instead, but
-/// `::1` is also unsupported. This is a known parity gap.
+/// `0:0:0:0:0:0:0:1` must lex as an IPv6 address, not a MAC.
 #[test]
 fn ipv6_loopback_full_form() {
-    // Full all-zero with trailing 1: pktbaffle lexer mis-parses this as MAC.
-    // Document the gap — the address should be expressed as 2 x fully-qualified groups:
+    let insns = cbpf("host 0:0:0:0:0:0:0:1");
+    assert_well_formed("host 0:0:0:0:0:0:0:1", &insns);
+    assert_jumps_in_bounds("host 0:0:0:0:0:0:0:1", &insns);
+    // Must generate 8 halfword loads — one per IPv6 segment.
+    let ldh_count = insns
+        .iter()
+        .filter(|i| is_ld_abs(**i) && (i.code & 0x18) == bpf::BPF_H)
+        .count();
     assert!(
-        compile("host 0:0:0:0:0:0:0:1", LinkType::Ethernet, Target::Classic).is_err(),
-        "host 0:0:0:0:0:0:0:1: lexer confuses all-zero IPv6 segments with a MAC (known gap)"
+        ldh_count >= 8,
+        "host 0:0:0:0:0:0:0:1 should load at least 8 halfwords, got {ldh_count}"
     );
-    // The compressed form with enough non-zero segments does work:
-    let insns = cbpf("host 2001:db8::1");
-    assert_well_formed("host 2001:db8::1", &insns);
+}
+
+/// All-zero IPv6 address in full 8-group form must not be treated as a MAC.
+#[test]
+fn ipv6_all_zero_address_full_form() {
+    let insns = cbpf("host 0:0:0:0:0:0:0:0");
+    assert_well_formed("host 0:0:0:0:0:0:0:0", &insns);
+    assert_jumps_in_bounds("host 0:0:0:0:0:0:0:0", &insns);
 }
 
 /// IPv6 host filter generates 8 halfword comparisons (one per segment).
