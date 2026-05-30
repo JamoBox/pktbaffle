@@ -1730,42 +1730,48 @@ fn ether_broadcast_keyword() {
 
 // ── §15h Classful network inference ──────────────────────────────────────────
 
-/// Classful network inference: libpcap accepts `net 10`, `net 192.168`, `net 10.0.1`.
-/// NOTE: pktbaffle's lexer requires a full dotted-quad for network addresses.
-/// These short forms are a known parity gap vs. libpcap.
+/// `net 10` is equivalent to `net 10.0.0.0/8` (single-octet classful shorthand).
 #[test]
 fn net_classful_single_octet_infers_slash8() {
-    // Verify the canonical CIDR form works:
-    let a = cbpf("net 10.0.0.0/8");
-    assert_well_formed("net 10.0.0.0/8", &a);
-    // Document the libpcap shorthand is not yet supported:
-    assert!(
-        compile("net 10", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 10: single-octet classful notation is a libpcap parity gap"
-    );
+    let a = cbpf("net 10");
+    let b = cbpf("net 10.0.0.0/8");
+    assert_well_formed("net 10", &a);
+    assert_eq!(a, b, "'net 10' should equal 'net 10.0.0.0/8'");
 }
 
-/// Classful network inference: `net 192.168` → /16.
-/// NOTE: dotted-pair notation is not yet supported by pktbaffle's lexer.
+/// `net 192.168` is equivalent to `net 192.168.0.0/16` (two-octet classful shorthand).
 #[test]
 fn net_classful_double_octet_infers_slash16() {
-    let a = cbpf("net 192.168.0.0/16");
-    assert_well_formed("net 192.168.0.0/16", &a);
-    assert!(
-        compile("net 192.168", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 192.168: dotted-pair classful notation is a libpcap parity gap"
-    );
+    let a = cbpf("net 192.168");
+    let b = cbpf("net 192.168.0.0/16");
+    assert_well_formed("net 192.168", &a);
+    assert_eq!(a, b, "'net 192.168' should equal 'net 192.168.0.0/16'");
 }
 
-/// Classful network inference: `net 10.0.1` → /24.
-/// NOTE: dotted-triple notation is not yet supported by pktbaffle's lexer.
+/// `net 10.0.1` is equivalent to `net 10.0.1.0/24` (three-octet classful shorthand).
 #[test]
 fn net_classful_triple_octet_infers_slash24() {
-    let a = cbpf("net 10.0.1.0/24");
-    assert_well_formed("net 10.0.1.0/24", &a);
-    assert!(
-        compile("net 10.0.1", LinkType::Ethernet, Target::Classic).is_err(),
-        "net 10.0.1: dotted-triple classful notation is a libpcap parity gap"
+    let a = cbpf("net 10.0.1");
+    let b = cbpf("net 10.0.1.0/24");
+    assert_well_formed("net 10.0.1", &a);
+    assert_eq!(a, b, "'net 10.0.1' should equal 'net 10.0.1.0/24'");
+}
+
+/// Direction qualifiers work with classful shorthand.
+#[test]
+fn net_classful_direction_qualifiers() {
+    let src_short = cbpf("src net 10");
+    let src_cidr = cbpf("src net 10.0.0.0/8");
+    assert_eq!(
+        src_short, src_cidr,
+        "'src net 10' should equal 'src net 10.0.0.0/8'"
+    );
+
+    let dst_short = cbpf("dst net 192.168");
+    let dst_cidr = cbpf("dst net 192.168.0.0/16");
+    assert_eq!(
+        dst_short, dst_cidr,
+        "'dst net 192.168' should equal 'dst net 192.168.0.0/16'"
     );
 }
 
