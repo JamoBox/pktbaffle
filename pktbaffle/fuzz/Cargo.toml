@@ -1,0 +1,28 @@
+[package]
+name = "pktbaffle-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Stand-alone workspace so cargo-fuzz tooling doesn't collide with the
+# parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pktbaffle = { path = "..", features = ["vm"] }
+
+[[bin]]
+name = "fuzz_compile"
+path = "fuzz_targets/fuzz_compile.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vm"
+path = "fuzz_targets/fuzz_vm.rs"
+test = false
+doc = false
