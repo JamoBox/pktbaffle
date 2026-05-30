@@ -289,6 +289,11 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                         break;
                     }
                 }
+                // If another ':' follows the 6th group, there are more segments —
+                // this is a full-form IPv6 address, not a MAC.
+                if ok && tmp < len && bytes[tmp] == b':' {
+                    ok = false;
+                }
                 if ok {
                     if let Some(mac) = parse_mac(&src[start..tmp]) {
                         tokens.push(Spanned {
@@ -565,5 +570,32 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].token, Token::Host);
         assert_eq!(tokens[1].token, Token::Ipv6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_all_zero_groups_not_confused_with_mac() {
+        // 0:0:0:0:0:0:0:1 — first six groups look like a MAC but there are 8.
+        let tokens = lex("0:0:0:0:0:0:0:1").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_all_zero_address_not_confused_with_mac() {
+        // 0:0:0:0:0:0:0:0 — all eight groups are zero.
+        let tokens = lex("0:0:0:0:0:0:0:0").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Ipv6("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn mac_address_still_lexes_correctly() {
+        // A genuine 6-octet MAC must not be affected by the IPv6 fix.
+        let tokens = lex("00:11:22:33:44:55").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(
+            tokens[0].token,
+            Token::Mac([0x00, 0x11, 0x22, 0x33, 0x44, 0x55])
+        );
     }
 }
