@@ -2239,3 +2239,122 @@ fn ether_prefix_byte_access_still_works() {
 fn raw_byte_access_rawip_returns_error() {
     compile_err("[0:1] & 1 != 0", LinkType::RawIp);
 }
+
+// ── §15p IPv6 network prefix filters ─────────────────────────────────────────
+
+/// `net 2001:db8::/32` compiles without error and produces valid BPF.
+#[test]
+fn ipv6_net_cidr_compiles() {
+    let insns = cbpf("net 2001:db8::/32");
+    assert_well_formed("net 2001:db8::/32", &insns);
+    assert_jumps_in_bounds("net 2001:db8::/32", &insns);
+}
+
+/// `src net fc00::/7` compiles and checks only the source IPv6 address.
+#[test]
+fn ipv6_src_net_cidr_compiles() {
+    let insns = cbpf("src net fc00::/7");
+    assert_well_formed("src net fc00::/7", &insns);
+    assert_jumps_in_bounds("src net fc00::/7", &insns);
+}
+
+/// `dst net fe80::/10` compiles and checks only the destination IPv6 address.
+#[test]
+fn ipv6_dst_net_cidr_compiles() {
+    let insns = cbpf("dst net fe80::/10");
+    assert_well_formed("dst net fe80::/10", &insns);
+    assert_jumps_in_bounds("dst net fe80::/10", &insns);
+}
+
+/// Mixed IPv4/IPv6 net filter compiles correctly.
+#[test]
+fn mixed_ipv4_ipv6_net_compiles() {
+    let insns = cbpf("net 2001:db8::/32 or net 10.0.0.0/8");
+    assert_well_formed("net 2001:db8::/32 or net 10.0.0.0/8", &insns);
+    assert_jumps_in_bounds("net 2001:db8::/32 or net 10.0.0.0/8", &insns);
+}
+
+/// IPv6 prefix lengths > 128 produce a clear parse error.
+#[test]
+fn ipv6_net_out_of_range_prefix_returns_error() {
+    let result = compile("net 2001:db8::/129", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "prefix length 129 should return a parse error"
+    );
+}
+
+/// Existing IPv4 `net` filters are unaffected by the IPv6 net change.
+#[test]
+fn existing_ipv4_net_filters_unaffected() {
+    let a = cbpf("net 10.0.0.0/8");
+    let b = cbpf("src net 192.168.0.0/16");
+    assert_well_formed("net 10.0.0.0/8", &a);
+    assert_well_formed("src net 192.168.0.0/16", &b);
+}
+
+/// `net 2001:db8::/32` emits an IPv6 ethertype guard (0x86dd).
+#[test]
+fn ipv6_net_checks_ipv6_ethertype() {
+    let insns = cbpf("net 2001:db8::/32");
+    let has_ipv6_et = insns.iter().any(|i| is_jeq(*i) && i.k == 0x86dd);
+    assert!(
+        has_ipv6_et,
+        "IPv6 net filter should check ethertype 0x86dd: {insns:?}"
+    );
+}
+
+/// A partial-group prefix emits an AND instruction to apply the bit mask.
+#[test]
+fn ipv6_net_uses_and_for_partial_group() {
+    // fc00::/7 — the first group is partially covered (7 bits), so AND is required.
+    let insns = cbpf("net fc00::/7");
+    let has_and = insns.iter().any(|i| is_and_k(*i));
+    assert!(
+        has_and,
+        "IPv6 /7 net filter should emit AND for the partial group: {insns:?}"
+    );
+}
+
+/// `net addr/128` is logically equivalent to a host filter: similar BPF size.
+#[test]
+fn ipv6_net_slash128_is_host_equivalent() {
+    let net_insns = cbpf("net 2001:db8::1/128");
+    let host_insns = cbpf("host 2001:db8::1");
+    assert_well_formed("net 2001:db8::1/128", &net_insns);
+    let diff = net_insns.len().abs_diff(host_insns.len());
+    assert!(
+        diff <= 4,
+        "/128 net and host should produce similar-sized BPF: net={} host={}",
+        net_insns.len(),
+        host_insns.len()
+    );
+}
+
+/// `net addr/0` only emits the ethertype guard (no segment comparisons).
+#[test]
+fn ipv6_net_slash0_only_checks_ethertype() {
+    let insns = cbpf("net 2001:db8::/0");
+    assert_well_formed("net 2001:db8::/0", &insns);
+    // /0 means every IPv6 address matches; only the ethertype check is needed.
+    let jeq_count = insns.iter().filter(|i| is_jeq(**i)).count();
+    assert_eq!(
+        jeq_count, 1,
+        "net addr/0 should only check ethertype (1 jeq), got {jeq_count}: {insns:?}"
+    );
+}
+
+/// All direction variants for IPv6 net compile and are structurally valid.
+#[test]
+fn ipv6_net_direction_variants_compile() {
+    for f in &[
+        "net 2001:db8::/32",
+        "src net 2001:db8::/32",
+        "dst net 2001:db8::/32",
+    ] {
+        let insns = cbpf(f);
+        assert_well_formed(f, &insns);
+        assert_jumps_in_bounds(f, &insns);
+        assert_all_paths_terminate(f, &insns);
+    }
+}

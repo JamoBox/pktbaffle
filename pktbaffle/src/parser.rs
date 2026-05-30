@@ -610,9 +610,33 @@ impl Parser<'_> {
                 }
                 [n as u8, 0, 0, 0]
             }
+            Some(Token::Ipv6(addr)) => {
+                let addr = *addr;
+                let prefix_len = match self.cur_tok() {
+                    Some(Token::Num(n)) => {
+                        let n = *n;
+                        self.advance();
+                        if n > 128 {
+                            return Err(self.err(format!(
+                                "IPv6 prefix length {n} out of range (0\u{2013}128)"
+                            )));
+                        }
+                        n as u8
+                    }
+                    _ => {
+                        return Err(self.err(
+                            "IPv6 net requires a CIDR prefix length (e.g. net 2001:db8::/32)",
+                        ))
+                    }
+                };
+                return Ok(Primitive::Net6 {
+                    net: Ipv6Net { addr, prefix_len },
+                    dir,
+                });
+            }
             _ => {
                 return Err(self.err(format!(
-                    "expected IPv4 network after 'net', got {}",
+                    "expected IPv4 or IPv6 network after 'net', got {}",
                     tok_desc
                 )))
             }

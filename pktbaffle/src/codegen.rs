@@ -199,6 +199,7 @@ impl Codegen {
             Primitive::Proto(p) => self.emit_proto(p),
             Primitive::Host { addr, dir } => self.emit_host(*addr, *dir),
             Primitive::Net { net, dir } => self.emit_net(net, *dir),
+            Primitive::Net6 { net, dir } => self.emit_net6(net, *dir),
             Primitive::Port { port, dir, proto } => self.emit_port(*port, *dir, *proto),
             Primitive::PortRange { lo, hi, dir, proto } => {
                 self.emit_portrange(*lo, *hi, *dir, *proto)
@@ -445,6 +446,59 @@ impl Codegen {
                 let i_dst = self.push(Insn::jeq_k(masked, 0, 0xff));
                 p.success.push(Patch::Jt(i_src));
                 p.failure.push(Patch::Jf(i_dst));
+            }
+        }
+        Ok(p)
+    }
+
+    fn emit_net6(&mut self, net: &Ipv6Net, dir: Dir) -> Result<Patches> {
+        let mut p = self.emit_ethertype(0x86dd)?;
+        let base = self.link.net_offset();
+        let src_off = base + 8;
+        let dst_off = base + 24;
+        let segs = net.addr.segments();
+        let prefix_len = net.prefix_len;
+
+        let check_net6 = |cg: &mut Codegen, addr_off: u32, fail: &mut Vec<Patch>| {
+            for i in 0usize..8 {
+                let start_bit = i as u32 * 16;
+                if start_bit >= prefix_len as u32 {
+                    break;
+                }
+                let end_bit = start_bit + 16;
+                let off = addr_off + i as u32 * 2;
+                cg.push(Insn::ldh_abs(off));
+                if end_bit <= prefix_len as u32 {
+                    let idx = cg.push(Insn::jeq_k(segs[i] as u32, 0, 0xff));
+                    fail.push(Patch::Jf(idx));
+                } else {
+                    let bits = prefix_len as u32 - start_bit;
+                    let mask = (0xffffu32 << (16 - bits)) & 0xffff;
+                    let expected = (segs[i] as u32) & mask;
+                    cg.push(Insn::and_k(mask));
+                    let idx = cg.push(Insn::jeq_k(expected, 0, 0xff));
+                    fail.push(Patch::Jf(idx));
+                }
+            }
+        };
+
+        match dir {
+            Dir::Src => check_net6(self, src_off, &mut p.failure),
+            Dir::Dst => check_net6(self, dst_off, &mut p.failure),
+            Dir::SrcAndDst => {
+                check_net6(self, src_off, &mut p.failure);
+                check_net6(self, dst_off, &mut p.failure);
+            }
+            Dir::SrcOrDst => {
+                let mut src_fails = Vec::new();
+                check_net6(self, src_off, &mut src_fails);
+                let ja_idx = self.push(Insn::ja(0));
+                let dst_start = self.insns.len();
+                for fp in src_fails {
+                    self.resolve(fp, dst_start);
+                }
+                check_net6(self, dst_off, &mut p.failure);
+                p.success.push(Patch::Ja(ja_idx));
             }
         }
         Ok(p)

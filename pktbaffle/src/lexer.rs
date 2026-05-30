@@ -344,6 +344,22 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                             offset: start,
                         });
                         pos = tmp;
+                        if pos < len && bytes[pos] == b'/' {
+                            pos += 1;
+                            let pl_start = pos;
+                            while pos < len && bytes[pos].is_ascii_digit() {
+                                pos += 1;
+                            }
+                            let n: u64 =
+                                src[pl_start..pos].parse().map_err(|_| Error::LexError {
+                                    offset: pl_start,
+                                    ch: '/',
+                                })?;
+                            tokens.push(Spanned {
+                                token: Token::Num(n),
+                                offset: pl_start,
+                            });
+                        }
                         continue;
                     }
                 }
@@ -401,6 +417,21 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                         token: Token::Ipv6(addr),
                         offset: start,
                     });
+                    if pos < len && bytes[pos] == b'/' {
+                        pos += 1;
+                        let pl_start = pos;
+                        while pos < len && bytes[pos].is_ascii_digit() {
+                            pos += 1;
+                        }
+                        let n: u64 = src[pl_start..pos].parse().map_err(|_| Error::LexError {
+                            offset: pl_start,
+                            ch: '/',
+                        })?;
+                        tokens.push(Spanned {
+                            token: Token::Num(n),
+                            offset: pl_start,
+                        });
+                    }
                     continue;
                 }
             }
