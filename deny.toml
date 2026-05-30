@@ -1,0 +1,53 @@
+# cargo-deny policy for pktbaffle workspace.
+# Run: cargo deny check
+
+# ── Licenses ──────────────────────────────────────────────────────────────────
+[licenses]
+# Standard permissive licenses accepted in the Rust ecosystem.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.0",
+    "LGPL-3.0",
+    "AGPL-3.0",
+]
+# Warn rather than error on copyleft licenses in dev/build deps only — those
+# binaries are never shipped.
+unused-allowed-license = "warn"
+
+# ── Banned crates ─────────────────────────────────────────────────────────────
+[bans]
+# Warn on multiple versions of the same crate (often indicates a dep bloat or
+# accidental transitive upgrade).
+multiple-versions = "warn"
+wildcards = "allow"
+deny = [
+    # Crates with known security histories that should be replaced.
+    { name = "openssl" },        # use rustls instead
+    { name = "native-tls" },     # use rustls instead
+]
+
+# ── Security advisories ───────────────────────────────────────────────────────
+[advisories]
+# Deny any crate with an unresolved RUSTSEC advisory unless explicitly ignored.
+# Add entries to `ignore` only after triaging the advisory.
+ignore = []
+
+# ── Source policy ─────────────────────────────────────────────────────────────
+[sources]
+# Only allow crates from crates.io; git sources must be explicitly listed below.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

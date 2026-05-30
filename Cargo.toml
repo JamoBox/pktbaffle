@@ -1,3 +1,5 @@
 [workspace]
 members = ["pktbaffle", "pkttap"]
+# The fuzz crate declares its own [workspace] and must not be a member here.
+exclude = ["pktbaffle/fuzz"]
 resolver = "2"

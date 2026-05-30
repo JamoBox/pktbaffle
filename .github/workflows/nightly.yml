@@ -1,0 +1,318 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC every night
+  workflow_dispatch:        # allow manual triggers
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false # never cancel an in-flight nightly run
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# ── Extended Rust channel + platform matrix ────────────────────────────────────
+# 9 runners: stable/beta/nightly × ubuntu/macos/windows
+jobs:
+  matrix:
+    name: test (${{ matrix.os }}, ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, beta, nightly]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: matrix-${{ matrix.os }}-${{ matrix.rust }}
+
+      - name: Test workspace (default features)
+        run: cargo test --workspace
+
+      - name: Test pktbaffle with vm feature
+        run: cargo test -p pktbaffle --features vm
+
+      - name: Test all features
+        run: cargo test --workspace --all-features
+
+  # ── Cross-compilation: verify pktbaffle compiles for multiple architectures ──
+  # Execution is not possible in CI for foreign ABIs; compile-check is sufficient.
+  cross-compile:
+    name: cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            apt: musl-tools
+          - target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu
+          - target: armv7-unknown-linux-gnueabihf
+            apt: gcc-arm-linux-gnueabihf
+          - target: x86_64-pc-windows-gnu
+            apt: gcc-mingw-w64-x86-64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+
+      - name: Install cross-linker
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      # pktbaffle has no C dependencies, so cross-check works cleanly.
+      # pkttap uses libc/libloading which require platform-native headers,
+      # so we only check the pure-Rust core crate here.
+      - name: Check pktbaffle (with vm)
+        run: cargo check -p pktbaffle --features vm --target ${{ matrix.target }}
+
+  # ── VM parity: semantic correctness of libpcap expression language ─────────
+  # Compiles every filter class and runs the software BPF VM against
+  # synthetic packets to verify match/no-match semantics.
+  vm-parity:
+    name: vm-parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: VM parity tests
+        run: cargo test -p pktbaffle --features vm --test vm_parity -- --nocapture
+
+  # ── MIRI: undefined behaviour and memory safety in the VM interpreter ──────
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup MIRI
+        run: cargo miri setup
+
+      - name: Run unit tests under MIRI (pktbaffle with vm)
+        # MIRI cannot run live-capture tests (syscalls/FFI) so scope to pktbaffle.
+        # -Zmiri-disable-isolation lets MIRI access system time for test harness output.
+        run: cargo miri test -p pktbaffle --features vm
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+  # ── Fuzzing: panic and crash detection via coverage-guided fuzzing ──────────
+  # Each target runs for 60 seconds; any panic is a test failure.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_compile, fuzz_vm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pktbaffle/fuzz -> target
+          key: fuzz-${{ matrix.target }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }} (60 s)
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
+        working-directory: pktbaffle
+
+  # ── Supply-chain security ──────────────────────────────────────────────────
+  # cargo-audit checks for RUSTSEC advisories; cargo-deny enforces license and
+  # source policy from deny.toml.
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo-audit (RUSTSEC advisories)
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: cargo-deny (licenses + bans + sources)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
+  # ── Code coverage ──────────────────────────────────────────────────────────
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate coverage (workspace + vm feature)
+        run: |
+          cargo llvm-cov --workspace --features vm --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  # ── Minimal dependency versions ────────────────────────────────────────────
+  # Verifies that the lower-bound versions declared in Cargo.toml actually work,
+  # catching cases where a crate silently requires a newer API than stated.
+  minimal-versions:
+    name: minimal-versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: minimal-versions
+
+      - name: Set minimal dependency versions
+        run: cargo +nightly -Z minimal-versions update
+
+      - name: Test with minimal versions
+        run: cargo +nightly test --workspace --features vm
+
+  # ── Documentation ──────────────────────────────────────────────────────────
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build documentation (deny broken intra-doc links)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # ── Semver compatibility ────────────────────────────────────────────────────
+  # Detects accidental breaking changes to the public API relative to the latest
+  # crates.io release.  Marked continue-on-error so it doesn't block the run if
+  # no baseline is published yet.
+  semver:
+    name: semver
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo-semver-checks
+        run: |
+          cargo install cargo-semver-checks --locked
+          cargo semver-checks check-release --workspace
+
+  # ── Failure report ─────────────────────────────────────────────────────────
+  # Opens a deduplicated GitHub issue when any nightly job fails, so failures
+  # surface in the issue tracker rather than getting buried in Actions emails.
+  report:
+    name: report
+    runs-on: ubuntu-latest
+    if: ${{ failure() }}
+    needs:
+      - matrix
+      - cross-compile
+      - vm-parity
+      - miri
+      - fuzz
+      - supply-chain
+      - coverage
+      - minimal-versions
+      - docs
+      - semver
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            const title = `Nightly CI failed (${date})`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Avoid duplicate issues for the same day.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'nightly-failure',
+            });
+            if (existing.data.some(i => i.title === title)) {
+              console.log('Issue already exists for today — skipping.');
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['nightly-failure'],
+              body: [
+                `## Nightly CI failure — ${date}`,
+                '',
+                `One or more nightly jobs failed. See the [workflow run](${runUrl}) for details.`,
+                '',
+                '### Jobs covered',
+                '- Extended channel matrix (stable / beta / nightly × Linux / macOS / Windows)',
+                '- Cross-compilation checks (musl, aarch64, armv7, windows-gnu)',
+                '- VM parity (libpcap expression semantic correctness)',
+                '- MIRI (undefined behaviour in the BPF interpreter)',
+                '- Fuzzing (panic / crash detection)',
+                '- Supply chain (cargo-audit advisories, cargo-deny policy)',
+                '- Code coverage',
+                '- Minimal dependency versions',
+                '- Documentation build',
+                '- Semver compatibility',
+              ].join('\n'),
+            });
