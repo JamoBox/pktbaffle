@@ -161,6 +161,21 @@ pub enum Primitive {
     ByteAccess(ByteAccess),
 }
 
+/// Arithmetic / bitwise operator applied to a loaded byte-access value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
 /// Comparison operator used in raw byte-access expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpOp {
@@ -194,15 +209,16 @@ pub enum Layer {
 
 /// A raw byte-access test, e.g. `tcp[13] & 0x02 != 0` (SYN flag).
 ///
-/// The full semantics are: `(load(layer, offset, size) & mask) op value`,
-/// where `mask` is `None` (no AND) or `Some(m)` (apply bitmask first).
+/// The full semantics are: load the value at `(layer, offset, size)`, apply
+/// each `(ArithOp, operand)` in `alu_ops` in sequence to the accumulator,
+/// then compare the result with `op` and `value`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ByteAccess {
     pub layer: Layer,
     pub offset: i32,
     pub size: AccessSize,
-    /// Optional bitmask applied to the loaded value before comparison.
-    pub mask: Option<u32>,
+    /// ALU operations applied to the loaded value before comparison.
+    pub alu_ops: Vec<(ArithOp, u32)>,
     pub op: CmpOp,
     pub value: u32,
 }

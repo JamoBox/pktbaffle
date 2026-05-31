@@ -743,12 +743,26 @@ impl Parser<'_> {
         };
         self.expect(&Token::RBracket)?;
 
-        // Optional `& mask` before the comparison operator.
-        let mask: Option<u32> = if self.eat(&Token::Amp) {
-            Some(self.parse_u32()?)
-        } else {
-            None
-        };
+        // Zero or more arithmetic/bitwise ops applied to the loaded value.
+        let mut alu_ops: Vec<(ArithOp, u32)> = Vec::new();
+        loop {
+            let aop = match self.cur_tok() {
+                Some(Token::Amp) => ArithOp::And,
+                Some(Token::Pipe) => ArithOp::Or,
+                Some(Token::Caret) => ArithOp::Xor,
+                Some(Token::Plus) => ArithOp::Add,
+                Some(Token::Minus) => ArithOp::Sub,
+                Some(Token::Star) => ArithOp::Mul,
+                Some(Token::Slash) => ArithOp::Div,
+                Some(Token::Percent) => ArithOp::Mod,
+                Some(Token::Shl) => ArithOp::Shl,
+                Some(Token::Shr) => ArithOp::Shr,
+                _ => break,
+            };
+            self.advance();
+            let operand = self.parse_u32()?;
+            alu_ops.push((aop, operand));
+        }
 
         let op = self.parse_cmpop()?;
         let value = self.parse_u32()?;
@@ -757,9 +771,9 @@ impl Parser<'_> {
             layer,
             offset,
             size,
+            alu_ops,
             op,
             value,
-            mask,
         }))
     }
 

@@ -609,3 +609,132 @@ fn positive_offset_byte_access_unaffected() {
         result.err()
     );
 }
+
+// ── Arithmetic and bitwise operators in byte-access expressions (#32) ─────────
+
+#[test]
+fn byte_access_subtract_constant() {
+    // ip[8]-1 < 64: load TTL, subtract 1, compare less than 64
+    let result = compile("ip[8]-1 < 64", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "ip[8]-1 < 64 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_add_constant() {
+    // ip[8]+1 > 64: load TTL, add 1, compare greater than 64
+    let result = compile("ip[8]+1 > 64", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "ip[8]+1 > 64 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_bitwise_or() {
+    // tcp[13]|0x02 = 0x02: load TCP flags, OR with SYN bit, compare
+    let result = compile("tcp[13]|0x02 = 0x02", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[13]|0x02 = 0x02 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_bitwise_xor() {
+    // tcp[0]^0xff = 0: load byte, XOR with 0xff, compare equal to 0
+    let result = compile("tcp[0]^0xff = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0]^0xff = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_shift_left() {
+    // tcp[0]<<2 = 8: load byte, shift left 2, compare equal to 8
+    let result = compile("tcp[0]<<2 = 8", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0]<<2 = 8 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_shift_right() {
+    // tcp[0]>>2 = 2: load byte, shift right 2, compare equal to 2
+    let result = compile("tcp[0]>>2 = 2", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0]>>2 = 2 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_multiply_constant() {
+    // ip[4:2]*2 < 100: load IP total length, multiply by 2, compare
+    let result = compile("ip[4:2]*2 < 100", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "ip[4:2]*2 < 100 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_divide_constant() {
+    // ip[4:2]/2 < 50: load IP total length, divide by 2, compare
+    let result = compile("ip[4:2]/2 < 50", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "ip[4:2]/2 < 50 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn byte_access_divide_by_zero_is_error() {
+    // Division by zero constant must return a codegen error, not panic.
+    let result = compile("ip[8]/0 < 64", LinkType::Ethernet, Target::Classic);
+    assert!(result.is_err(), "ip[8]/0 should fail with a codegen error");
+}
+
+#[test]
+fn byte_access_existing_mask_form_unchanged() {
+    // The original & mask form must still work exactly as before.
+    let original = compile("tcp[13] & 0x02 != 0", LinkType::Ethernet, Target::Classic)
+        .expect("tcp[13] & 0x02 != 0 must compile");
+    last_two_are_ret(&original);
+}
+
+#[test]
+fn byte_access_chained_alu_ops() {
+    // Multiple ALU ops chained: tcp[13]&0x17|0x02 = 0x02
+    let result = compile(
+        "tcp[13]&0x17|0x02 = 0x02",
+        LinkType::Ethernet,
+        Target::Classic,
+    );
+    assert!(
+        result.is_ok(),
+        "tcp[13]&0x17|0x02 = 0x02 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}

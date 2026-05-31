@@ -83,6 +83,16 @@ pub enum Token {
     Colon,
     Minus,
 
+    // ── arithmetic / bitwise operators ──────────────────────────────────────
+    Plus,
+    Star,
+    Slash,
+    Percent,
+    Pipe,
+    Caret,
+    Shl,
+    Shr,
+
     // ── comparison operators ─────────────────────────────────────────────────
     Eq,
     Ne,
@@ -179,6 +189,16 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     pos += 2;
                     continue;
                 }
+                (b'<', b'<') => {
+                    push!(Token::Shl);
+                    pos += 2;
+                    continue;
+                }
+                (b'>', b'>') => {
+                    push!(Token::Shr);
+                    pos += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -233,6 +253,36 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             }
             b'-' => {
                 push!(Token::Minus);
+                pos += 1;
+                continue;
+            }
+            b'+' => {
+                push!(Token::Plus);
+                pos += 1;
+                continue;
+            }
+            b'*' => {
+                push!(Token::Star);
+                pos += 1;
+                continue;
+            }
+            b'/' => {
+                push!(Token::Slash);
+                pos += 1;
+                continue;
+            }
+            b'%' => {
+                push!(Token::Percent);
+                pos += 1;
+                continue;
+            }
+            b'|' => {
+                push!(Token::Pipe);
+                pos += 1;
+                continue;
+            }
+            b'^' => {
+                push!(Token::Caret);
                 pos += 1;
                 continue;
             }
@@ -710,5 +760,109 @@ mod tests {
         let tokens = lex(":").unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token, Token::Colon);
+    }
+
+    // ── Arithmetic / bitwise tokens (#32) ─────────────────────────────────────
+
+    #[test]
+    fn plus_token() {
+        let tokens = lex("+").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Plus);
+    }
+
+    #[test]
+    fn star_token() {
+        let tokens = lex("*").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Star);
+    }
+
+    #[test]
+    fn slash_token() {
+        let tokens = lex("/").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Slash);
+    }
+
+    #[test]
+    fn percent_token() {
+        let tokens = lex("%").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Percent);
+    }
+
+    #[test]
+    fn pipe_token() {
+        let tokens = lex("|").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Pipe);
+    }
+
+    #[test]
+    fn caret_token() {
+        let tokens = lex("^").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Caret);
+    }
+
+    #[test]
+    fn shl_token() {
+        let tokens = lex("<<").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Shl);
+    }
+
+    #[test]
+    fn shr_token() {
+        let tokens = lex(">>").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Shr);
+    }
+
+    #[test]
+    fn pipe_pipe_is_or_not_two_pipes() {
+        // `||` must still lex as Token::Or, not two Pipe tokens.
+        let tokens = lex("||").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Or);
+    }
+
+    #[test]
+    fn lt_still_lexes_after_shl_addition() {
+        // bare `<` must still produce Token::Lt
+        let tokens = lex("<").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Lt);
+    }
+
+    #[test]
+    fn gt_still_lexes_after_shr_addition() {
+        // bare `>` must still produce Token::Gt
+        let tokens = lex(">").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token, Token::Gt);
+    }
+
+    #[test]
+    fn byte_access_subtract_lexes() {
+        // ip[8]-1 < 64 must tokenise without a LexError
+        let tokens = lex("ip[8]-1 < 64").unwrap();
+        assert!(tokens.iter().any(|s| s.token == Token::Minus));
+        assert!(tokens.iter().any(|s| s.token == Token::Lt));
+    }
+
+    #[test]
+    fn byte_access_shl_lexes() {
+        // tcp[0]<<2 = 8 must produce a Shl token
+        let tokens = lex("tcp[0]<<2 = 8").unwrap();
+        assert!(tokens.iter().any(|s| s.token == Token::Shl));
+    }
+
+    #[test]
+    fn byte_access_or_lexes() {
+        // tcp[13]|0x02 = 0x02 must produce a Pipe token
+        let tokens = lex("tcp[13]|0x02 = 0x02").unwrap();
+        assert!(tokens.iter().any(|s| s.token == Token::Pipe));
     }
 }
