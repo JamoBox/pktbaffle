@@ -940,7 +940,7 @@ enum PatchField {
 ///
 /// # Errors
 ///
-/// Returns [`Error::CodegenError`][crate::Error::CodegenError] for filter
+/// Returns [`Error::CodegenError`] for filter
 /// constructs that are valid syntax but cannot be represented in classic BPF
 /// for the requested link type (e.g. `inbound`/`outbound` direction primitives).
 pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {

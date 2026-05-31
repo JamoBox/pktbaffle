@@ -4,7 +4,7 @@
 
 use crate::bpf::{Insn, BPF_ABS, BPF_LD};
 
-/// Remove consecutive identical absolute loads (ldw/ldh/ldb A ← P[k]).
+/// Remove consecutive identical absolute loads (ldw/ldh/ldb A ← `P[k]`).
 ///
 /// This commonly appears when two predicates both start by loading the
 /// Ethernet type field, or when an IP guard is emitted redundantly.

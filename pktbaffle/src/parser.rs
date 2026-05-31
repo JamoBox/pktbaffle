@@ -23,7 +23,7 @@ use crate::lexer::{Spanned, Token};
 ///
 /// # Errors
 ///
-/// Returns [`Error::ParseError`][crate::Error::ParseError] if the token
+/// Returns [`Error::ParseError`] if the token
 /// stream does not match the filter grammar.
 ///
 /// # Example
