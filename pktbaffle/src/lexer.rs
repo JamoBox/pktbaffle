@@ -49,6 +49,9 @@ pub enum Token {
     Igrp, // IGRP (proto 9)
     Vrrp, // VRRP (proto 112)
 
+    // ── protocol chain traversal ─────────────────────────────────────────────
+    Protochain,
+
     // ── encapsulation primitives ─────────────────────────────────────────────
     Vlan,
     Mpls,
@@ -559,6 +562,7 @@ fn keyword_or_ident(s: &str) -> Token {
         "mpls" => Token::Mpls,
         "pppoed" => Token::Pppoed,
         "pppoes" => Token::Pppoes,
+        "protochain" => Token::Protochain,
         // Direction
         "inbound" => Token::Inbound,
         "outbound" => Token::Outbound,

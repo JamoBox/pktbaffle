@@ -307,6 +307,8 @@ impl Codegen {
             Primitive::Mpls { label } => self.emit_mpls(*label),
             Primitive::PppoeDiscovery => self.emit_ethertype(0x8863),
             Primitive::PppoeSession { session_id } => self.emit_pppoe_session(*session_id),
+            Primitive::IpProtoChain(n) => self.emit_ip4_l4(*n),
+            Primitive::Ip6ProtoChain(n) => self.emit_ip6_l4(*n),
             Primitive::Len { op, value } => self.emit_len(*op, *value),
             Primitive::ByteAccess(ba) => self.emit_byte_access(ba),
             Primitive::Inbound | Primitive::Outbound => Err(Error::CodegenError {
