@@ -210,6 +210,72 @@ impl Insn {
         }
     }
 
+    /// ADD constant `k` to accumulator.
+    #[inline]
+    pub fn add_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_ADD | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// SUB constant `k` from accumulator.
+    #[inline]
+    pub fn sub_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_SUB | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// MUL accumulator by constant `k`.
+    #[inline]
+    pub fn mul_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_MUL | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// DIV accumulator by constant `k`.
+    #[inline]
+    pub fn div_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_DIV | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// LSH accumulator by `k` bits.
+    #[inline]
+    pub fn lsh_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_LSH | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// XOR accumulator with constant `k`.
+    #[inline]
+    pub fn xor_k(k: u32) -> Self {
+        Self {
+            code: BPF_ALU | BPF_XOR | BPF_K,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
     /// Jump: `A == k` → jt, else jf.
     #[inline]
     pub fn jeq_k(k: u32, jt: u8, jf: u8) -> Self {

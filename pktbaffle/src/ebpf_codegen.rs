@@ -934,8 +934,8 @@ impl Codegen {
             AccessSize::Half => self.emit_load_half(off),
             AccessSize::Word => self.emit_load_word(off),
         };
-        if let Some(mask) = ba.mask {
-            self.push(Insn::and32_imm(R4, mask as i32));
+        for &(aop, operand) in &ba.alu_ops {
+            self.push(ebpf_alu32(aop, R4, operand as i32)?);
         }
         let mut p = self.emit_cmp(ba.op, ba.value)?;
         p.failure.insert(0, bc);
@@ -966,8 +966,8 @@ impl Codegen {
             AccessSize::Word => Insn::ldx_w(R4, R6, ba.offset as i16),
         };
         self.push(insn);
-        if let Some(mask) = ba.mask {
-            self.push(Insn::and32_imm(R4, mask as i32));
+        for &(aop, operand) in &ba.alu_ops {
+            self.push(ebpf_alu32(aop, R4, operand as i32)?);
         }
         let mut p = self.emit_cmp(ba.op, ba.value)?;
         p.failure.extend([bc_ihl, bc_trans]);
@@ -999,6 +999,34 @@ impl Codegen {
             failure: vec![Patch(idx)],
         })
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn ebpf_alu32(op: ArithOp, dst: u8, imm: i32) -> Result<Insn> {
+    Ok(match op {
+        ArithOp::And => Insn::and32_imm(dst, imm),
+        ArithOp::Or => Insn::or32_imm(dst, imm),
+        ArithOp::Xor => Insn::xor32_imm(dst, imm),
+        ArithOp::Add => Insn::add32_imm(dst, imm),
+        ArithOp::Sub => Insn::sub32_imm(dst, imm),
+        ArithOp::Mul => Insn::mul32_imm(dst, imm),
+        ArithOp::Div => {
+            if imm == 0 {
+                return Err(Error::CodegenError {
+                    message: "division by zero in byte-access expression".into(),
+                });
+            }
+            Insn::div32_imm(dst, imm)
+        }
+        ArithOp::Mod => {
+            return Err(Error::CodegenError {
+                message: "modulo (%) is not supported in eBPF byte-access expressions".into(),
+            });
+        }
+        ArithOp::Shl => Insn::lsh32_imm(dst, imm),
+        ArithOp::Shr => Insn::rsh32_imm(dst, imm),
+    })
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────

@@ -885,8 +885,48 @@ impl Codegen {
             }
         }
 
-        if let Some(mask) = ba.mask {
-            self.push(Insn::and_k(mask));
+        for &(aop, operand) in &ba.alu_ops {
+            match aop {
+                ArithOp::And => {
+                    self.push(Insn::and_k(operand));
+                }
+                ArithOp::Or => {
+                    self.push(Insn::or_k(operand));
+                }
+                ArithOp::Xor => {
+                    self.push(Insn::xor_k(operand));
+                }
+                ArithOp::Add => {
+                    self.push(Insn::add_k(operand));
+                }
+                ArithOp::Sub => {
+                    self.push(Insn::sub_k(operand));
+                }
+                ArithOp::Mul => {
+                    self.push(Insn::mul_k(operand));
+                }
+                ArithOp::Div => {
+                    if operand == 0 {
+                        return Err(Error::CodegenError {
+                            message: "division by zero in byte-access expression".into(),
+                        });
+                    }
+                    self.push(Insn::div_k(operand));
+                }
+                ArithOp::Mod => {
+                    return Err(Error::CodegenError {
+                        message:
+                            "modulo (%) is not supported in classic BPF byte-access expressions"
+                                .into(),
+                    });
+                }
+                ArithOp::Shl => {
+                    self.push(Insn::lsh_k(operand));
+                }
+                ArithOp::Shr => {
+                    self.push(Insn::rsh_k(operand));
+                }
+            }
         }
 
         let p = self.emit_cmp(ba.op, ba.value)?;

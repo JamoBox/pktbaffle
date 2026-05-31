@@ -30,9 +30,12 @@ pub const BPF_X: u8 = 0x08; // use src_reg
 pub const BPF_ADD: u8 = 0x00;
 pub const BPF_SUB: u8 = 0x10;
 pub const BPF_MUL: u8 = 0x20;
+pub const BPF_DIV: u8 = 0x30;
+pub const BPF_OR: u8 = 0x40;
 pub const BPF_AND: u8 = 0x50;
 pub const BPF_LSH: u8 = 0x60;
 pub const BPF_RSH: u8 = 0x70;
+pub const BPF_XOR: u8 = 0xa0;
 pub const BPF_MOV: u8 = 0xb0;
 
 // ── Jump operations (high nibble of opcode) ──────────────────────────────────
@@ -137,6 +140,36 @@ impl Insn {
     /// `dst &= imm` (32-bit).
     pub fn and32_imm(dst: u8, imm: i32) -> Self {
         Self::new(BPF_ALU | BPF_AND | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst |= imm` (32-bit).
+    pub fn or32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_OR | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst ^= imm` (32-bit).
+    pub fn xor32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_XOR | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst += imm` (32-bit).
+    pub fn add32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_ADD | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst -= imm` (32-bit).
+    pub fn sub32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_SUB | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst *= imm` (32-bit).
+    pub fn mul32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_MUL | BPF_K, dst, 0, 0, imm)
+    }
+
+    /// `dst /= imm` (32-bit).
+    pub fn div32_imm(dst: u8, imm: i32) -> Self {
+        Self::new(BPF_ALU | BPF_DIV | BPF_K, dst, 0, 0, imm)
     }
 
     /// `dst >>= imm` (32-bit logical right shift).
