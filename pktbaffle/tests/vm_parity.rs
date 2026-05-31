@@ -170,7 +170,7 @@ fn eth_vlan_ipv4_tcp(
     p.extend_from_slice(&ETHERTYPE_VLAN.to_be_bytes()); // outer ethertype
     p.extend_from_slice(&(vlan_id & 0x0FFF).to_be_bytes()); // TCI (PCP=0, DEI=0, VID)
     p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes()); // inner ethertype
-    // IPv4 + TCP
+                                                        // IPv4 + TCP
     p.push(0x45);
     p.push(0x00);
     p.extend_from_slice(&(20u16 + 20).to_be_bytes());
@@ -255,22 +255,34 @@ fn host_rejects_unrelated_ips() {
 
 #[test]
 fn src_host_matches() {
-    assert!(run_filter("src host 192.168.1.1", &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(run_filter(
+        "src host 192.168.1.1",
+        &tcp(IP_A, IP_B, 1234, 80)
+    ));
 }
 
 #[test]
 fn src_host_rejects_when_only_dst_matches() {
-    assert!(!run_filter("src host 192.168.1.1", &tcp(IP_B, IP_A, 1234, 80)));
+    assert!(!run_filter(
+        "src host 192.168.1.1",
+        &tcp(IP_B, IP_A, 1234, 80)
+    ));
 }
 
 #[test]
 fn dst_host_matches() {
-    assert!(run_filter("dst host 192.168.1.1", &tcp(IP_B, IP_A, 1234, 80)));
+    assert!(run_filter(
+        "dst host 192.168.1.1",
+        &tcp(IP_B, IP_A, 1234, 80)
+    ));
 }
 
 #[test]
 fn dst_host_rejects_when_only_src_matches() {
-    assert!(!run_filter("dst host 192.168.1.1", &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(!run_filter(
+        "dst host 192.168.1.1",
+        &tcp(IP_A, IP_B, 1234, 80)
+    ));
 }
 
 // ── Protocol filters ─────────────────────────────────────────────────────────
@@ -400,7 +412,10 @@ fn src_port_matches() {
 
 #[test]
 fn src_port_rejects_when_only_dst_matches() {
-    assert!(!run_filter("tcp src port 1234", &tcp(IP_A, IP_B, 4321, 1234)));
+    assert!(!run_filter(
+        "tcp src port 1234",
+        &tcp(IP_A, IP_B, 4321, 1234)
+    ));
 }
 
 #[test]
