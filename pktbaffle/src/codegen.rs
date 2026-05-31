@@ -96,35 +96,40 @@ impl Codegen {
     }
 
     // Resolve a patch to point to `target_idx`.
-    fn resolve(&mut self, patch: Patch, target_idx: usize) {
+    fn resolve(&mut self, patch: Patch, target_idx: usize) -> Result<()> {
         match patch {
             Patch::Jt(i) => {
-                self.insns[i].jt = Self::offset(i, target_idx, &self.insns);
+                self.insns[i].jt = Self::offset(i, target_idx)?;
             }
             Patch::Jf(i) => {
-                self.insns[i].jf = Self::offset(i, target_idx, &self.insns);
+                self.insns[i].jf = Self::offset(i, target_idx)?;
             }
             Patch::Ja(i) => {
-                let off = Self::offset(i, target_idx, &self.insns) as u32;
+                let off = Self::offset(i, target_idx)? as u32;
                 self.insns[i].k = off;
             }
         }
+        Ok(())
     }
 
-    fn resolve_all(&mut self, patches: Vec<Patch>, target_idx: usize) {
+    fn resolve_all(&mut self, patches: Vec<Patch>, target_idx: usize) -> Result<()> {
         for p in patches {
-            self.resolve(p, target_idx);
+            self.resolve(p, target_idx)?;
         }
+        Ok(())
     }
 
-    fn offset(from: usize, to: usize, _insns: &[Insn]) -> u8 {
+    fn offset(from: usize, to: usize) -> Result<u8> {
         debug_assert!(to > from, "BPF jump target must be forward");
         let diff = to - from - 1;
-        debug_assert!(
-            diff <= 255,
-            "BPF jump offset overflow; program is too large"
-        );
-        diff as u8
+        if diff > 255 {
+            return Err(Error::CodegenError {
+                message:
+                    "filter expression is too complex: BPF jump offset exceeds 255 instructions"
+                        .into(),
+            });
+        }
+        Ok(diff as u8)
     }
 
     // ── expression dispatch ──────────────────────────────────────────────────
@@ -143,7 +148,7 @@ impl Codegen {
         let left_p = self.emit_expr(left)?;
         // Resolve left's explicit success jumps to the start of right.
         let right_start = self.insns.len();
-        self.resolve_all(left_p.success, right_start);
+        self.resolve_all(left_p.success, right_start)?;
         let right_p = self.emit_expr(right)?;
         Ok(Patches {
             success: right_p.success,
@@ -159,7 +164,7 @@ impl Codegen {
         let ja_idx = self.push(Insn::ja(0));
         let right_start = self.insns.len();
         // Left's failures now try the right branch.
-        self.resolve_all(left_p.failure, right_start);
+        self.resolve_all(left_p.failure, right_start)?;
         let right_p = self.emit_expr(right)?;
         // Collect all success patches: left's explicit success jumps +
         // the JA we just inserted + right's success patches.
@@ -181,7 +186,7 @@ impl Codegen {
         // inner_p.failure patches now point to NOT's success (fall-through past JA).
         // inner_p.success patches and the new JA become NOT's failure.
         let not_succ_start = self.insns.len();
-        self.resolve_all(inner_p.failure, not_succ_start);
+        self.resolve_all(inner_p.failure, not_succ_start)?;
         Ok(Patches {
             success: Vec::new(), // fall-through is the success path
             failure: inner_p
@@ -406,7 +411,7 @@ impl Codegen {
                 let dst_start = self.insns.len();
                 // Resolve src failures to dst start.
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_ip6_addr(self, dst_off, &mut p.failure);
                 p.success.push(Patch::Ja(ja_idx));
@@ -497,7 +502,7 @@ impl Codegen {
                 let ja_idx = self.push(Insn::ja(0));
                 let dst_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_net6(self, dst_off, &mut p.failure);
                 p.success.push(Patch::Ja(ja_idx));
@@ -583,7 +588,7 @@ impl Codegen {
                 let ja_idx = self.push(Insn::ja(0));
                 let dst_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_range(self, dst_port_off, &mut p.failure);
                 p.success.push(Patch::Ja(ja_idx));
@@ -632,7 +637,7 @@ impl Codegen {
 
             // ── IPv6 path ──────────────────────────────────────────────────────
             let ip6_start = self.insns.len();
-            self.resolve(Patch::Jt(i_is_ip6), ip6_start);
+            self.resolve(Patch::Jt(i_is_ip6), ip6_start)?;
 
             self.push(Insn::ldb_abs(ip6_nh_off));
             self.emit_l4_proto_check(proto, &mut p.failure)?;
@@ -640,7 +645,7 @@ impl Codegen {
 
             // Both paths converge here; resolve IPv4 JA to this position.
             let port_check_start = self.insns.len();
-            self.resolve(Patch::Ja(ja_skip_ip6), port_check_start);
+            self.resolve(Patch::Ja(ja_skip_ip6), port_check_start)?;
         } else {
             // RawIp: always IPv4, no ethertype check, no IPv6.
             self.push(Insn::ldb_abs(ip4_proto_off));
@@ -681,7 +686,7 @@ impl Codegen {
                 let i_udp = self.push(Insn::jeq_k(17, 0, 0xff));
                 failure.push(Patch::Jf(i_udp));
                 let after = self.insns.len();
-                self.resolve(Patch::Jt(i_tcp), after);
+                self.resolve(Patch::Jt(i_tcp), after)?;
             }
             Some(pr) => {
                 return Err(Error::CodegenError {
@@ -725,7 +730,7 @@ impl Codegen {
                 let ja_idx = self.push(Insn::ja(0));
                 let src_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, src_start);
+                    self.resolve(fp, src_start)?;
                 }
                 check_mac(self, 6, &mut p.failure); // src MAC at offset 6
                 p.success.push(Patch::Ja(ja_idx));
@@ -1106,8 +1111,8 @@ pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     cg.push(Insn::ret_k(BPF_DROP));
 
     // Resolve all pending patches.
-    cg.resolve_all(patches.success, accept_idx);
-    cg.resolve_all(patches.failure, drop_idx);
+    cg.resolve_all(patches.success, accept_idx)?;
+    cg.resolve_all(patches.failure, drop_idx)?;
 
     Ok(Program::new(cg.insns))
 }
