@@ -230,3 +230,35 @@ pub fn default_interface() -> Result<String> {
         .find(|name| name != "lo")
         .ok_or_else(|| Error::Platform("no non-loopback interface found".into()))
 }
+
+#[cfg(test)]
+mod tests {
+    // These tests verify that the libc symbols required by the live capture
+    // implementation are present. They act as compile-time guards: they fail
+    // to compile with libc < 0.2.65 (which lacks packet_mreq, ifreq, IFNAMSIZ
+    // on Linux), ensuring the Cargo.toml lower bound is tight enough.
+
+    #[test]
+    fn libc_packet_mreq_fields_accessible() {
+        let mreq = libc::packet_mreq {
+            mr_ifindex: 0,
+            mr_type: 0,
+            mr_alen: 0,
+            mr_address: [0; 8],
+        };
+        assert_eq!(mreq.mr_ifindex, 0);
+    }
+
+    #[test]
+    fn libc_ifreq_zeroed() {
+        let ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
+        assert_eq!(ifreq.ifr_name[0], 0);
+    }
+
+    #[test]
+    fn libc_ifnamsiz_is_sensible() {
+        // IFNAMSIZ has been 16 on Linux since the kernel was first written;
+        // any value in [8, 64] is acceptable for our length check.
+        assert!(libc::IFNAMSIZ >= 8 && libc::IFNAMSIZ <= 64);
+    }
+}
