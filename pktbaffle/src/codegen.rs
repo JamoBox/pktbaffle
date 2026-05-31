@@ -861,7 +861,13 @@ impl Codegen {
     // ── raw byte access ───────────────────────────────────────────────────────
 
     fn emit_byte_access(&mut self, ba: &ByteAccess) -> Result<Patches> {
-        // Calculate the absolute packet offset for non-transport layers.
+        match &ba.rhs {
+            CmpRhs::Const(value) => self.emit_byte_access_const(ba, *value),
+            CmpRhs::Load(rhs_load) => self.emit_byte_access_load(ba, rhs_load),
+        }
+    }
+
+    fn emit_byte_access_const(&mut self, ba: &ByteAccess, value: u32) -> Result<Patches> {
         match ba.layer {
             Layer::Raw => {
                 if self.link == LinkType::RawIp {
@@ -878,14 +884,18 @@ impl Codegen {
                 self.load_sized(off, ba.size, false);
             }
             Layer::Trans => {
-                // Must emit MSH first to populate X with the IP header length.
                 self.push(Insn::ldx_msh(self.link.net_offset()));
                 let off = self.link.net_offset() + ba.offset as u32;
-                self.load_sized(off, ba.size, true); // indirect
+                self.load_sized(off, ba.size, true);
             }
         }
 
-        for &(aop, operand) in &ba.alu_ops {
+        self.emit_alu_ops(&ba.alu_ops)?;
+        self.emit_cmp(ba.op, value)
+    }
+
+    fn emit_alu_ops(&mut self, ops: &[(ArithOp, u32)]) -> Result<()> {
+        for &(aop, operand) in ops {
             match aop {
                 ArithOp::And => {
                     self.push(Insn::and_k(operand));
@@ -928,9 +938,72 @@ impl Codegen {
                 }
             }
         }
+        Ok(())
+    }
 
-        let p = self.emit_cmp(ba.op, ba.value)?;
-        Ok(p)
+    /// Emit code for an expr-vs-expr byte-access comparison (`lhs op rhs_load`).
+    ///
+    /// Strategy:
+    /// - If neither side is transport-layer, use TAX to shuttle the LHS value
+    ///   into X (no scratch memory needed since MSH is not required).
+    /// - If either side is transport-layer, use scratch memory slot 0 to
+    ///   preserve the LHS value across the MSH + indirect load of the RHS.
+    fn emit_byte_access_load(&mut self, ba: &ByteAccess, rhs: &ByteLoad) -> Result<Patches> {
+        let net = self.link.net_offset();
+        let lhs_trans = ba.layer == Layer::Trans;
+        let rhs_trans = rhs.layer == Layer::Trans;
+
+        if lhs_trans || rhs_trans {
+            // At least one side needs MSH; use scratch memory for LHS.
+
+            // Load LHS into A.
+            if lhs_trans {
+                self.push(Insn::ldx_msh(net));
+                let off = net + ba.offset as u32;
+                self.load_sized(off, ba.size, true);
+            } else {
+                let off = self.layer_offset(ba.layer, ba.offset as u32);
+                self.load_sized(off, ba.size, false);
+            }
+            self.emit_alu_ops(&ba.alu_ops)?;
+            // Save LHS to scratch M[0].
+            self.push(Insn::st(0));
+
+            // Load RHS into A.  If LHS was Trans, X still holds IHL*4 from the
+            // MSH above — no need to reload it.
+            if rhs_trans {
+                if !lhs_trans {
+                    self.push(Insn::ldx_msh(net));
+                }
+                let off = net + rhs.offset as u32;
+                self.load_sized(off, rhs.size, true);
+            } else {
+                let off = self.layer_offset(rhs.layer, rhs.offset as u32);
+                self.load_sized(off, rhs.size, false);
+            }
+
+            // Restore LHS from scratch into X, then compare A (RHS) vs X (LHS).
+            self.push(Insn::ldx_mem(0));
+        } else {
+            // Neither side needs MSH; use TAX for a shorter sequence.
+            let lhs_off = self.layer_offset(ba.layer, ba.offset as u32);
+            self.load_sized(lhs_off, ba.size, false);
+            self.emit_alu_ops(&ba.alu_ops)?;
+            self.push(Insn::tax());
+            let rhs_off = self.layer_offset(rhs.layer, rhs.offset as u32);
+            self.load_sized(rhs_off, rhs.size, false);
+            // A = RHS, X = LHS — fall through to emit_cmp_x below.
+        }
+
+        self.emit_cmp_x(ba.op)
+    }
+
+    /// Compute the absolute packet byte offset for `layer` + `offset`.
+    fn layer_offset(&self, layer: Layer, offset: u32) -> u32 {
+        match layer {
+            Layer::Raw => offset,
+            Layer::Net | Layer::Trans => self.link.net_offset() + offset,
+        }
     }
 
     fn load_sized(&mut self, off: u32, size: AccessSize, indirect: bool) {
@@ -954,6 +1027,39 @@ impl Codegen {
             CmpOp::Lt => (Insn::jge_k(value, 0xff, 0), PatchField::Jt), // ge → fail → lt succeeds
             CmpOp::Le => (Insn::jgt_k(value, 0xff, 0), PatchField::Jt), // gt → fail → le succeeds
             CmpOp::BitAnd => (Insn::jset_k(value, 0, 0xff), PatchField::Jf), // not set → fail
+        };
+        let idx = self.push(insn);
+        let patch = match fail_field {
+            PatchField::Jt => Patch::Jt(idx),
+            PatchField::Jf => Patch::Jf(idx),
+        };
+        Ok(Patches {
+            success: vec![],
+            failure: vec![patch],
+        })
+    }
+
+    /// Emit an X-register comparison for an expr-vs-expr test.
+    ///
+    /// At the call site: A = RHS value, X = LHS value.
+    /// We want to test `LHS op RHS`, i.e. `X op A`.
+    fn emit_cmp_x(&mut self, op: CmpOp) -> Result<Patches> {
+        // A=RHS, X=LHS. Rewrite `X op A` in terms of BPF's `A op X`:
+        //   X == A  ↔  A == X     → jeq_x, fail=jf
+        //   X != A  ↔  A != X     → jeq_x (inverted), fail=jt
+        //   X <  A  ↔  A >  X     → jgt_x, fail=jf
+        //   X <= A  ↔  A >= X     → jge_x, fail=jf
+        //   X >  A  ↔  NOT(A>=X)  → jge_x (inverted), fail=jt
+        //   X >= A  ↔  NOT(A>X)   → jgt_x (inverted), fail=jt
+        //   X &  A  ↔  A &  X     → jset_x, fail=jf
+        let (insn, fail_field) = match op {
+            CmpOp::Eq => (Insn::jeq_x(0, 0xff), PatchField::Jf),
+            CmpOp::Ne => (Insn::jeq_x(0xff, 0), PatchField::Jt),
+            CmpOp::Lt => (Insn::jgt_x(0, 0xff), PatchField::Jf),
+            CmpOp::Le => (Insn::jge_x(0, 0xff), PatchField::Jf),
+            CmpOp::Gt => (Insn::jge_x(0xff, 0), PatchField::Jt),
+            CmpOp::Ge => (Insn::jgt_x(0xff, 0), PatchField::Jt),
+            CmpOp::BitAnd => (Insn::jset_x(0, 0xff), PatchField::Jf),
         };
         let idx = self.push(insn);
         let patch = match fail_field {

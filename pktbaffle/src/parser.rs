@@ -57,6 +57,10 @@ impl Parser<'_> {
         self.tokens.get(self.pos).map(|s| &s.token)
     }
 
+    fn peek_tok(&self, lookahead: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + lookahead).map(|s| &s.token)
+    }
+
     fn advance(&mut self) -> Option<&Token> {
         let t = self.tokens.get(self.pos).map(|s| &s.token);
         if t.is_some() {
@@ -765,7 +769,7 @@ impl Parser<'_> {
         }
 
         let op = self.parse_cmpop()?;
-        let value = self.parse_u32()?;
+        let rhs = self.parse_cmp_rhs()?;
 
         Ok(Primitive::ByteAccess(ByteAccess {
             layer,
@@ -773,7 +777,7 @@ impl Parser<'_> {
             size,
             alu_ops,
             op,
-            value,
+            rhs,
         }))
     }
 
@@ -792,6 +796,71 @@ impl Parser<'_> {
                 tok_desc
             ))),
         }
+    }
+
+    /// Parse the RHS of a byte-access comparison: either a constant integer or
+    /// another `layer[offset:size]` load (expr-vs-expr form).
+    fn parse_cmp_rhs(&mut self) -> Result<CmpRhs> {
+        let rhs_layer = match self.cur_tok() {
+            Some(Token::Tcp) | Some(Token::Udp) | Some(Token::Icmp) | Some(Token::Icmp6) => {
+                Some(Layer::Trans)
+            }
+            Some(Token::Ip) | Some(Token::Ip6) => Some(Layer::Net),
+            Some(Token::Ether) => Some(Layer::Raw),
+            _ => None,
+        };
+
+        if let Some(layer) = rhs_layer {
+            // Confirm the token after the keyword is `[` before committing.
+            if self.peek_tok(1) == Some(&Token::LBracket) {
+                self.advance(); // consume the layer keyword
+                return Ok(CmpRhs::Load(self.parse_byte_load(layer)?));
+            }
+        }
+
+        Ok(CmpRhs::Const(self.parse_u32()?))
+    }
+
+    /// Parse `[offset:size]` and return a `ByteLoad` for the given layer.
+    fn parse_byte_load(&mut self, layer: Layer) -> Result<ByteLoad> {
+        self.expect(&Token::LBracket)?;
+        let offset = self.parse_i32()?;
+        if offset < 0 {
+            return Err(self.err(format!(
+                "byte-access offset must be non-negative, got {}",
+                offset
+            )));
+        }
+        let size = if self.eat(&Token::Colon) {
+            match self.cur_tok() {
+                Some(Token::Num(1)) => {
+                    self.advance();
+                    AccessSize::Byte
+                }
+                Some(Token::Num(2)) => {
+                    self.advance();
+                    AccessSize::Half
+                }
+                Some(Token::Num(4)) => {
+                    self.advance();
+                    AccessSize::Word
+                }
+                tok => {
+                    return Err(self.err(format!(
+                        "invalid byte-access size {:?} (must be 1, 2, or 4)",
+                        tok
+                    )))
+                }
+            }
+        } else {
+            AccessSize::Byte
+        };
+        self.expect(&Token::RBracket)?;
+        Ok(ByteLoad {
+            layer,
+            offset,
+            size,
+        })
     }
 
     // ── token helpers ────────────────────────────────────────────────────────

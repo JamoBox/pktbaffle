@@ -2358,3 +2358,110 @@ fn ipv6_net_direction_variants_compile() {
         assert_all_paths_terminate(f, &insns);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §15g Byte-access expr-vs-expr comparison (issue #35)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn is_st(insn: bpf::Insn) -> bool {
+    insn.code == bpf::BPF_ST
+}
+fn is_ldx_mem(insn: bpf::Insn) -> bool {
+    insn.code == (bpf::BPF_LDX | bpf::BPF_W | bpf::BPF_MEM)
+}
+fn is_tax(insn: bpf::Insn) -> bool {
+    insn.code == (bpf::BPF_MISC | bpf::BPF_TAX)
+}
+fn is_jcmp_x(insn: bpf::Insn) -> bool {
+    is_jmp(insn) && (insn.code & 0x08) == bpf::BPF_X && (insn.code & 0xf0) != bpf::BPF_JA
+}
+
+/// `tcp[0] = tcp[4]` compiles without error and produces valid BPF.
+#[test]
+fn byte_access_expr_vs_expr_trans_compiles() {
+    let insns = cbpf("tcp[0] = tcp[4]");
+    assert!(!insns.is_empty());
+    assert_well_formed("tcp[0] = tcp[4]", &insns);
+    assert_jumps_in_bounds("tcp[0] = tcp[4]", &insns);
+    assert_all_paths_terminate("tcp[0] = tcp[4]", &insns);
+}
+
+/// `ip[12:4] = ip[16:4]` (source IP equals destination IP) compiles correctly.
+#[test]
+fn byte_access_expr_vs_expr_net_compiles() {
+    let insns = cbpf("ip[12:4] = ip[16:4]");
+    assert!(!insns.is_empty());
+    assert_well_formed("ip[12:4] = ip[16:4]", &insns);
+    assert_jumps_in_bounds("ip[12:4] = ip[16:4]", &insns);
+    assert_all_paths_terminate("ip[12:4] = ip[16:4]", &insns);
+}
+
+/// Comparing two transport-layer fields must use scratch memory (ST/LDX M[])
+/// because X is occupied by the MSH result throughout both loads.
+#[test]
+fn byte_access_expr_vs_expr_trans_uses_scratch() {
+    let insns = cbpf("tcp[0] = tcp[4]");
+    assert!(
+        insns.iter().any(|i| is_st(*i)),
+        "tcp[0] = tcp[4] must emit ST to save LHS to scratch: {insns:?}"
+    );
+    assert!(
+        insns.iter().any(|i| is_ldx_mem(*i)),
+        "tcp[0] = tcp[4] must emit LDX M[] to restore LHS from scratch: {insns:?}"
+    );
+}
+
+/// Comparing two net-layer fields can use TAX instead of scratch memory
+/// because no MSH instruction is required for net-layer loads.
+#[test]
+fn byte_access_expr_vs_expr_net_uses_tax() {
+    let insns = cbpf("ip[12:4] = ip[16:4]");
+    assert!(
+        insns.iter().any(|i| is_tax(*i)),
+        "ip[12:4] = ip[16:4] must emit TAX to shuttle LHS into X: {insns:?}"
+    );
+}
+
+/// The jump in an expr-vs-expr comparison must compare against the X register,
+/// not against a constant K.
+#[test]
+fn byte_access_expr_vs_expr_emits_x_register_jump() {
+    for f in &["tcp[0] = tcp[4]", "ip[12:4] = ip[16:4]"] {
+        let insns = cbpf(f);
+        assert!(
+            insns.iter().any(|i| is_jcmp_x(*i)),
+            "{f:?} must produce an X-register jump (jeq/jgt/jge/jset x): {insns:?}"
+        );
+    }
+}
+
+/// All six comparison operators work for an expr-vs-expr byte-access comparison.
+#[test]
+fn byte_access_expr_vs_expr_all_operators_compile() {
+    for f in &[
+        "tcp[0] = tcp[4]",
+        "tcp[0] != tcp[4]",
+        "tcp[0] < tcp[4]",
+        "tcp[0] <= tcp[4]",
+        "tcp[0] > tcp[4]",
+        "tcp[0] >= tcp[4]",
+    ] {
+        let insns = cbpf(f);
+        assert!(!insns.is_empty(), "empty program for {f:?}");
+        assert_well_formed(f, &insns);
+        assert_all_paths_terminate(f, &insns);
+    }
+}
+
+/// The existing constant-RHS byte-access form must continue to compile and
+/// produce identical bytecode after the feature is added.
+#[test]
+fn byte_access_expr_vs_const_rhs_unaffected() {
+    let before = cbpf("tcp[13] & 0x02 != 0");
+    assert!(!before.is_empty());
+    // Must still use a constant (K) comparison, not an X-register comparison.
+    assert!(
+        !before.iter().any(|i| is_jcmp_x(*i)),
+        "constant-RHS form must not emit X-register jumps: {before:?}"
+    );
+}

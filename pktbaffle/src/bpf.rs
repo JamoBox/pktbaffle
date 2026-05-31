@@ -320,6 +320,83 @@ impl Insn {
         }
     }
 
+    /// Jump: `A == X` → jt, else jf.
+    #[inline]
+    pub fn jeq_x(jt: u8, jf: u8) -> Self {
+        Self {
+            code: BPF_JMP | BPF_JEQ | BPF_X,
+            jt,
+            jf,
+            k: 0,
+        }
+    }
+
+    /// Jump: `A > X` → jt, else jf.
+    #[inline]
+    pub fn jgt_x(jt: u8, jf: u8) -> Self {
+        Self {
+            code: BPF_JMP | BPF_JGT | BPF_X,
+            jt,
+            jf,
+            k: 0,
+        }
+    }
+
+    /// Jump: `A >= X` → jt, else jf.
+    #[inline]
+    pub fn jge_x(jt: u8, jf: u8) -> Self {
+        Self {
+            code: BPF_JMP | BPF_JGE | BPF_X,
+            jt,
+            jf,
+            k: 0,
+        }
+    }
+
+    /// Jump: `A & X != 0` → jt, else jf.
+    #[inline]
+    pub fn jset_x(jt: u8, jf: u8) -> Self {
+        Self {
+            code: BPF_JMP | BPF_JSET | BPF_X,
+            jt,
+            jf,
+            k: 0,
+        }
+    }
+
+    /// Copy accumulator to X register (`A → X`).
+    #[inline]
+    pub fn tax() -> Self {
+        Self {
+            code: BPF_MISC | BPF_TAX,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        }
+    }
+
+    /// Store accumulator to scratch memory slot `k` (`M[k] = A`).
+    #[inline]
+    pub fn st(k: u32) -> Self {
+        Self {
+            code: BPF_ST,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    /// Load X register from scratch memory slot `k` (`X = M[k]`).
+    #[inline]
+    pub fn ldx_mem(k: u32) -> Self {
+        Self {
+            code: BPF_LDX | BPF_W | BPF_MEM,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
     /// Unconditional jump forward by `offset` instructions.
     #[inline]
     pub fn ja(offset: u32) -> Self {

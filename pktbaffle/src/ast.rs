@@ -207,11 +207,30 @@ pub enum Layer {
     Trans,
 }
 
-/// A raw byte-access test, e.g. `tcp[13] & 0x02 != 0` (SYN flag).
+/// A raw byte load from a packet field, used as the RHS of an expr-vs-expr
+/// byte-access comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ByteLoad {
+    pub layer: Layer,
+    pub offset: i32,
+    pub size: AccessSize,
+}
+
+/// The right-hand side of a byte-access comparison.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CmpRhs {
+    /// Compare against a constant integer.
+    Const(u32),
+    /// Compare against another packet field load.
+    Load(ByteLoad),
+}
+
+/// A raw byte-access test, e.g. `tcp[13] & 0x02 != 0` (SYN flag) or
+/// `tcp[0] = tcp[4]` (expr-vs-expr).
 ///
 /// The full semantics are: load the value at `(layer, offset, size)`, apply
 /// each `(ArithOp, operand)` in `alu_ops` in sequence to the accumulator,
-/// then compare the result with `op` and `value`.
+/// then compare the result with `op` and `rhs` (a constant or a second load).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ByteAccess {
     pub layer: Layer,
@@ -220,7 +239,7 @@ pub struct ByteAccess {
     /// ALU operations applied to the loaded value before comparison.
     pub alu_ops: Vec<(ArithOp, u32)>,
     pub op: CmpOp,
-    pub value: u32,
+    pub rhs: CmpRhs,
 }
 
 /// A node in the filter expression tree.
