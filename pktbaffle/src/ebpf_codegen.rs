@@ -919,13 +919,21 @@ impl Codegen {
     // ── Raw byte access ───────────────────────────────────────────────────────
 
     fn emit_byte_access(&mut self, ba: &ByteAccess) -> Result<Patches> {
+        let value =
+            match &ba.rhs {
+                CmpRhs::Const(v) => *v,
+                CmpRhs::Load(_) => return Err(Error::CodegenError {
+                    message:
+                        "expr-vs-expr byte-access comparison is not yet supported for eBPF targets"
+                            .into(),
+                }),
+            };
+
         let base_off = match ba.layer {
             Layer::Raw => 0u32,
             Layer::Net => self.link.net_offset(),
             Layer::Trans => {
-                // For transport-layer access in byte-access expressions,
-                // emit IHL computation and use a variable offset via R6.
-                return self.emit_trans_byte_access(ba);
+                return self.emit_trans_byte_access(ba, value);
             }
         };
         let off = base_off + ba.offset as u32;
@@ -937,12 +945,12 @@ impl Codegen {
         for &(aop, operand) in &ba.alu_ops {
             self.push(ebpf_alu32(aop, R4, operand as i32)?);
         }
-        let mut p = self.emit_cmp(ba.op, ba.value)?;
+        let mut p = self.emit_cmp(ba.op, value)?;
         p.failure.insert(0, bc);
         Ok(p)
     }
 
-    fn emit_trans_byte_access(&mut self, ba: &ByteAccess) -> Result<Patches> {
+    fn emit_trans_byte_access(&mut self, ba: &ByteAccess, value: u32) -> Result<Patches> {
         let net_off = self.link.net_offset();
         let bc_ihl = self.emit_load_byte(net_off);
         self.push(Insn::and32_imm(R4, 0x0f));
@@ -969,7 +977,7 @@ impl Codegen {
         for &(aop, operand) in &ba.alu_ops {
             self.push(ebpf_alu32(aop, R4, operand as i32)?);
         }
-        let mut p = self.emit_cmp(ba.op, ba.value)?;
+        let mut p = self.emit_cmp(ba.op, value)?;
         p.failure.extend([bc_ihl, bc_trans]);
         Ok(p)
     }
