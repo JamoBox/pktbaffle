@@ -11,7 +11,7 @@ documentation = "https://docs.rs/pkttap"
 readme = "README.md"
 
 [dependencies]
-pktbaffle = { version = "0.1.0", path = "../pktbaffle", features = ["vm"] }
+pktbaffle = { version = "0.2.0", path = "../pktbaffle", features = ["vm"] }
 pcap-file = "2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]

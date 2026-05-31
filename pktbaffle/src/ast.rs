@@ -104,6 +104,7 @@ pub enum Proto {
 }
 
 /// A leaf predicate in the filter tree.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     /// Match a host IP address.
