@@ -144,7 +144,7 @@ impl Insn {
         }
     }
 
-    /// BPF_MSH: load 4*(P[k:1] & 0xf) into X (computes IPv4 IHL).
+    /// BPF_MSH: load `4*(P[k:1] & 0xf)` into X (computes IPv4 IHL).
     #[inline]
     pub fn ldx_msh(k: u32) -> Self {
         Self {
