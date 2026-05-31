@@ -147,6 +147,10 @@ pub enum Primitive {
     PppoeDiscovery,
     /// PPPoE Session (ethertype 0x8864), optionally with a specific session ID.
     PppoeSession { session_id: Option<u16> },
+    /// IPv4 protocol-chain traversal: `ip protochain N`.
+    IpProtoChain(u8),
+    /// IPv6 protocol-chain traversal: `ip6 protochain N`.
+    Ip6ProtoChain(u8),
     /// Packet length comparison: `len relop value`; also used for `less` and `greater`.
     Len { op: CmpOp, value: u32 },
     /// Inbound direction — not expressible in standard BPF; codegen returns an error.

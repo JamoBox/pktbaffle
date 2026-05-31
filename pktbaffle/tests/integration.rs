@@ -165,6 +165,38 @@ fn not_host() {
     last_two_are_ret(&p);
 }
 
+// ── ip protochain / ip6 protochain ────────────────────────────────────────────
+
+#[test]
+fn ip_protochain_numeric() {
+    let p = eth_prog("ip protochain 6");
+    last_two_are_ret(&p);
+}
+
+#[test]
+fn ip6_protochain_numeric() {
+    let p = eth_prog("ip6 protochain 58");
+    last_two_are_ret(&p);
+}
+
+#[test]
+fn ip_protochain_combined() {
+    let p = eth_prog("ip protochain 6 and port 80");
+    last_two_are_ret(&p);
+}
+
+#[test]
+fn ip_protochain_does_not_break_ip_proto() {
+    let p = eth_prog("ip proto 6");
+    last_two_are_ret(&p);
+}
+
+#[test]
+fn ip6_protochain_does_not_break_ip6_proto() {
+    let p = eth_prog("ip6 proto 58");
+    last_two_are_ret(&p);
+}
+
 // ── Byte access ───────────────────────────────────────────────────────────────
 
 #[test]

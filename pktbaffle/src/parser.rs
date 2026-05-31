@@ -244,6 +244,10 @@ impl Parser<'_> {
                     let n = self.parse_proto_num()?;
                     return Ok(Primitive::Proto(Proto::Num(n)));
                 }
+                if self.eat(&Token::Protochain) {
+                    let n = self.parse_proto_num()?;
+                    return Ok(Primitive::IpProtoChain(n));
+                }
                 if self.eat(&Token::Broadcast) {
                     return Ok(Primitive::IpBroadcast);
                 }
@@ -260,6 +264,10 @@ impl Parser<'_> {
                 if self.eat(&Token::Proto) {
                     let n = self.parse_proto_num()?;
                     return Ok(Primitive::Proto(Proto::Ip6Proto(n)));
+                }
+                if self.eat(&Token::Protochain) {
+                    let n = self.parse_proto_num()?;
+                    return Ok(Primitive::Ip6ProtoChain(n));
                 }
                 if self.eat(&Token::Multicast) {
                     return Ok(Primitive::Ip6Multicast);
