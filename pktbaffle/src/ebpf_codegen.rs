@@ -75,18 +75,24 @@ impl Codegen {
     }
 
     /// Resolve `patch` to jump forward to `target_idx`.
-    fn resolve(&mut self, patch: Patch, target_idx: usize) {
+    fn resolve(&mut self, patch: Patch, target_idx: usize) -> Result<()> {
         let from = patch.0;
         debug_assert!(target_idx > from, "eBPF jump target must be forward");
         let diff = target_idx - from - 1;
-        debug_assert!(diff <= i16::MAX as usize, "eBPF jump offset overflow");
+        if diff > i16::MAX as usize {
+            return Err(Error::CodegenError {
+                message: "filter expression is too complex: eBPF jump offset overflow".into(),
+            });
+        }
         self.insns[from].off = diff as i16;
+        Ok(())
     }
 
-    fn resolve_all(&mut self, patches: Vec<Patch>, target_idx: usize) {
+    fn resolve_all(&mut self, patches: Vec<Patch>, target_idx: usize) -> Result<()> {
         for p in patches {
-            self.resolve(p, target_idx);
+            self.resolve(p, target_idx)?;
         }
+        Ok(())
     }
 
     // ── Prologue ─────────────────────────────────────────────────────────────
@@ -221,14 +227,14 @@ impl Codegen {
 
         // IPv4 path.
         let ipv4_start = self.insns.len();
-        self.resolve(Patch(jmp_to_ipv4), ipv4_start);
+        self.resolve(Patch(jmp_to_ipv4), ipv4_start)?;
 
         // IPv4: check protocol byte at net_off + 9.
         let q4 = self.check_byte(net_off + 9, proto_num as u32);
         p.failure.extend(q4.failure);
 
         let after = self.insns.len();
-        self.resolve(Patch(ja), after);
+        self.resolve(Patch(ja), after)?;
 
         Ok(p)
     }
@@ -247,7 +253,7 @@ impl Codegen {
     fn emit_and(&mut self, left: &Expr, right: &Expr) -> Result<Patches> {
         let left_p = self.emit_expr(left)?;
         let right_start = self.insns.len();
-        self.resolve_all(left_p.success, right_start);
+        self.resolve_all(left_p.success, right_start)?;
         let right_p = self.emit_expr(right)?;
         Ok(Patches {
             success: right_p.success,
@@ -259,7 +265,7 @@ impl Codegen {
         let left_p = self.emit_expr(left)?;
         let ja_idx = self.push(Insn::ja(0));
         let right_start = self.insns.len();
-        self.resolve_all(left_p.failure, right_start);
+        self.resolve_all(left_p.failure, right_start)?;
         let right_p = self.emit_expr(right)?;
         let mut success = left_p.success;
         success.push(Patch(ja_idx));
@@ -274,7 +280,7 @@ impl Codegen {
         let inner_p = self.emit_expr(inner)?;
         let ja_idx = self.push(Insn::ja(0));
         let not_succ_start = self.insns.len();
-        self.resolve_all(inner_p.failure, not_succ_start);
+        self.resolve_all(inner_p.failure, not_succ_start)?;
         Ok(Patches {
             success: vec![],
             failure: inner_p
@@ -429,7 +435,7 @@ impl Codegen {
                 let ja_idx = Patch(self.push(Insn::ja(0)));
                 let dst_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_ip6(self, dst_off, &mut p.failure);
                 p.success.push(ja_idx);
@@ -522,7 +528,7 @@ impl Codegen {
                 let ja_idx = Patch(self.push(Insn::ja(0)));
                 let dst_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_net6(self, dst_off, &mut p.failure);
                 p.success.push(ja_idx);
@@ -580,7 +586,7 @@ impl Codegen {
 
         // ── IPv4 path ─────────────────────────────────────────────────────────
         let ipv4_start = self.insns.len();
-        self.resolve(Patch(jmp_to_ipv4), ipv4_start);
+        self.resolve(Patch(jmp_to_ipv4), ipv4_start)?;
 
         // Check protocol byte at net_off + 9.
         self.emit_l4_proto_check(net_off + 9, proto, &mut p)?;
@@ -602,7 +608,7 @@ impl Codegen {
 
         // Resolve the IPv6-path JA to the port-comparison start.
         let port_check_start = self.insns.len();
-        self.resolve(Patch(ja_skip_v4), port_check_start);
+        self.resolve(Patch(ja_skip_v4), port_check_start)?;
 
         Ok(p)
     }
@@ -657,7 +663,7 @@ impl Codegen {
                 let cmp_udp = Patch(self.push(Insn::jne_imm(R4, 17, 0)));
                 p.failure.extend([bc, cmp_udp]);
                 let after_udp = self.insns.len();
-                self.resolve(eq_tcp, after_udp);
+                self.resolve(eq_tcp, after_udp)?;
             }
             Some(pr) => {
                 return Err(Error::CodegenError {
@@ -738,7 +744,7 @@ impl Codegen {
                 let ja_idx = self.push(Insn::ja(0));
                 let dst_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, dst_start);
+                    self.resolve(fp, dst_start)?;
                 }
                 check_range(self, R6, 2, &mut p.failure);
                 p.success.push(Patch(ja_idx));
@@ -781,7 +787,7 @@ impl Codegen {
                 let ja_idx = Patch(self.push(Insn::ja(0)));
                 let src_start = self.insns.len();
                 for fp in src_fails {
-                    self.resolve(fp, src_start);
+                    self.resolve(fp, src_start)?;
                 }
                 check_mac(self, 6, &mut p.failure); // src MAC at offset 6
                 p.success.push(ja_idx);
@@ -805,7 +811,7 @@ impl Codegen {
         let ja_fail = Patch(self.push(Insn::ja(0)));
         let after = self.insns.len();
         // Resolve jset shortcut past ja_fail to the success fall-through.
-        self.resolve(cmp, after);
+        self.resolve(cmp, after)?;
         Ok(Patches {
             success: vec![],
             failure: vec![bc, ja_fail],
@@ -868,7 +874,7 @@ impl Codegen {
         let eq_uni = Patch(self.push(Insn::jeq_imm(R4, 0x8847, 0)));
         let cmp_mc = Patch(self.push(Insn::jne_imm(R4, 0x8848, 0)));
         let after_et = self.insns.len();
-        self.resolve(eq_uni, after_et);
+        self.resolve(eq_uni, after_et)?;
 
         let mut p = Patches {
             success: vec![],
@@ -995,7 +1001,7 @@ impl Codegen {
                 let jset = Patch(self.push(Insn::jset_imm(R4, v, 0)));
                 let ja_fail = Patch(self.push(Insn::ja(0)));
                 let after = self.insns.len();
-                self.resolve(jset, after);
+                self.resolve(jset, after)?;
                 return Ok(Patches {
                     success: vec![],
                     failure: vec![ja_fail],
@@ -1058,8 +1064,8 @@ pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     cg.push(Insn::mov64_imm(ebpf::R0, XDP_DROP));
     cg.push(Insn::exit());
 
-    cg.resolve_all(patches.success, accept_idx);
-    cg.resolve_all(patches.failure, drop_idx);
+    cg.resolve_all(patches.success, accept_idx)?;
+    cg.resolve_all(patches.failure, drop_idx)?;
 
     Ok(Program::new(cg.insns))
 }
