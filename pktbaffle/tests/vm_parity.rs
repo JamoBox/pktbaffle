@@ -155,6 +155,37 @@ fn eth_arp(src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
     p
 }
 
+/// VLAN-tagged Ethernet/IPv4/UDP frame (802.1Q).
+fn eth_vlan_ipv4_udp(
+    vlan_id: u16,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&MAC_B);
+    p.extend_from_slice(&MAC_A);
+    p.extend_from_slice(&ETHERTYPE_VLAN.to_be_bytes());
+    p.extend_from_slice(&(vlan_id & 0x0FFF).to_be_bytes());
+    p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    p.push(0x45);
+    p.push(0x00);
+    p.extend_from_slice(&(20u16 + 8).to_be_bytes());
+    p.extend_from_slice(&[0x00, 0x00]);
+    p.extend_from_slice(&[0x00, 0x00]);
+    p.push(64);
+    p.push(IPPROTO_UDP);
+    p.extend_from_slice(&[0x00, 0x00]);
+    p.extend_from_slice(&src_ip);
+    p.extend_from_slice(&dst_ip);
+    p.extend_from_slice(&src_port.to_be_bytes());
+    p.extend_from_slice(&dst_port.to_be_bytes());
+    p.extend_from_slice(&8u16.to_be_bytes());
+    p.extend_from_slice(&[0x00, 0x00]);
+    p
+}
+
 /// VLAN-tagged Ethernet/IPv4/TCP frame (802.1Q).
 fn eth_vlan_ipv4_tcp(
     vlan_id: u16,
@@ -691,13 +722,11 @@ fn ether_multicast_matches() {
     assert!(run_filter("ether multicast", &pkt));
 }
 
-// NOTE: `ether multicast` currently generates a stub that always accepts.
-// This test documents the correct expected behaviour (reject unicast dst) and
-// is marked ignore until the codegen emits the proper bit-0 MAC check.
+// MAC_A (0xaa:…) has bit 0 of byte 0 clear, so it is a unicast destination.
+// The codegen emits a JSET #1 check; this test verifies it rejects unicast.
 #[test]
-#[ignore = "ether multicast codegen emits an always-accept stub (known limitation)"]
 fn ether_multicast_rejects_unicast() {
-    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 0);
+    let pkt = eth_ipv4_tcp(MAC_A, MAC_B, IP_A, IP_B, 1234, 80, 0x02, 0);
     assert!(!run_filter("ether multicast", &pkt));
 }
 
@@ -726,13 +755,7 @@ fn vlan_id_rejects_wrong_vlan() {
     assert!(!run_filter("vlan 100", &pkt));
 }
 
-// NOTE: `vlan and <inner-proto filter>` requires the codegen to shift all
-// layer-3+ field offsets by +4 (the VLAN tag width) when `vlan` precedes
-// the inner expression.  That offset adjustment is not yet implemented.
-// This test documents the correct expected behaviour and is marked ignore
-// until the codegen handles VLAN offset shifting.
 #[test]
-#[ignore = "vlan + inner-protocol offset shifting not yet implemented in codegen"]
 fn vlan_and_tcp_port() {
     let vlan_tcp80 = eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 80, 0x02);
     let vlan_tcp443 = eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 443, 0x02);
@@ -740,6 +763,36 @@ fn vlan_and_tcp_port() {
     assert!(run_filter("vlan and tcp port 80", &vlan_tcp80));
     assert!(!run_filter("vlan and tcp port 80", &vlan_tcp443));
     assert!(!run_filter("vlan and tcp port 80", &plain_tcp80));
+}
+
+#[test]
+fn vlan_and_udp_port() {
+    let vlan_udp53 = eth_vlan_ipv4_udp(20, IP_A, IP_B, 1234, 53);
+    let vlan_udp80 = eth_vlan_ipv4_udp(20, IP_A, IP_B, 1234, 80);
+    let plain_udp53 = udp(IP_A, IP_B, 1234, 53);
+    assert!(run_filter("vlan and udp port 53", &vlan_udp53));
+    assert!(!run_filter("vlan and udp port 53", &vlan_udp80));
+    assert!(!run_filter("vlan and udp port 53", &plain_udp53));
+}
+
+#[test]
+fn vlan_and_ip_src_host() {
+    let vlan_from_a = eth_vlan_ipv4_tcp(5, IP_A, IP_B, 1234, 80, 0x02);
+    let vlan_from_b = eth_vlan_ipv4_tcp(5, IP_B, IP_A, 1234, 80, 0x02);
+    let plain_from_a = tcp(IP_A, IP_B, 1234, 80);
+    assert!(run_filter("vlan and src host 192.168.1.1", &vlan_from_a));
+    assert!(!run_filter("vlan and src host 192.168.1.1", &vlan_from_b));
+    assert!(!run_filter("vlan and src host 192.168.1.1", &plain_from_a));
+}
+
+#[test]
+fn vlan_and_ip_proto() {
+    let vlan_tcp = eth_vlan_ipv4_tcp(7, IP_A, IP_B, 1234, 80, 0x02);
+    let vlan_udp = eth_vlan_ipv4_udp(7, IP_A, IP_B, 1234, 80);
+    let plain_tcp = tcp(IP_A, IP_B, 1234, 80);
+    assert!(run_filter("vlan and tcp", &vlan_tcp));
+    assert!(!run_filter("vlan and tcp", &vlan_udp));
+    assert!(!run_filter("vlan and tcp", &plain_tcp));
 }
 
 // ── Network (CIDR) filters ────────────────────────────────────────────────────
