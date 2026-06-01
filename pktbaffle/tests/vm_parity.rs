@@ -691,13 +691,11 @@ fn ether_multicast_matches() {
     assert!(run_filter("ether multicast", &pkt));
 }
 
-// NOTE: `ether multicast` currently generates a stub that always accepts.
-// This test documents the correct expected behaviour (reject unicast dst) and
-// is marked ignore until the codegen emits the proper bit-0 MAC check.
 #[test]
-#[ignore = "ether multicast codegen emits an always-accept stub (known limitation)"]
 fn ether_multicast_rejects_unicast() {
-    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 0);
+    // MAC_A has bit 0 of byte 0 clear (0xaa = 0b10101010), so it is a unicast
+    // destination; `ether multicast` must not match it.
+    let pkt = eth_ipv4_tcp(MAC_A, MAC_B, IP_A, IP_B, 1234, 80, 0x02, 0);
     assert!(!run_filter("ether multicast", &pkt));
 }
 
@@ -726,13 +724,7 @@ fn vlan_id_rejects_wrong_vlan() {
     assert!(!run_filter("vlan 100", &pkt));
 }
 
-// NOTE: `vlan and <inner-proto filter>` requires the codegen to shift all
-// layer-3+ field offsets by +4 (the VLAN tag width) when `vlan` precedes
-// the inner expression.  That offset adjustment is not yet implemented.
-// This test documents the correct expected behaviour and is marked ignore
-// until the codegen handles VLAN offset shifting.
 #[test]
-#[ignore = "vlan + inner-protocol offset shifting not yet implemented in codegen"]
 fn vlan_and_tcp_port() {
     let vlan_tcp80 = eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 80, 0x02);
     let vlan_tcp443 = eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 443, 0x02);
