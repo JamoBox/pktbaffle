@@ -140,12 +140,18 @@ jobs:
           workspaces: pktbaffle/fuzz -> target
           key: fuzz-${{ matrix.target }}
 
+      - name: Install LLVM/Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz
 
       - name: Fuzz ${{ matrix.target }} (60 s)
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=10
         working-directory: pktbaffle
+        env:
+          CC: clang
+          CXX: clang++
 
   # ── Supply-chain security ──────────────────────────────────────────────────
   # cargo-audit checks for RUSTSEC advisories; cargo-deny enforces license and

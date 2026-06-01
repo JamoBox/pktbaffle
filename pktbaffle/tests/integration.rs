@@ -738,3 +738,52 @@ fn byte_access_chained_alu_ops() {
     );
     last_two_are_ret(&result.unwrap());
 }
+
+// ── Codegen robustness: jump offset overflow must return Err, not panic ───────
+
+#[test]
+fn deeply_nested_not_returns_error_not_panic() {
+    // A deeply-nested chain of NOT operators generates a BPF program whose
+    // jump offsets exceed u8::MAX.  Before the fix this caused a panic via
+    // debug_assert! in codegen::offset().  After the fix it must return a
+    // CodegenError gracefully.
+    //
+    // Minimised fuzz crash input: "::!::!::!::!::!::!::!::"
+    let result = compile(
+        "::!::!::!::!::!::!::!::",
+        LinkType::Ethernet,
+        Target::Classic,
+    );
+    assert!(
+        result.is_err(),
+        "a filter that generates a jump offset > 255 must return Err, not panic"
+    );
+}
+
+#[test]
+fn deeply_nested_not_extended_does_not_panic() {
+    // The eBPF target uses i16 jump offsets so the same input may not trigger
+    // an overflow — either Ok or Err is acceptable; a panic is not.
+    let result = compile(
+        "::!::!::!::!::!::!::!::",
+        LinkType::Ethernet,
+        Target::Extended,
+    );
+    // Just verify it completes without panicking.
+    let _ = result;
+}
+
+#[test]
+fn very_complex_filter_does_not_panic() {
+    // A long OR chain can also push jump offsets past 255.  Ensure it
+    // returns Err rather than panicking on any link type and target.
+    let long_or = (0u16..200)
+        .map(|p| format!("port {p}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        let r = compile(&long_or, link, Target::Classic);
+        // Either compiles fine or returns a CodegenError — must never panic.
+        let _ = r;
+    }
+}
