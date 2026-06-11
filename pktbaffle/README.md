@@ -68,15 +68,17 @@ let bytes = prog.to_le_bytes();
 Print the disassembly of a filter:
 
 ```
-$ cargo run --example dump_filter -- "tcp port 80"
-Filter: "tcp port 80"  (8 instructions)  target=Classic
-(000) ldh  [12]
-(001) jeq  #0x800           jt 2    jf 7
-(002) ldb  [23]
-(003) jeq  #0x6             jt 4    jf 7
-(004) ldh  [20]
-(005) jset #0x1fff          jt 7    jf 6
-(006) ldx  4*([14]&0xf)
+$ cargo run --example dump_filter -- "tcp and port 80"
+Filter: "tcp and port 80"  (13 instructions)  target=Classic
+(000) ldh      [12]
+(001) jeq      #0x800           jt 2     jf 12
+(002) ldb      [23]
+(003) jeq      #0x6             jt 4     jf 12
+(004) ldh      [20]
+(005) jset     #0x1fff          jt 12    jf 6
+(006) ldxb     4*([14]&0xf)
+(007) ldh      [x + 14]
+(008) jeq      #0x50            jt 11    jf 9
 ...
 
 $ cargo run --example dump_filter -- --ebpf "tcp port 80"
