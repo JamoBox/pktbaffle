@@ -54,7 +54,12 @@
 //!    [`Vec<lexer::Spanned>`][lexer::Spanned].
 //! 2. **Parse** ([`parser::parse`]) — build an [`ast::Expr`] tree.
 //! 3. **Codegen** ([`codegen::compile`] or [`ebpf_codegen::compile`]) — emit
-//!    BPF instructions with a two-pass jump-patch strategy.
+//!    BPF instructions with a two-pass jump-patch strategy. The classic
+//!    backend tracks facts proven on the fall-through path (ethertype,
+//!    protocol, transport offset) so compound filters check each guard once.
+//! 4. **Optimize** ([`optimizer::optimize`], classic BPF only) — thread
+//!    jumps through `ja` trampolines, drop redundant loads, and remove
+//!    unreachable instructions.
 //!
 //! You can stop after any stage if you only need the intermediate
 //! representation. [`parse`] is a convenience wrapper for steps 1–2.

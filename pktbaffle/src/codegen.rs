@@ -11,13 +11,37 @@
 //! Short-circuit `SrcOrDst` checks need explicit success jumps that skip the
 //! second address check; those are returned as success patches so AND parents
 //! can resolve them to the start of the next child.
+//!
+//! # Path facts
+//!
+//! The emitter tracks [`Facts`] — predicates already proven true on the
+//! current fall-through path, such as "the ethertype check for 0x0800 has
+//! passed" or "X holds the transport-header offset". Because AND chains fall
+//! through on success, a fact established by one conjunct dominates all later
+//! conjuncts, which can then skip re-emitting the same guard. This is what
+//! turns `tcp and port 80` into a single linear check sequence instead of two
+//! back-to-back ones.
+//!
+//! Facts are control-flow sensitive:
+//! - **AND** accumulates facts left to right.
+//! - **OR** restores the entry facts before emitting the right arm (the right
+//!   arm is reached from the left arm's failure points), and keeps only facts
+//!   established by *both* arms after the join. Guards required by every arm
+//!   (per [`required_guards`]) are hoisted in front of the OR so each arm can
+//!   elide them.
+//! - **NOT** restores the entry facts afterwards: its success path is the
+//!   inner failure path, which proves nothing new.
+//! - Any instruction that writes the X register invalidates the
+//!   "X holds the transport-header offset" fact.
 
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ast::*;
-use crate::bpf::{Insn, Program, BPF_ACCEPT, BPF_DROP, BPF_LD, BPF_LEN};
+use crate::bpf::{
+    Insn, Program, BPF_ACCEPT, BPF_DROP, BPF_LD, BPF_LDX, BPF_LEN, BPF_MISC, BPF_TAX,
+};
 use crate::error::{Error, Result};
-use crate::optimizer::dedup_loads;
+use crate::optimizer::optimize;
 
 // ── Link type ────────────────────────────────────────────────────────────────
 
@@ -74,11 +98,248 @@ struct Patches {
     failure: Vec<Patch>,
 }
 
+// ── L4 protocol sets ──────────────────────────────────────────────────────────
+
+/// The set of L4 protocol numbers a port prologue admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum L4Set {
+    /// Exactly one protocol number.
+    One(u8),
+    /// TCP (6) or UDP (17) — the unqualified `port` / `portrange` set.
+    TcpOrUdp,
+}
+
+impl L4Set {
+    fn contains(self, p: u8) -> bool {
+        match self {
+            L4Set::One(x) => x == p,
+            L4Set::TcpOrUdp => p == 6 || p == 17,
+        }
+    }
+
+    fn subset_of(self, other: L4Set) -> bool {
+        match (self, other) {
+            (L4Set::One(a), o) => o.contains(a),
+            (L4Set::TcpOrUdp, L4Set::TcpOrUdp) => true,
+            (L4Set::TcpOrUdp, L4Set::One(_)) => false,
+        }
+    }
+
+    /// Smallest representable set containing both, if one exists.
+    fn join(a: L4Set, b: L4Set) -> Option<L4Set> {
+        if a == b {
+            Some(a)
+        } else if a.subset_of(L4Set::TcpOrUdp) && b.subset_of(L4Set::TcpOrUdp) {
+            Some(L4Set::TcpOrUdp)
+        } else {
+            None
+        }
+    }
+}
+
+/// Map a port-filter protocol qualifier to its L4 protocol set.
+fn l4set_for(proto: Option<Proto>) -> Result<L4Set> {
+    match proto {
+        None => Ok(L4Set::TcpOrUdp),
+        Some(Proto::Tcp) => Ok(L4Set::One(6)),
+        Some(Proto::Udp) => Ok(L4Set::One(17)),
+        Some(Proto::Sctp) => Ok(L4Set::One(132)),
+        Some(pr) => Err(Error::CodegenError {
+            message: format!("port filter with proto {:?} is not supported", pr),
+        }),
+    }
+}
+
+// ── Path facts ────────────────────────────────────────────────────────────────
+
+/// Predicates proven true on the current fall-through emission path.
+///
+/// The first three are pure packet facts (the packet does not change, so once
+/// a check has passed on this path it stays true). `ports_ready` additionally
+/// asserts machine state — X holds the transport-header offset and the IPv4
+/// fragment guard has passed — and is invalidated whenever X is written.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Facts {
+    /// The link-layer protocol field equals this value.
+    ethertype: Option<u32>,
+    /// The byte at `net_offset + 9` (IPv4 protocol) equals this value.
+    ip4_proto: Option<u8>,
+    /// The byte at `net_offset + 6` (IPv6 next header) equals this value.
+    ip6_nh: Option<u8>,
+    /// A port prologue admitting this protocol set has fully passed:
+    /// X = transport-header offset relative to `net_offset`, and the packet
+    /// is not a non-initial IPv4 fragment.
+    ports_ready: Option<L4Set>,
+}
+
+impl Facts {
+    /// Facts valid where two paths join: only what holds on both.
+    fn meet(a: &Facts, b: &Facts) -> Facts {
+        fn both<T: Copy + PartialEq>(x: Option<T>, y: Option<T>) -> Option<T> {
+            match (x, y) {
+                (Some(p), Some(q)) if p == q => Some(p),
+                _ => None,
+            }
+        }
+        Facts {
+            ethertype: both(a.ethertype, b.ethertype),
+            ip4_proto: both(a.ip4_proto, b.ip4_proto),
+            ip6_nh: both(a.ip6_nh, b.ip6_nh),
+            // The proven protocol set at a join is the union of the two
+            // paths' sets, when that union is representable.
+            ports_ready: match (a.ports_ready, b.ports_ready) {
+                (Some(x), Some(y)) => L4Set::join(x, y),
+                _ => None,
+            },
+        }
+    }
+}
+
+// ── Required-guard analysis ───────────────────────────────────────────────────
+
+/// Guards an expression requires on every accepting path.
+///
+/// Used to hoist checks shared by all arms of an OR: if every arm can only
+/// accept packets satisfying guard `g`, then `l or r ≡ g and (l or r)`, and
+/// emitting `g` once up front lets each arm elide it via [`Facts`].
+#[derive(Debug, Default, Clone, PartialEq)]
+struct GuardSet {
+    ethertype: Option<u32>,
+    ip4_proto: Option<u8>,
+    ip6_nh: Option<u8>,
+    port_prereqs: Option<L4Set>,
+}
+
+impl GuardSet {
+    /// Guards required by a conjunction: anything either side requires.
+    ///
+    /// On a conflict (each side pins a different value) the conjunction can
+    /// never accept, so either value is vacuously required; keep the left.
+    fn union(mut self, other: GuardSet) -> GuardSet {
+        self.ethertype = self.ethertype.or(other.ethertype);
+        self.ip4_proto = self.ip4_proto.or(other.ip4_proto);
+        self.ip6_nh = self.ip6_nh.or(other.ip6_nh);
+        self.port_prereqs = self.port_prereqs.or(other.port_prereqs);
+        self
+    }
+
+    /// Guards required by a disjunction: only what both sides require.
+    fn intersect(self, other: GuardSet) -> GuardSet {
+        fn both<T: Copy + PartialEq>(x: Option<T>, y: Option<T>) -> Option<T> {
+            match (x, y) {
+                (Some(p), Some(q)) if p == q => Some(p),
+                _ => None,
+            }
+        }
+        GuardSet {
+            ethertype: both(self.ethertype, other.ethertype),
+            ip4_proto: both(self.ip4_proto, other.ip4_proto),
+            ip6_nh: both(self.ip6_nh, other.ip6_nh),
+            port_prereqs: both(self.port_prereqs, other.port_prereqs),
+        }
+    }
+}
+
+fn required_guards(expr: &Expr) -> GuardSet {
+    match expr {
+        Expr::And(l, r) => required_guards(l).union(required_guards(r)),
+        Expr::Or(l, r) => required_guards(l).intersect(required_guards(r)),
+        // A negated check proves nothing about what its parent requires.
+        Expr::Not(_) => GuardSet::default(),
+        Expr::Primitive(p) => primitive_guards(p),
+    }
+}
+
+fn primitive_guards(prim: &Primitive) -> GuardSet {
+    let mut g = GuardSet::default();
+    match prim {
+        Primitive::Proto(p) => match p {
+            Proto::Ip => g.ethertype = Some(0x0800),
+            Proto::Ip6 => g.ethertype = Some(0x86dd),
+            Proto::Arp => g.ethertype = Some(0x0806),
+            Proto::Rarp => g.ethertype = Some(0x8035),
+            Proto::Tcp => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(6);
+            }
+            Proto::Udp => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(17);
+            }
+            Proto::Icmp => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(1);
+            }
+            Proto::Igmp => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(2);
+            }
+            Proto::Sctp => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(132);
+            }
+            Proto::Num(n) => {
+                g.ethertype = Some(0x0800);
+                g.ip4_proto = Some(*n);
+            }
+            Proto::Icmp6 => {
+                g.ethertype = Some(0x86dd);
+                g.ip6_nh = Some(58);
+            }
+            Proto::Ip6Proto(n) => {
+                g.ethertype = Some(0x86dd);
+                g.ip6_nh = Some(*n);
+            }
+        },
+        Primitive::Host { addr, .. } => {
+            g.ethertype = Some(match addr {
+                IpAddr::V4(_) => 0x0800,
+                IpAddr::V6(_) => 0x86dd,
+            });
+        }
+        Primitive::Net { .. } | Primitive::IpBroadcast | Primitive::IpMulticast => {
+            g.ethertype = Some(0x0800);
+        }
+        Primitive::Net6 { .. } | Primitive::Ip6Multicast => {
+            g.ethertype = Some(0x86dd);
+        }
+        Primitive::Port { proto, .. } | Primitive::PortRange { proto, .. } => {
+            g.port_prereqs = l4set_for(*proto).ok();
+        }
+        Primitive::EtherProto(et) => g.ethertype = Some(*et as u32),
+        Primitive::Vlan { .. } => g.ethertype = Some(0x8100),
+        Primitive::PppoeDiscovery => g.ethertype = Some(0x8863),
+        Primitive::PppoeSession { .. } => g.ethertype = Some(0x8864),
+        Primitive::IpProtoChain(n) => {
+            g.ethertype = Some(0x0800);
+            g.ip4_proto = Some(*n);
+        }
+        Primitive::Ip6ProtoChain(n) => {
+            g.ethertype = Some(0x86dd);
+            g.ip6_nh = Some(*n);
+        }
+        // MPLS matches two ethertypes; the rest imply no hoistable guard.
+        Primitive::Mpls { .. }
+        | Primitive::EtherHost { .. }
+        | Primitive::EtherMulticast
+        | Primitive::Len { .. }
+        | Primitive::ByteAccess(_)
+        | Primitive::Inbound
+        | Primitive::Outbound => {}
+    }
+    g
+}
+
 // ── Compiler state ────────────────────────────────────────────────────────────
 
 struct Codegen {
     insns: Vec<Insn>,
     link: LinkType,
+    /// Predicates proven on the current fall-through path.
+    facts: Facts,
+    /// Counts instructions that write X; used to detect clobbers across an
+    /// OR arm or NOT body whose entry facts are later restored.
+    x_writes: u64,
     /// Number of 802.1Q VLAN headers that have been matched so far in the
     /// current AND-chain.  Each VLAN tag adds 4 bytes before the next
     /// ethertype / IP header, so all layer-3+ offsets must be shifted by
@@ -91,6 +352,12 @@ impl Codegen {
         Self {
             insns: Vec::new(),
             link,
+            facts: Facts {
+                // RawIp frames have no link-layer header: IPv4 is implicit.
+                ethertype: (link == LinkType::RawIp).then_some(0x0800),
+                ..Facts::default()
+            },
+            x_writes: 0,
             vlan_depth: 0,
         }
     }
@@ -120,6 +387,12 @@ impl Codegen {
     }
 
     fn push(&mut self, insn: Insn) -> usize {
+        // Writing X invalidates the "X holds the transport offset" fact.
+        let class = insn.code & 0x07;
+        if class == BPF_LDX || insn.code == (BPF_MISC | BPF_TAX) {
+            self.x_writes += 1;
+            self.facts.ports_ready = None;
+        }
         let idx = self.insns.len();
         self.insns.push(insn);
         idx
@@ -198,29 +471,76 @@ impl Codegen {
 
     /// OR: left's failures redirect to right; left's implicit fall-through
     /// (success) jumps past right via an inserted JA.
+    ///
+    /// Guards required by *every* arm are emitted once in front of the OR,
+    /// so each arm can elide them; their failure patches join the OR's
+    /// failure list.
     fn emit_or(&mut self, left: &Expr, right: &Expr) -> Result<Patches> {
+        let mut hoist_failure = Vec::new();
+        let common = required_guards(left).intersect(required_guards(right));
+        if let Some(et) = common.ethertype {
+            // RawIp rejects non-IPv4 ethertypes with an error; the arms
+            // themselves would raise it, so don't pre-empt them here.
+            if self.link.ether_proto_offset().is_some() {
+                hoist_failure.extend(self.emit_ethertype(et)?.failure);
+            }
+        }
+        if let Some(n) = common.ip4_proto {
+            hoist_failure.extend(self.emit_ip4_l4(n)?.failure);
+        }
+        if let Some(n) = common.ip6_nh {
+            hoist_failure.extend(self.emit_ip6_l4(n)?.failure);
+        }
+        if let Some(set) = common.port_prereqs {
+            hoist_failure.extend(self.emit_port_prereqs_set(set)?.failure);
+        }
+
+        // Each arm starts from the post-hoist facts: the right arm is reached
+        // from failure points inside the left arm, where only those hold.
+        let branch_facts = self.facts.clone();
+        let x_writes_before = self.x_writes;
+
         let left_p = self.emit_expr(left)?;
+        let left_facts = std::mem::replace(&mut self.facts, branch_facts);
+        if self.x_writes != x_writes_before {
+            // The left arm may have clobbered X before any of its failure
+            // edges, so the right arm cannot trust a pre-established
+            // transport offset.
+            self.facts.ports_ready = None;
+        }
+
         // Unconditional jump inserted after left's fall-through success path.
         let ja_idx = self.push(Insn::ja(0));
         let right_start = self.insns.len();
         // Left's failures now try the right branch.
         self.resolve_all(left_p.failure, right_start)?;
         let right_p = self.emit_expr(right)?;
+
+        // After the join, keep only facts both arms established.
+        self.facts = Facts::meet(&left_facts, &self.facts);
+
         // Collect all success patches: left's explicit success jumps +
         // the JA we just inserted + right's success patches.
         let mut success = left_p.success;
         success.push(Patch::Ja(ja_idx));
         success.extend(right_p.success);
-        Ok(Patches {
-            success,
-            failure: right_p.failure,
-        })
+        let mut failure = right_p.failure;
+        failure.extend(hoist_failure);
+        Ok(Patches { success, failure })
     }
 
     /// NOT: swap success ↔ failure, insert a JA to handle the fall-through
     /// success path of the inner expression (which becomes NOT's failure).
     fn emit_not(&mut self, inner: &Expr) -> Result<Patches> {
+        let entry_facts = self.facts.clone();
+        let x_writes_before = self.x_writes;
         let inner_p = self.emit_expr(inner)?;
+        // NOT's success path is the inner *failure* path: only facts already
+        // proven at entry still hold there.
+        self.facts = entry_facts;
+        if self.x_writes != x_writes_before {
+            self.facts.ports_ready = None;
+        }
         // Insert a JA that the inner fall-through (success) hits → NOT's failure.
         let ja_idx = self.push(Insn::ja(0));
         // inner_p.failure patches now point to NOT's success (fall-through past JA).
@@ -300,8 +620,19 @@ impl Codegen {
     }
 
     fn emit_ethertype(&mut self, et: u32) -> Result<Patches> {
-        if let Some(off) = self.ether_proto_offset() {
-            Ok(self.check_halfword(off, et))
+        if let Some(off) = self.link.ether_proto_offset() {
+            if self.facts.ethertype == Some(et) {
+                // Already proven on this path.
+                return Ok(Patches::default());
+            }
+            let p = self.check_halfword(off, et);
+            // Record the fact unless the path already pins a different
+            // ethertype, in which case the fall-through is unreachable at
+            // runtime and the original fact stays.
+            if self.facts.ethertype.is_none() {
+                self.facts.ethertype = Some(et);
+            }
+            Ok(p)
         } else {
             // RawIp: IPv4 is implicit, others are unsupported.
             if et == 0x0800 {
@@ -322,18 +653,30 @@ impl Codegen {
     /// Emit: ethertype == 0x0800, then proto field == `proto_num`.
     fn emit_ip4_l4(&mut self, proto_num: u8) -> Result<Patches> {
         let mut p = self.ip4_guard()?;
-        let off = self.net_offset() + 9; // IP protocol byte
+        if self.facts.ip4_proto == Some(proto_num) {
+            return Ok(p);
+        }
+        let off = self.link.net_offset() + 9; // IP protocol byte
         let q = self.check_byte(off, proto_num as u32);
         p.failure.extend(q.failure);
         p.success.extend(q.success);
+        if self.facts.ip4_proto.is_none() {
+            self.facts.ip4_proto = Some(proto_num);
+        }
         Ok(p)
     }
 
     fn emit_ip6_l4(&mut self, next_hdr: u8) -> Result<Patches> {
         let mut p = self.emit_ethertype(0x86dd)?;
-        let off = self.net_offset() + 6; // IPv6 Next Header
+        if self.facts.ip6_nh == Some(next_hdr) {
+            return Ok(p);
+        }
+        let off = self.link.net_offset() + 6; // IPv6 Next Header
         let q = self.check_byte(off, next_hdr as u32);
         p.failure.extend(q.failure);
+        if self.facts.ip6_nh.is_none() {
+            self.facts.ip6_nh = Some(next_hdr);
+        }
         Ok(p)
     }
 
@@ -643,20 +986,103 @@ impl Codegen {
     /// IHL*4 for IPv4 packets, 40 for IPv6 packets. The fall-through path
     /// leads directly into the port-number check. Failure patches are set for
     /// wrong ethertype, wrong protocol, or a non-first IPv4 fragment.
+    fn emit_port_prereqs(&mut self, proto: Option<Proto>) -> Result<Patches> {
+        let want = l4set_for(proto)?;
+        self.emit_port_prereqs_set(want)
+    }
+
+    /// Emit the port prologue for the protocol set `want`, eliding whatever
+    /// the current [`Facts`] already prove.
     ///
-    /// For Ethernet/SLL the emitted layout is:
+    /// When the ethertype is undetermined, the full dual-path layout is
+    /// emitted:
     ///   [ldh ethertype] [jeq 0x86dd → ipv6] [jeq 0x0800 jf→FAIL]
     ///   — IPv4 path: ldb proto, proto check, ldh frag, jset 0x1fff→FAIL, ldxb MSH, ja→port
     ///   — IPv6 path: ldb next-header, nh check, ldx #40
     ///   — port check (fall-through from both paths)
-    fn emit_port_prereqs(&mut self, proto: Option<Proto>) -> Result<Patches> {
+    ///
+    /// When the path already proves IPv4 (or IPv6), only that single path is
+    /// emitted, and the protocol check is skipped too when the protocol is
+    /// already pinned to a member of `want`.
+    fn emit_port_prereqs_set(&mut self, want: L4Set) -> Result<Patches> {
+        if let Some(have) = self.facts.ports_ready {
+            if have.subset_of(want) {
+                // An earlier, at-least-as-strict prologue already passed.
+                return Ok(Patches::default());
+            }
+        }
+
         let mut p = Patches::default();
         let net_off = self.net_offset();
         let ip4_proto_off = net_off + 9; // IP protocol byte
         let ip4_frag_off = net_off + 6; // IP flags + fragment offset (ip[6:2])
         let ip6_nh_off = net_off + 6; // IPv6 next-header (byte 6 of IPv6 header)
 
-        if let Some(ether_off) = self.ether_proto_offset() {
+        // RawIp has no link-layer header, so IPv4 is implicit (and the facts
+        // are initialised accordingly).
+        let known_v4 = self.facts.ethertype == Some(0x0800);
+        let known_v6 = self.facts.ethertype == Some(0x86dd);
+
+        if known_v4 {
+            let established = if self.facts.ports_ready.is_some() {
+                // X and the fragment guard are already in place from a
+                // broader prologue; only narrow the protocol.
+                self.push(Insn::ldb_abs(ip4_proto_off));
+                self.emit_l4_set_check(want, &mut p.failure)?;
+                want
+            } else {
+                let established = match self.facts.ip4_proto {
+                    Some(n) if want.contains(n) => L4Set::One(n),
+                    _ => {
+                        self.push(Insn::ldb_abs(ip4_proto_off));
+                        self.emit_l4_set_check(want, &mut p.failure)?;
+                        want
+                    }
+                };
+                // Non-first fragments lack the L4 header at the expected offset.
+                self.push(Insn::ldh_abs(ip4_frag_off));
+                let i_frag = self.push(Insn::jset_k(0x1fff, 0xff, 0)); // jt → FAIL
+                p.failure.push(Patch::Jt(i_frag));
+                self.push(Insn::ldx_msh(net_off)); // X = IHL * 4
+                established
+            };
+            if let L4Set::One(n) = established {
+                if self.facts.ip4_proto.is_none() {
+                    self.facts.ip4_proto = Some(n);
+                }
+            }
+            self.facts.ports_ready = Some(established);
+        } else if known_v6 {
+            let established = if self.facts.ports_ready.is_some() {
+                self.push(Insn::ldb_abs(ip6_nh_off));
+                self.emit_l4_set_check(want, &mut p.failure)?;
+                want
+            } else {
+                let established = match self.facts.ip6_nh {
+                    Some(n) if want.contains(n) => L4Set::One(n),
+                    _ => {
+                        self.push(Insn::ldb_abs(ip6_nh_off));
+                        self.emit_l4_set_check(want, &mut p.failure)?;
+                        want
+                    }
+                };
+                self.push(Insn::ldx_imm(40)); // IPv6 header is always 40 bytes
+                established
+            };
+            if let L4Set::One(n) = established {
+                if self.facts.ip6_nh.is_none() {
+                    self.facts.ip6_nh = Some(n);
+                }
+            }
+            self.facts.ports_ready = Some(established);
+        } else {
+            // Ethertype unknown — or pinned to something that is neither IP
+            // version, in which case this code is unreachable at runtime and
+            // merely preserves the program's shape. Emit the dual path.
+            let ether_off = self
+                .link
+                .ether_proto_offset()
+                .expect("RawIp implies a known-IPv4 path");
             // Load ethertype once; IPv6 branches away, IPv4 check falls through.
             self.push(Insn::ldh_abs(ether_off));
             let i_is_ip6 = self.push(Insn::jeq_k(0x86dd, 0xff, 0)); // jt → IPv6 (patched below)
@@ -665,9 +1091,8 @@ impl Codegen {
 
             // ── IPv4 path ──────────────────────────────────────────────────────
             self.push(Insn::ldb_abs(ip4_proto_off));
-            self.emit_l4_proto_check(proto, &mut p.failure)?;
+            self.emit_l4_set_check(want, &mut p.failure)?;
 
-            // Non-first fragments lack the L4 header at the expected offset.
             self.push(Insn::ldh_abs(ip4_frag_off));
             let i_frag = self.push(Insn::jset_k(0x1fff, 0xff, 0)); // jt → FAIL
             p.failure.push(Patch::Jt(i_frag));
@@ -680,58 +1105,35 @@ impl Codegen {
             self.resolve(Patch::Jt(i_is_ip6), ip6_start)?;
 
             self.push(Insn::ldb_abs(ip6_nh_off));
-            self.emit_l4_proto_check(proto, &mut p.failure)?;
+            self.emit_l4_set_check(want, &mut p.failure)?;
             self.push(Insn::ldx_imm(40)); // IPv6 header is always 40 bytes
 
             // Both paths converge here; resolve IPv4 JA to this position.
             let port_check_start = self.insns.len();
             self.resolve(Patch::Ja(ja_skip_ip6), port_check_start)?;
-        } else {
-            // RawIp: always IPv4, no ethertype check, no IPv6.
-            self.push(Insn::ldb_abs(ip4_proto_off));
-            self.emit_l4_proto_check(proto, &mut p.failure)?;
-            self.push(Insn::ldh_abs(ip4_frag_off));
-            let i_frag = self.push(Insn::jset_k(0x1fff, 0xff, 0));
-            p.failure.push(Patch::Jt(i_frag));
-            self.push(Insn::ldx_msh(net_off));
+            self.facts.ports_ready = Some(want);
         }
 
         Ok(p)
     }
 
-    /// Emit L4 protocol match against A (which must already be loaded).
-    /// For `None`, accepts TCP (6) or UDP (17); the TCP jeq's jt is resolved
-    /// immediately to jump past the UDP check so it doesn't leak into p.success.
-    fn emit_l4_proto_check(
-        &mut self,
-        proto: Option<Proto>,
-        failure: &mut Vec<Patch>,
-    ) -> Result<()> {
-        match proto {
-            Some(Proto::Tcp) => {
-                let i = self.push(Insn::jeq_k(6, 0, 0xff));
+    /// Emit an L4 protocol match against A (which must already hold the
+    /// protocol / next-header byte).
+    /// For [`L4Set::TcpOrUdp`], the TCP jeq's jt is resolved immediately to
+    /// jump past the UDP check so it doesn't leak into the success patches.
+    fn emit_l4_set_check(&mut self, want: L4Set, failure: &mut Vec<Patch>) -> Result<()> {
+        match want {
+            L4Set::One(n) => {
+                let i = self.push(Insn::jeq_k(n as u32, 0, 0xff));
                 failure.push(Patch::Jf(i));
             }
-            Some(Proto::Udp) => {
-                let i = self.push(Insn::jeq_k(17, 0, 0xff));
-                failure.push(Patch::Jf(i));
-            }
-            Some(Proto::Sctp) => {
-                let i = self.push(Insn::jeq_k(132, 0, 0xff));
-                failure.push(Patch::Jf(i));
-            }
-            None => {
+            L4Set::TcpOrUdp => {
                 // Accept TCP (6) or UDP (17): jt on TCP shortcut jumps past UDP check.
                 let i_tcp = self.push(Insn::jeq_k(6, 0xff, 0));
                 let i_udp = self.push(Insn::jeq_k(17, 0, 0xff));
                 failure.push(Patch::Jf(i_udp));
                 let after = self.insns.len();
                 self.resolve(Patch::Jt(i_tcp), after)?;
-            }
-            Some(pr) => {
-                return Err(Error::CodegenError {
-                    message: format!("port filter with proto {:?} is not supported", pr),
-                });
             }
         }
         Ok(())
@@ -1140,10 +1542,6 @@ pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     let mut cg = Codegen::new(link);
     let patches = cg.emit_expr(expr)?;
 
-    // Run peephole optimizations before emitting terminals so that jump
-    // offsets inserted below reflect the final instruction count.
-    dedup_loads(&mut cg.insns);
-
     // Emit terminal instructions.
     let accept_idx = cg.insns.len();
     cg.push(Insn::ret_k(BPF_ACCEPT));
@@ -1154,5 +1552,10 @@ pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     cg.resolve_all(patches.success, accept_idx)?;
     cg.resolve_all(patches.failure, drop_idx)?;
 
-    Ok(Program::new(cg.insns))
+    // Peephole passes run last: they rewrite and renumber concrete jump
+    // offsets, so every patch must already be resolved.
+    let mut insns = cg.insns;
+    optimize(&mut insns);
+
+    Ok(Program::new(insns))
 }

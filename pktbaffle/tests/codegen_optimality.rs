@@ -532,11 +532,14 @@ fn instruction_count_low_complexity() {
 
 #[test]
 fn instruction_count_medium_complexity() {
+    // Bounds reflect the guard-eliding codegen: conjuncts reuse the
+    // ethertype / protocol facts established by earlier conjuncts, so e.g.
+    // `tcp and port 80` is a single linear 13-instruction check chain.
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp and port 80", 14, 35),
-        ("udp and port 53", 14, 35),
-        ("tcp or udp", 8, 18),
-        ("not tcp", 6, 16),
+        ("tcp and port 80", 10, 18),
+        ("udp and port 53", 10, 18),
+        ("tcp or udp", 6, 12),
+        ("not tcp", 5, 12),
         ("net 192.168.0.0/16", 6, 22),
         ("src net 10.0.0.0/8", 5, 18),
         ("portrange 1024-65535", 18, 50),
@@ -544,7 +547,7 @@ fn instruction_count_medium_complexity() {
         ("tcp[13] & 0x02 != 0", 4, 35),
         ("tcp[13] & 0x12 = 0x12", 4, 35),
         ("ip[0] & 0x0f > 5", 3, 22),
-        ("tcp and not port 22", 16, 40),
+        ("tcp and not port 22", 10, 20),
         ("ether host aa:bb:cc:dd:ee:ff", 5, 16),
         ("ip multicast", 5, 16),
         ("ip broadcast", 4, 12),
@@ -560,18 +563,21 @@ fn instruction_count_medium_complexity() {
 
 #[test]
 fn instruction_count_high_complexity() {
+    // Bounds reflect guard elision plus OR guard hoisting: checks required
+    // by every OR arm (ethertype, port prologue, …) are emitted once in
+    // front of the arms instead of once per arm.
     let cases: &[(&str, usize, usize)] = &[
-        ("tcp and (port 80 or port 443)", 25, 65),
-        ("(tcp and port 80) or (udp and port 53)", 35, 100),
-        ("tcp and (port 80 or port 443) and host 10.0.0.1", 35, 100),
-        ("not (tcp and port 80)", 16, 45),
-        ("ip and not (tcp or udp)", 8, 22),
-        ("host 10.0.0.1 or host 10.0.0.2 or host 10.0.0.3", 18, 70),
-        ("vlan 100 and ip and tcp port 80", 20, 55),
-        ("ip6 and tcp port 443", 14, 40),
-        ("src host 1.2.3.4 or dst host 5.6.7.8", 8, 50),
-        ("tcp and src port 1024 and dst port 80", 20, 55),
-        ("(tcp or udp) and portrange 1024-65535", 28, 110),
+        ("tcp and (port 80 or port 443)", 12, 25),
+        ("(tcp and port 80) or (udp and port 53)", 16, 35),
+        ("tcp and (port 80 or port 443) and host 10.0.0.1", 16, 35),
+        ("not (tcp and port 80)", 10, 25),
+        ("ip and not (tcp or udp)", 5, 15),
+        ("host 10.0.0.1 or host 10.0.0.2 or host 10.0.0.3", 12, 30),
+        ("vlan 100 and ip and tcp port 80", 18, 40),
+        ("ip6 and tcp port 443", 8, 20),
+        ("src host 1.2.3.4 or dst host 5.6.7.8", 6, 20),
+        ("tcp and src port 1024 and dst port 80", 10, 25),
+        ("(tcp or udp) and portrange 1024-65535", 14, 30),
     ];
     for &(filter, lo, hi) in cases {
         let n = cbpf(filter).len();
@@ -1229,12 +1235,22 @@ fn juxtaposition_and_keyword_same_size() {
 // §13 NOT / Negation Correctness
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `not tcp` should be strictly longer than `tcp` (inverted path).
+/// `not tcp` costs no more than `tcp` plus a fall-through trampoline.
+/// (Jump threading folds the NOT trampoline away, so the two are typically
+/// the same length with success/failure targets swapped.)
 #[test]
-fn not_tcp_is_longer_than_tcp() {
+fn not_tcp_is_no_longer_than_tcp_plus_trampoline() {
     let a = cbpf("tcp").len();
     let b = cbpf("not tcp").len();
-    assert!(b > a, "'not tcp' ({b}) should be longer than 'tcp' ({a})");
+    assert!(
+        b >= a && b <= a + 1,
+        "'not tcp' ({b}) should be within one instruction of 'tcp' ({a})"
+    );
+    assert_ne!(
+        cbpf("tcp"),
+        cbpf("not tcp"),
+        "negation must change the program"
+    );
 }
 
 /// `not tcp` and `tcp` combined should compile and produce valid programs.
