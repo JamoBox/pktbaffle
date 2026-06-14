@@ -14,7 +14,7 @@
 //!
 //! # Path facts
 //!
-//! The emitter tracks [`Facts`] — predicates already proven true on the
+//! The emitter tracks `Facts` — predicates already proven true on the
 //! current fall-through path, such as "the ethertype check for 0x0800 has
 //! passed" or "X holds the transport-header offset". Because AND chains fall
 //! through on success, a fact established by one conjunct dominates all later
@@ -27,7 +27,7 @@
 //! - **OR** restores the entry facts before emitting the right arm (the right
 //!   arm is reached from the left arm's failure points), and keeps only facts
 //!   established by *both* arms after the join. Guards required by every arm
-//!   (per [`required_guards`]) are hoisted in front of the OR so each arm can
+//!   (per `required_guards`) are hoisted in front of the OR so each arm can
 //!   elide them.
 //! - **NOT** restores the entry facts afterwards: its success path is the
 //!   inner failure path, which proves nothing new.
