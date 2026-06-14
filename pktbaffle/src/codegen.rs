@@ -340,6 +340,11 @@ struct Codegen {
     /// Counts instructions that write X; used to detect clobbers across an
     /// OR arm or NOT body whose entry facts are later restored.
     x_writes: u64,
+    /// Number of 802.1Q VLAN headers that have been matched so far in the
+    /// current AND-chain.  Each VLAN tag adds 4 bytes before the next
+    /// ethertype / IP header, so all layer-3+ offsets must be shifted by
+    /// `vlan_depth * 4`.
+    vlan_depth: u32,
 }
 
 impl Codegen {
@@ -353,6 +358,31 @@ impl Codegen {
                 ..Facts::default()
             },
             x_writes: 0,
+            vlan_depth: 0,
+        }
+    }
+
+    /// Byte offset where the network (IP) header begins, accounting for any
+    /// matched VLAN tags.
+    fn net_offset(&self) -> u32 {
+        self.link.net_offset() + self.vlan_depth * 4
+    }
+
+    /// Byte offset of the ethertype / protocol field, accounting for any
+    /// matched VLAN tags.  Returns `None` for `RawIp` (no link header).
+    fn ether_proto_offset(&self) -> Option<u32> {
+        self.link
+            .ether_proto_offset()
+            .map(|o| o + self.vlan_depth * 4)
+    }
+
+    /// Returns `true` if `expr` is, or begins with, a `vlan` primitive in an
+    /// AND-chain — i.e. the left-most leaf of any nested AND is a VLAN check.
+    fn has_leading_vlan(expr: &Expr) -> bool {
+        match expr {
+            Expr::Primitive(Primitive::Vlan { .. }) => true,
+            Expr::And(l, _) => Self::has_leading_vlan(l),
+            _ => false,
         }
     }
 
@@ -422,7 +452,17 @@ impl Codegen {
         // Resolve left's explicit success jumps to the start of right.
         let right_start = self.insns.len();
         self.resolve_all(left_p.success, right_start)?;
+        // When the left side matches a VLAN tag (or an AND-chain that begins
+        // with one), shift all layer-3+ offsets in the right side by 4 bytes
+        // to account for the 802.1Q header inserted before the inner payload.
+        let vlan_bump = Self::has_leading_vlan(left);
+        if vlan_bump {
+            self.vlan_depth += 1;
+        }
         let right_p = self.emit_expr(right)?;
+        if vlan_bump {
+            self.vlan_depth -= 1;
+        }
         Ok(Patches {
             success: right_p.success,
             failure: left_p.failure.into_iter().chain(right_p.failure).collect(),
@@ -670,7 +710,7 @@ impl Codegen {
 
     fn emit_host4(&mut self, addr: Ipv4Addr, dir: Dir) -> Result<Patches> {
         let mut p = self.ip4_guard()?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         let src_off = base + 12; // IPv4 source address
         let dst_off = base + 16; // IPv4 destination address
         let k = u32::from(addr);
@@ -725,7 +765,7 @@ impl Codegen {
 
     fn emit_host6(&mut self, addr: std::net::Ipv6Addr, dir: Dir) -> Result<Patches> {
         let mut p = self.emit_ethertype(0x86dd)?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         let src_off = base + 8;
         let dst_off = base + 24;
         let segs = addr.segments();
@@ -767,7 +807,7 @@ impl Codegen {
 
     fn emit_net(&mut self, net: &IpNet, dir: Dir) -> Result<Patches> {
         let mut p = self.ip4_guard()?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         let src_off = base + 12;
         let dst_off = base + 16;
         let mask = net.mask;
@@ -803,7 +843,7 @@ impl Codegen {
 
     fn emit_net6(&mut self, net: &Ipv6Net, dir: Dir) -> Result<Patches> {
         let mut p = self.emit_ethertype(0x86dd)?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         let src_off = base + 8;
         let dst_off = base + 24;
         let segs = net.addr.segments();
@@ -858,7 +898,7 @@ impl Codegen {
 
     fn emit_port(&mut self, port: u16, dir: Dir, proto: Option<Proto>) -> Result<Patches> {
         let mut p = self.emit_port_prereqs(proto)?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         // With X = IHL*4 (from MSH), transport header is at X + base.
         // Source port: transport+0, destination port: transport+2.
         let src_port_off = base; // IND: P[X + base + 0]
@@ -903,7 +943,7 @@ impl Codegen {
         proto: Option<Proto>,
     ) -> Result<Patches> {
         let mut p = self.emit_port_prereqs(proto)?;
-        let base = self.link.net_offset();
+        let base = self.net_offset();
         let src_port_off = base;
         let dst_port_off = base + 2;
 
@@ -973,7 +1013,7 @@ impl Codegen {
         }
 
         let mut p = Patches::default();
-        let net_off = self.link.net_offset();
+        let net_off = self.net_offset();
         let ip4_proto_off = net_off + 9; // IP protocol byte
         let ip4_frag_off = net_off + 6; // IP flags + fragment offset (ip[6:2])
         let ip6_nh_off = net_off + 6; // IPv6 next-header (byte 6 of IPv6 header)
@@ -1163,7 +1203,7 @@ impl Codegen {
     fn emit_ip_broadcast(&mut self) -> Result<Patches> {
         let mut p = self.ip4_guard()?;
         // Check destination IP == 255.255.255.255 (limited broadcast).
-        let dst_off = self.link.net_offset() + 16;
+        let dst_off = self.net_offset() + 16;
         let q = self.check_word(dst_off, 0xffffffff);
         p.failure.extend(q.failure);
         Ok(p)
@@ -1172,7 +1212,7 @@ impl Codegen {
     fn emit_ip_multicast(&mut self) -> Result<Patches> {
         let mut p = self.ip4_guard()?;
         // Destination IP & 0xf0000000 == 0xe0000000 (224.0.0.0/4).
-        let dst_off = self.link.net_offset() + 16;
+        let dst_off = self.net_offset() + 16;
         self.push(Insn::ldw_abs(dst_off));
         self.push(Insn::and_k(0xf000_0000));
         let idx = self.push(Insn::jeq_k(0xe000_0000, 0, 0xff));
@@ -1184,7 +1224,7 @@ impl Codegen {
         let mut p = self.emit_ethertype(0x86dd)?;
         // First byte of destination IPv6 address == 0xff.
         // IPv6 dst starts at net_offset + 24.
-        let dst_off = self.link.net_offset() + 24;
+        let dst_off = self.net_offset() + 24;
         let q = self.check_byte(dst_off, 0xff);
         p.failure.extend(q.failure);
         Ok(p)
@@ -1198,7 +1238,7 @@ impl Codegen {
         if let Some(vid) = id {
             // VLAN TCI is the next 16-bit field after the ethertype.
             // On Ethernet: offset 14; on LinuxSll: offset 16.
-            let tci_off = self.link.ether_proto_offset().unwrap_or(14) + 2;
+            let tci_off = self.ether_proto_offset().unwrap_or(14) + 2;
             self.push(Insn::ldh_abs(tci_off));
             self.push(Insn::and_k(0x0fff)); // VLAN ID is lower 12 bits
             let idx = self.push(Insn::jeq_k(vid as u32, 0, 0xff));
@@ -1212,7 +1252,7 @@ impl Codegen {
     fn emit_mpls(&mut self, label: Option<u32>) -> Result<Patches> {
         // MPLS unicast ethertype is 0x8847; multicast is 0x8848.
         // Emit: ethertype == 0x8847 OR ethertype == 0x8848.
-        if let Some(off) = self.link.ether_proto_offset() {
+        if let Some(off) = self.ether_proto_offset() {
             self.push(Insn::ldh_abs(off));
             let i_unicast = self.push(Insn::jeq_k(0x8847, 0xff, 0)); // match → success branch
             let i_mcast = self.push(Insn::jeq_k(0x8848, 0, 0xff)); // no match → fail
@@ -1245,7 +1285,7 @@ impl Codegen {
             // PPPoE session ID is at bytes 2–3 of the PPPoE header, which
             // immediately follows the 2-byte ethertype field.
             // Absolute offset: ether_proto_offset + 4.
-            let sid_off = self.link.ether_proto_offset().unwrap_or(12) + 4;
+            let sid_off = self.ether_proto_offset().unwrap_or(12) + 4;
             self.push(Insn::ldh_abs(sid_off));
             let idx = self.push(Insn::jeq_k(id as u32, 0, 0xff));
             p.failure.push(Patch::Jf(idx));
@@ -1287,12 +1327,12 @@ impl Codegen {
                 self.load_sized(off, ba.size, false);
             }
             Layer::Net => {
-                let off = self.link.net_offset() + ba.offset as u32;
+                let off = self.net_offset() + ba.offset as u32;
                 self.load_sized(off, ba.size, false);
             }
             Layer::Trans => {
-                self.push(Insn::ldx_msh(self.link.net_offset()));
-                let off = self.link.net_offset() + ba.offset as u32;
+                self.push(Insn::ldx_msh(self.net_offset()));
+                let off = self.net_offset() + ba.offset as u32;
                 self.load_sized(off, ba.size, true);
             }
         }
@@ -1356,7 +1396,7 @@ impl Codegen {
     /// - If either side is transport-layer, use scratch memory slot 0 to
     ///   preserve the LHS value across the MSH + indirect load of the RHS.
     fn emit_byte_access_load(&mut self, ba: &ByteAccess, rhs: &ByteLoad) -> Result<Patches> {
-        let net = self.link.net_offset();
+        let net = self.net_offset();
         let lhs_trans = ba.layer == Layer::Trans;
         let rhs_trans = rhs.layer == Layer::Trans;
 
@@ -1409,7 +1449,7 @@ impl Codegen {
     fn layer_offset(&self, layer: Layer, offset: u32) -> u32 {
         match layer {
             Layer::Raw => offset,
-            Layer::Net | Layer::Trans => self.link.net_offset() + offset,
+            Layer::Net | Layer::Trans => self.net_offset() + offset,
         }
     }
 

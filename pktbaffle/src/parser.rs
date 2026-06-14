@@ -714,7 +714,7 @@ impl Parser<'_> {
 
     fn parse_byte_access(&mut self, layer: Layer) -> Result<Primitive> {
         self.expect(&Token::LBracket)?;
-        let offset = self.parse_i32()?;
+        let offset = self.parse_offset_expr()?;
         if offset < 0 {
             return Err(self.err(format!(
                 "byte-access offset must be non-negative, got {}",
@@ -824,7 +824,7 @@ impl Parser<'_> {
     /// Parse `[offset:size]` and return a `ByteLoad` for the given layer.
     fn parse_byte_load(&mut self, layer: Layer) -> Result<ByteLoad> {
         self.expect(&Token::LBracket)?;
-        let offset = self.parse_i32()?;
+        let offset = self.parse_offset_expr()?;
         if offset < 0 {
             return Err(self.err(format!(
                 "byte-access offset must be non-negative, got {}",
@@ -966,9 +966,129 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_i32(&mut self) -> Result<i32> {
-        let neg = self.eat(&Token::Minus);
-        let n = self.parse_u32()? as i32;
-        Ok(if neg { -n } else { n })
+    // ── Constant offset expressions inside `[...]` — precedence: | ^ & shr+shl +- */
+    fn parse_offset_expr(&mut self) -> Result<i32> {
+        let v = self.parse_offset_or()?;
+        if v > i32::MAX as i64 {
+            return Err(self.err(format!("offset expression out of range: {v}")));
+        }
+        Ok(v as i32)
+    }
+
+    fn parse_offset_or(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_xor()?;
+        while self.cur_tok() == Some(&Token::Pipe) {
+            self.advance();
+            lhs |= self.parse_offset_xor()?;
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_xor(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_and()?;
+        while self.cur_tok() == Some(&Token::Caret) {
+            self.advance();
+            lhs ^= self.parse_offset_and()?;
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_and(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_shift()?;
+        while self.cur_tok() == Some(&Token::Amp) {
+            self.advance();
+            lhs &= self.parse_offset_shift()?;
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_shift(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_add()?;
+        loop {
+            match self.cur_tok() {
+                Some(Token::Shl) => {
+                    self.advance();
+                    let rhs = self.parse_offset_add()?;
+                    if !(0..64).contains(&rhs) {
+                        return Err(self.err("shift amount out of range in offset expression"));
+                    }
+                    lhs <<= rhs;
+                }
+                Some(Token::Shr) => {
+                    self.advance();
+                    let rhs = self.parse_offset_add()?;
+                    if !(0..64).contains(&rhs) {
+                        return Err(self.err("shift amount out of range in offset expression"));
+                    }
+                    lhs >>= rhs;
+                }
+                _ => break,
+            }
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_add(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_mul()?;
+        loop {
+            match self.cur_tok() {
+                Some(Token::Plus) => {
+                    self.advance();
+                    lhs = lhs
+                        .checked_add(self.parse_offset_mul()?)
+                        .ok_or_else(|| self.err("offset expression overflow"))?;
+                }
+                Some(Token::Minus) => {
+                    self.advance();
+                    lhs = lhs
+                        .checked_sub(self.parse_offset_mul()?)
+                        .ok_or_else(|| self.err("offset expression overflow"))?;
+                }
+                _ => break,
+            }
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_mul(&mut self) -> Result<i64> {
+        let mut lhs = self.parse_offset_atom()?;
+        loop {
+            match self.cur_tok() {
+                Some(Token::Star) => {
+                    self.advance();
+                    lhs = lhs
+                        .checked_mul(self.parse_offset_atom()?)
+                        .ok_or_else(|| self.err("offset expression overflow"))?;
+                }
+                Some(Token::Slash) => {
+                    self.advance();
+                    let rhs = self.parse_offset_atom()?;
+                    if rhs == 0 {
+                        return Err(self.err("division by zero in offset expression"));
+                    }
+                    lhs /= rhs;
+                }
+                _ => break,
+            }
+        }
+        Ok(lhs)
+    }
+
+    fn parse_offset_atom(&mut self) -> Result<i64> {
+        match self.cur_tok() {
+            Some(Token::LParen) => {
+                self.advance();
+                let val = self.parse_offset_or()?;
+                self.expect(&Token::RParen)?;
+                Ok(val)
+            }
+            Some(Token::Minus) => {
+                self.advance();
+                let val = self.parse_offset_atom()?;
+                val.checked_neg()
+                    .ok_or_else(|| self.err("offset expression overflow"))
+            }
+            _ => Ok(self.parse_u32()? as i64),
+        }
     }
 }

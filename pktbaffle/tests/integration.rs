@@ -610,6 +610,197 @@ fn positive_offset_byte_access_unaffected() {
     );
 }
 
+// ── Arithmetic expressions in byte-access offset position (#32b) ──────────────
+
+#[test]
+fn offset_expr_addition() {
+    // tcp[0+2]: offset computed as 0+2=2 at parse time
+    let result = compile("tcp[0+2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0+2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_subtraction() {
+    // tcp[4-2]: offset computed as 4-2=2
+    let result = compile("tcp[4-2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[4-2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_multiplication() {
+    // tcp[1*4]: offset computed as 1*4=4
+    let result = compile("tcp[1*4] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[1*4] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_division() {
+    // tcp[8/2]: offset computed as 8/2=4
+    let result = compile("tcp[8/2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[8/2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_shift_left() {
+    // tcp[1<<2]: offset computed as 1<<2=4
+    let result = compile("tcp[1<<2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[1<<2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_shift_right() {
+    // tcp[16>>2]: offset computed as 16>>2=4
+    let result = compile("tcp[16>>2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[16>>2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_bitwise_and() {
+    // tcp[0xff&0x0f]: offset computed as 0xff&0x0f=15
+    let result = compile("tcp[0xff&0x0f] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0xff&0x0f] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_bitwise_or() {
+    // tcp[0x01|0x04]: offset computed as 0x01|0x04=5
+    let result = compile("tcp[0x01|0x04] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0x01|0x04] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_bitwise_xor() {
+    // tcp[0x0f^0x05]: offset computed as 0x0f^0x05=10
+    let result = compile("tcp[0x0f^0x05] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0x0f^0x05] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_with_explicit_size() {
+    // tcp[0+2:2]: offset expr with explicit 2-byte size
+    let result = compile("tcp[0+2:2] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0+2:2] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_parentheses() {
+    // tcp[(2+2)]: parenthesised offset expression evaluates to 4
+    let result = compile("tcp[(2+2)] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[(2+2)] = 0 must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
+#[test]
+fn offset_expr_division_by_zero_is_error() {
+    // Division by zero in the offset expression must be an error.
+    let result = compile("tcp[4/0] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(result.is_err(), "tcp[4/0] = 0 must fail with a parse error");
+}
+
+#[test]
+fn offset_expr_negative_result_is_error() {
+    // Expressions that evaluate to a negative offset must be rejected.
+    let result = compile("tcp[1-4] = 0", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_err(),
+        "tcp[1-4] = 0 (offset -3) must fail with a parse error"
+    );
+}
+
+#[test]
+fn offset_expr_equivalence_to_plain_offset() {
+    // tcp[0+4] and tcp[4] must produce identical bytecode.
+    let expr = compile("tcp[0+4] = 0", LinkType::Ethernet, Target::Classic)
+        .expect("tcp[0+4] must compile");
+    let plain =
+        compile("tcp[4] = 0", LinkType::Ethernet, Target::Classic).expect("tcp[4] must compile");
+    assert_eq!(
+        expr.instructions(),
+        plain.instructions(),
+        "tcp[0+4] and tcp[4] must produce identical bytecode"
+    );
+}
+
+#[test]
+fn offset_expr_operator_precedence() {
+    // tcp[1+2*3] = tcp[7]: multiplication binds tighter than addition.
+    let expr = compile("tcp[1+2*3] = 0", LinkType::Ethernet, Target::Classic)
+        .expect("tcp[1+2*3] must compile");
+    let plain =
+        compile("tcp[7] = 0", LinkType::Ethernet, Target::Classic).expect("tcp[7] must compile");
+    assert_eq!(
+        expr.instructions(),
+        plain.instructions(),
+        "tcp[1+2*3] must equal tcp[7] (standard math precedence)"
+    );
+}
+
+#[test]
+fn offset_expr_rhs_byte_load() {
+    // Offset expressions are also allowed on the RHS of expr-vs-expr comparisons.
+    let result = compile("tcp[0+2] = tcp[1+1]", LinkType::Ethernet, Target::Classic);
+    assert!(
+        result.is_ok(),
+        "tcp[0+2] = tcp[1+1] must compile: {:?}",
+        result.err()
+    );
+    last_two_are_ret(&result.unwrap());
+}
+
 // ── Arithmetic and bitwise operators in byte-access expressions (#32) ─────────
 
 #[test]

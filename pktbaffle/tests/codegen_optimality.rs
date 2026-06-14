@@ -787,6 +787,40 @@ fn vlan_id_filter_masks_tci() {
     assert!(has_jeq, "no JEQ 100 in 'vlan 100': {insns:?}");
 }
 
+/// `vlan and ip` must check the inner ethertype at offset 16 (not 12).
+/// In an 802.1Q frame the 4-byte VLAN tag sits between the outer ethertype
+/// (offset 12) and the inner ethertype (offset 16).
+#[test]
+fn vlan_and_ip_shifts_inner_ethertype_offset() {
+    let insns = cbpf("vlan and ip");
+    // First JEQ must be for 0x8100 at offset 12 (outer VLAN tag check).
+    let first_jeq = insns.iter().find(|i| is_jeq(**i)).copied().unwrap();
+    assert_eq!(
+        first_jeq.k, 0x8100,
+        "first JEQ should be 0x8100 (vlan check)"
+    );
+    // The inner ethertype (0x0800) must be loaded from offset 16.
+    let inner_ethertype_load = insns.iter().any(|i| is_ld_abs(*i) && i.k == 16);
+    assert!(
+        inner_ethertype_load,
+        "'vlan and ip' must load inner ethertype from offset 16, got: {insns:?}"
+    );
+}
+
+/// `vlan and tcp port 80` must load the IP header starting at offset 18
+/// (Ethernet 14 + VLAN tag 4 = 18), not the unshifted offset 14.
+#[test]
+fn vlan_and_tcp_port_shifts_ip_header_offset() {
+    let insns = cbpf("vlan and tcp port 80");
+    // The ldx_msh instruction loads the IP IHL; it must use the shifted
+    // net_offset (18) rather than the plain Ethernet net_offset (14).
+    let has_shifted_msh = insns.iter().any(|i| is_msh(*i) && i.k == 18);
+    assert!(
+        has_shifted_msh,
+        "'vlan and tcp port 80' must emit ldx_msh(18), got: {insns:?}"
+    );
+}
+
 /// `mpls 42` must extract the top 20 bits (RSH 12) of the label stack entry.
 #[test]
 fn mpls_label_filter_uses_rsh() {
