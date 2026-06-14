@@ -620,7 +620,7 @@ impl Codegen {
     }
 
     fn emit_ethertype(&mut self, et: u32) -> Result<Patches> {
-        if let Some(off) = self.link.ether_proto_offset() {
+        if let Some(off) = self.ether_proto_offset() {
             if self.facts.ethertype == Some(et) {
                 // Already proven on this path.
                 return Ok(Patches::default());
@@ -656,7 +656,7 @@ impl Codegen {
         if self.facts.ip4_proto == Some(proto_num) {
             return Ok(p);
         }
-        let off = self.link.net_offset() + 9; // IP protocol byte
+        let off = self.net_offset() + 9; // IP protocol byte
         let q = self.check_byte(off, proto_num as u32);
         p.failure.extend(q.failure);
         p.success.extend(q.success);
@@ -671,7 +671,7 @@ impl Codegen {
         if self.facts.ip6_nh == Some(next_hdr) {
             return Ok(p);
         }
-        let off = self.link.net_offset() + 6; // IPv6 Next Header
+        let off = self.net_offset() + 6; // IPv6 Next Header
         let q = self.check_byte(off, next_hdr as u32);
         p.failure.extend(q.failure);
         if self.facts.ip6_nh.is_none() {
@@ -1080,7 +1080,6 @@ impl Codegen {
             // version, in which case this code is unreachable at runtime and
             // merely preserves the program's shape. Emit the dual path.
             let ether_off = self
-                .link
                 .ether_proto_offset()
                 .expect("RawIp implies a known-IPv4 path");
             // Load ethertype once; IPv6 branches away, IPv4 check falls through.
