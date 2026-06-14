@@ -17,8 +17,10 @@ vm = []
 [dependencies]
 
 [dev-dependencies]
-# Used by the live BPF socket test (Linux only).
-libc = "0.2"
+# Used by the live BPF socket test (Linux only). The whole workspace shares a
+# single libc version, and pkttap requires >= 0.2.140 (for `libc::ifreq`), so
+# this floor must match to avoid a conflict under `-Z direct-minimal-versions`.
+libc = "0.2.140"
 
 [[example]]
 name = "dump_filter"
