@@ -234,9 +234,9 @@ pub fn default_interface() -> Result<String> {
 #[cfg(test)]
 mod tests {
     // These tests verify that the libc symbols required by the live capture
-    // implementation are present. They act as compile-time guards: they fail
-    // to compile with libc < 0.2.65 (which lacks packet_mreq, ifreq, IFNAMSIZ
-    // on Linux), ensuring the Cargo.toml lower bound is tight enough.
+    // implementation are present. They act as compile-time guards: `ifreq` was
+    // only added in libc 0.2.137, so any floor below that fails to compile here,
+    // ensuring the Cargo.toml lower bound (0.2.140) stays honest.
 
     #[test]
     fn libc_packet_mreq_fields_accessible() {

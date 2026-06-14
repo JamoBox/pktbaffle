@@ -15,7 +15,10 @@ pktbaffle = { version = "0.1.0", path = "../pktbaffle", features = ["vm"] }
 pcap-file = "2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-libc = "0.2.65"
+# `live/linux.rs` and `live/macos.rs` use `libc::ifreq`, which was added in
+# libc 0.2.137 (PR rust-lang/libc#2960, 2022-10). 0.2.140 is a safe floor past
+# that; the nightly `minimal-versions` job enforces this bound is honest.
+libc = "0.2.140"
 
 [target.'cfg(windows)'.dependencies]
 libloading = "0.8"
