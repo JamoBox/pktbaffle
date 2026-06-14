@@ -105,6 +105,7 @@ pub enum Proto {
 
 /// A leaf predicate in the filter tree.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Primitive {
     /// Match a host IP address.
     Host { addr: IpAddr, dir: Dir },
@@ -163,6 +164,7 @@ pub enum Primitive {
 
 /// Arithmetic / bitwise operator applied to a loaded byte-access value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArithOp {
     Add,
     Sub,
@@ -178,6 +180,7 @@ pub enum ArithOp {
 
 /// Comparison operator used in raw byte-access expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -218,6 +221,7 @@ pub struct ByteLoad {
 
 /// The right-hand side of a byte-access comparison.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum CmpRhs {
     /// Compare against a constant integer.
     Const(u32),
@@ -232,6 +236,7 @@ pub enum CmpRhs {
 /// each `(ArithOp, operand)` in `alu_ops` in sequence to the accumulator,
 /// then compare the result with `op` and `rhs` (a constant or a second load).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ByteAccess {
     pub layer: Layer,
     pub offset: i32,
@@ -244,6 +249,7 @@ pub struct ByteAccess {
 
 /// A node in the filter expression tree.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Expr {
     /// Logical AND (short-circuiting).
     And(Box<Expr>, Box<Expr>),

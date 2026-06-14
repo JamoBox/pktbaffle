@@ -50,9 +50,8 @@
 //!
 //! Calling [`compile`] runs the following stages in sequence:
 //!
-//! 1. **Lex** ([`lexer::lex`]) — tokenise the input string into a
-//!    [`Vec<lexer::Spanned>`][lexer::Spanned].
-//! 2. **Parse** ([`parser::parse`]) — build an [`ast::Expr`] tree.
+//! 1. **Lex** — tokenise the input string into a stream of spanned tokens.
+//! 2. **Parse** — build an [`ast::Expr`] tree.
 //! 3. **Codegen** ([`codegen::compile`] or [`ebpf_codegen::compile`]) — emit
 //!    BPF instructions with a two-pass jump-patch strategy. The classic
 //!    backend tracks facts proven on the fall-through path (ethertype,
@@ -86,9 +85,9 @@ pub mod codegen;
 pub mod ebpf;
 pub mod ebpf_codegen;
 pub mod error;
-pub mod lexer;
+mod lexer;
 pub mod optimizer;
-pub mod parser;
+mod parser;
 #[cfg(feature = "vm")]
 pub mod vm;
 
