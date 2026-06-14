@@ -266,6 +266,9 @@ jobs:
     name: report
     runs-on: ubuntu-latest
     if: ${{ failure() }}
+    # semver is intentionally `continue-on-error` (breaking changes are
+    # expected during 0.x pre-release), so it is deliberately excluded here —
+    # a non-blocking check must never spawn a failure ticket.
     needs:
       - matrix
       - cross-compile
@@ -276,7 +279,6 @@ jobs:
       - coverage
       - minimal-versions
       - docs
-      - semver
     permissions:
       issues: write
     steps:
@@ -287,15 +289,25 @@ jobs:
             const title = `Nightly CI failed (${date})`;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
-            // Avoid duplicate issues for the same day.
+            // Keep a single rolling issue: if any nightly-failure issue is
+            // already open, append a comment instead of opening a duplicate.
+            // (Previously deduped only on same-day title, so every night that
+            // stayed red opened a fresh issue.)
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'nightly-failure',
             });
-            if (existing.data.some(i => i.title === title)) {
-              console.log('Issue already exists for today — skipping.');
+            if (existing.data.length > 0) {
+              const target = existing.data[0]; // most recently created open one
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: target.number,
+                body: `Nightly CI failed again on ${date} — see the [workflow run](${runUrl}).`,
+              });
+              console.log(`Commented on existing #${target.number} — skipping new issue.`);
               return;
             }
 

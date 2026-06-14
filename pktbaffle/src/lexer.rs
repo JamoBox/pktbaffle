@@ -117,6 +117,9 @@ pub struct Spanned {
     /// The token value.
     pub token: Token,
     /// Byte offset of this token's first character in the original input.
+    /// Retained for future diagnostic spans; not read internally yet (the
+    /// lexer is a private module since 0.2.0, so the field is not public API).
+    #[allow(dead_code)]
     pub offset: usize,
 }
 
@@ -132,9 +135,8 @@ pub struct Spanned {
 ///
 /// # Example
 ///
-/// ```rust
-/// use pktbaffle::lexer::{lex, Token};
-///
+/// ```ignore
+/// // Internal module (private since 0.2.0); illustrative only.
 /// let tokens = lex("tcp port 80").unwrap();
 /// assert_eq!(tokens[0].token, Token::Tcp);
 /// assert_eq!(tokens[0].offset, 0);

@@ -821,6 +821,44 @@ fn vlan_and_tcp_port_shifts_ip_header_offset() {
     );
 }
 
+/// `vlan and tcp` must reload the inner ethertype at offset 16 and check the
+/// IPv4 protocol byte at the shifted offset 27 (net 18 + 9), not 23.
+#[test]
+fn vlan_and_tcp_shifts_ip_proto_byte_offset() {
+    let insns = cbpf("vlan and tcp");
+    let inner_ethertype_load = insns.iter().any(|i| is_ld_abs(*i) && i.k == 16);
+    assert!(
+        inner_ethertype_load,
+        "'vlan and tcp' must reload inner ethertype from offset 16, got: {insns:?}"
+    );
+    let proto_byte_load = insns
+        .iter()
+        .any(|i| is_ld_abs(*i) && (i.code & 0x18) == bpf::BPF_B && i.k == 27);
+    assert!(
+        proto_byte_load,
+        "'vlan and tcp' must load IPv4 protocol byte from offset 27, got: {insns:?}"
+    );
+}
+
+/// `vlan and icmp6` must reload the inner ethertype at offset 16 and check the
+/// IPv6 next-header byte at the shifted offset 24 (net 18 + 6), not 20.
+#[test]
+fn vlan_and_icmp6_shifts_ip6_nexthdr_offset() {
+    let insns = cbpf("vlan and icmp6");
+    let inner_ethertype_load = insns.iter().any(|i| is_ld_abs(*i) && i.k == 16);
+    assert!(
+        inner_ethertype_load,
+        "'vlan and icmp6' must reload inner ethertype from offset 16, got: {insns:?}"
+    );
+    let nexthdr_load = insns
+        .iter()
+        .any(|i| is_ld_abs(*i) && (i.code & 0x18) == bpf::BPF_B && i.k == 24);
+    assert!(
+        nexthdr_load,
+        "'vlan and icmp6' must load IPv6 next-header byte from offset 24, got: {insns:?}"
+    );
+}
+
 /// `mpls 42` must extract the top 20 bits (RSH 12) of the label stack entry.
 #[test]
 fn mpls_label_filter_uses_rsh() {

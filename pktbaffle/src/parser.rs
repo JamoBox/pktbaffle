@@ -28,9 +28,8 @@ use crate::lexer::{Spanned, Token};
 ///
 /// # Example
 ///
-/// ```rust
-/// use pktbaffle::{lexer, parser};
-///
+/// ```ignore
+/// // Internal modules (private since 0.2.0); illustrative only.
 /// let tokens = lexer::lex("tcp port 80").unwrap();
 /// let expr = parser::parse(&tokens).unwrap();
 /// println!("{expr:#?}");
