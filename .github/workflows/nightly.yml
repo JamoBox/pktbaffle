@@ -203,8 +203,14 @@ jobs:
           fail_ci_if_error: false
 
   # ── Minimal dependency versions ────────────────────────────────────────────
-  # Verifies that the lower-bound versions declared in Cargo.toml actually work,
-  # catching cases where a crate silently requires a newer API than stated.
+  # Verifies that the lower-bound versions of our *direct* dependencies, as
+  # declared in Cargo.toml, actually work — catching cases where we silently
+  # require a newer API than stated. Uses `-Z direct-minimal-versions` rather
+  # than `-Z minimal-versions`: the latter also pins every transitive crate to
+  # its declared floor, which is unreliable because the wider ecosystem does not
+  # maintain accurate transitive lower bounds (e.g. `pcap-file -> byteorder_slice`
+  # admits a `byteorder` old enough to panic at runtime). We only own and can fix
+  # the bounds we declare ourselves.
   minimal-versions:
     name: minimal-versions
     runs-on: ubuntu-latest
@@ -218,7 +224,7 @@ jobs:
           key: minimal-versions
 
       - name: Set minimal dependency versions
-        run: cargo +nightly -Z minimal-versions update
+        run: cargo +nightly -Z direct-minimal-versions update
 
       - name: Test with minimal versions
         run: cargo +nightly test --workspace --features vm
