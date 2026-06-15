@@ -968,7 +968,10 @@ fn ip6_and_tcp_port_rejects_wrong_port() {
 
 #[test]
 fn ip6_and_tcp_port_rejects_ipv4() {
-    assert!(!run_filter("ip6 and tcp port 80", &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(!run_filter(
+        "ip6 and tcp port 80",
+        &tcp(IP_A, IP_B, 1234, 80)
+    ));
 }
 
 #[test]
@@ -979,7 +982,10 @@ fn ip6_and_udp_port_matches() {
 
 #[test]
 fn ip6_and_udp_port_rejects_ipv4() {
-    assert!(!run_filter("ip6 and udp port 53", &udp(IP_A, IP_B, 1234, 53)));
+    assert!(!run_filter(
+        "ip6 and udp port 53",
+        &udp(IP_A, IP_B, 1234, 53)
+    ));
 }
 
 // ── IPv6 multicast ────────────────────────────────────────────────────────────
@@ -998,7 +1004,10 @@ fn ip6_multicast_rejects_unicast_dst() {
 
 #[test]
 fn ip6_multicast_rejects_ipv4() {
-    assert!(!run_filter("ip6 multicast", &tcp(IP_A, [224, 0, 0, 1], 1234, 80)));
+    assert!(!run_filter(
+        "ip6 multicast",
+        &tcp(IP_A, [224, 0, 0, 1], 1234, 80)
+    ));
 }
 
 // ── Bare broadcast / multicast ────────────────────────────────────────────────
