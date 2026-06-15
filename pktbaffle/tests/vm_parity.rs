@@ -793,3 +793,316 @@ fn ip_multicast_matches_class_d() {
 fn ip_multicast_rejects_unicast() {
     assert!(!run_filter("ip multicast", &tcp(IP_A, IP_B, 1234, 80)));
 }
+
+// ── IPv6 host filters ─────────────────────────────────────────────────────────
+
+// Fixed IPv6 test addresses.
+const IPV6_A: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+const IPV6_B: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+const IPV6_MCAST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]; // ff02::1
+
+/// Ethernet/IPv6/UDP frame (40-byte IPv6 header, no extension headers).
+fn eth_ipv6_udp(src_ip: [u8; 16], dst_ip: [u8; 16], src_port: u16, dst_port: u16) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&MAC_B);
+    p.extend_from_slice(&MAC_A);
+    p.extend_from_slice(&ETHERTYPE_IPV6.to_be_bytes());
+    p.push(0x60);
+    p.extend_from_slice(&[0x00, 0x00, 0x00]);
+    p.extend_from_slice(&8u16.to_be_bytes()); // payload length = UDP header
+    p.push(IPPROTO_UDP);
+    p.push(64);
+    p.extend_from_slice(&src_ip);
+    p.extend_from_slice(&dst_ip);
+    p.extend_from_slice(&src_port.to_be_bytes());
+    p.extend_from_slice(&dst_port.to_be_bytes());
+    p.extend_from_slice(&8u16.to_be_bytes());
+    p.extend_from_slice(&[0x00, 0x00]);
+    p
+}
+
+#[test]
+fn ipv6_host_matches_src() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_host_matches_dst() {
+    let pkt = eth_ipv6_tcp(IPV6_B, IPV6_A, 1234, 80, 0x02);
+    assert!(run_filter("host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_host_rejects_unrelated() {
+    let pkt = eth_ipv6_tcp(IPV6_B, IPV6_B, 1234, 80, 0x02);
+    assert!(!run_filter("host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_host_rejects_ipv4() {
+    assert!(!run_filter("host 2001:db8::1", &tcp(IP_A, IP_B, 1234, 80)));
+}
+
+#[test]
+fn ipv6_src_host_matches() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("src host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_src_host_rejects_when_only_dst() {
+    let pkt = eth_ipv6_tcp(IPV6_B, IPV6_A, 1234, 80, 0x02);
+    assert!(!run_filter("src host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_dst_host_matches() {
+    let pkt = eth_ipv6_tcp(IPV6_B, IPV6_A, 1234, 80, 0x02);
+    assert!(run_filter("dst host 2001:db8::1", &pkt));
+}
+
+#[test]
+fn ipv6_dst_host_rejects_when_only_src() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(!run_filter("dst host 2001:db8::1", &pkt));
+}
+
+// ── Directional net filters ───────────────────────────────────────────────────
+
+#[test]
+fn src_net_cidr_matches_src_in_subnet() {
+    let pkt = tcp([192, 168, 1, 50], [10, 0, 0, 1], 1234, 80);
+    assert!(run_filter("src net 192.168.1.0/24", &pkt));
+}
+
+#[test]
+fn src_net_cidr_rejects_when_only_dst_in_subnet() {
+    let pkt = tcp([10, 0, 0, 1], [192, 168, 1, 100], 1234, 80);
+    assert!(!run_filter("src net 192.168.1.0/24", &pkt));
+}
+
+#[test]
+fn dst_net_cidr_matches_dst_in_subnet() {
+    let pkt = tcp([10, 0, 0, 1], [192, 168, 1, 100], 1234, 80);
+    assert!(run_filter("dst net 192.168.1.0/24", &pkt));
+}
+
+#[test]
+fn dst_net_cidr_rejects_when_only_src_in_subnet() {
+    let pkt = tcp([192, 168, 1, 50], [10, 0, 0, 1], 1234, 80);
+    assert!(!run_filter("dst net 192.168.1.0/24", &pkt));
+}
+
+// ── Directional portrange filters ─────────────────────────────────────────────
+
+#[test]
+fn src_portrange_matches_src_in_range() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 8080, 80, 0x02, 0);
+    assert!(run_filter("src portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn src_portrange_rejects_src_outside_range() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 80, 8080, 0x02, 0);
+    assert!(!run_filter("src portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn dst_portrange_matches_dst_in_range() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 80, 8080, 0x02, 0);
+    assert!(run_filter("dst portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn dst_portrange_rejects_dst_outside_range() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 8080, 80, 0x02, 0);
+    assert!(!run_filter("dst portrange 1024-65535", &pkt));
+}
+
+// ── Protocol-qualified portrange ──────────────────────────────────────────────
+
+#[test]
+fn tcp_portrange_matches_tcp() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 8080, 9090, 0x02, 0);
+    assert!(run_filter("tcp portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn tcp_portrange_rejects_udp() {
+    let pkt = eth_ipv4_udp(MAC_B, MAC_A, IP_A, IP_B, 8080, 9090);
+    assert!(!run_filter("tcp portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn tcp_portrange_rejects_ports_outside_range() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 80, 443, 0x02, 0);
+    assert!(!run_filter("tcp portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn udp_portrange_matches_udp() {
+    let pkt = eth_ipv4_udp(MAC_B, MAC_A, IP_A, IP_B, 8080, 9090);
+    assert!(run_filter("udp portrange 1024-65535", &pkt));
+}
+
+#[test]
+fn udp_portrange_rejects_tcp() {
+    let pkt = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 8080, 9090, 0x02, 0);
+    assert!(!run_filter("udp portrange 1024-65535", &pkt));
+}
+
+// ── IPv6 with transport port filters ─────────────────────────────────────────
+
+#[test]
+fn ip6_and_tcp_port_matches() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("ip6 and tcp port 80", &pkt));
+}
+
+#[test]
+fn ip6_and_tcp_port_rejects_wrong_port() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 443, 0x02);
+    assert!(!run_filter("ip6 and tcp port 80", &pkt));
+}
+
+#[test]
+fn ip6_and_tcp_port_rejects_ipv4() {
+    assert!(!run_filter(
+        "ip6 and tcp port 80",
+        &tcp(IP_A, IP_B, 1234, 80)
+    ));
+}
+
+#[test]
+fn ip6_and_udp_port_matches() {
+    let pkt = eth_ipv6_udp(IPV6_A, IPV6_B, 1234, 53);
+    assert!(run_filter("ip6 and udp port 53", &pkt));
+}
+
+#[test]
+fn ip6_and_udp_port_rejects_ipv4() {
+    assert!(!run_filter(
+        "ip6 and udp port 53",
+        &udp(IP_A, IP_B, 1234, 53)
+    ));
+}
+
+// ── IPv6 multicast ────────────────────────────────────────────────────────────
+
+#[test]
+fn ip6_multicast_matches_ff02_group() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_MCAST, 1234, 80, 0x02);
+    assert!(run_filter("ip6 multicast", &pkt));
+}
+
+#[test]
+fn ip6_multicast_rejects_unicast_dst() {
+    let pkt = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(!run_filter("ip6 multicast", &pkt));
+}
+
+#[test]
+fn ip6_multicast_rejects_ipv4() {
+    assert!(!run_filter(
+        "ip6 multicast",
+        &tcp(IP_A, [224, 0, 0, 1], 1234, 80)
+    ));
+}
+
+// ── Bare broadcast / multicast ────────────────────────────────────────────────
+// pktbaffle implements these as Ethernet-layer only checks:
+//   broadcast  →  dst MAC == FF:FF:FF:FF:FF:FF
+//   multicast  →  bit 0 of dst MAC byte 0 is set
+//
+// libpcap additionally ORs in ip broadcast / ip multicast / ip6 multicast.
+// That gap is documented in tests/libpcap_compat.rs.
+//
+// Note: MAC_B = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66] — 0x11 & 0x01 = 1, so
+// MAC_B is itself a multicast address.  Tests that want a unicast destination
+// must use MAC_A = [0xaa, ...] (0xaa & 0x01 = 0).
+
+#[test]
+fn bare_broadcast_matches_ether_broadcast_dst() {
+    let pkt = eth_ipv4_tcp(MAC_BCAST, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 0);
+    assert!(run_filter("broadcast", &pkt));
+}
+
+#[test]
+fn bare_broadcast_rejects_unicast_dst_mac() {
+    // MAC_A destination (0xaa:bb:... → not all-FF, not multicast).
+    let pkt = eth_ipv4_tcp(MAC_A, MAC_B, IP_A, IP_B, 1234, 80, 0x02, 0);
+    assert!(!run_filter("broadcast", &pkt));
+}
+
+#[test]
+fn bare_multicast_matches_ether_multicast_dst() {
+    // MAC_MCAST = 01:00:5e:... — bit 0 of byte 0 is set → multicast.
+    let pkt = eth_ipv4_tcp(MAC_MCAST, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 0);
+    assert!(run_filter("multicast", &pkt));
+}
+
+#[test]
+fn bare_multicast_rejects_unicast_dst_mac() {
+    // MAC_A = aa:bb:cc:... — 0xaa & 0x01 = 0 → unicast destination.
+    let pkt = eth_ipv4_tcp(MAC_A, MAC_B, IP_A, IP_B, 1234, 80, 0x02, 0);
+    assert!(!run_filter("multicast", &pkt));
+}
+
+// ── ether proto ───────────────────────────────────────────────────────────────
+
+#[test]
+fn ether_proto_0x0800_matches_ipv4() {
+    assert!(run_filter("ether proto 0x0800", &tcp(IP_A, IP_B, 1234, 80)));
+}
+
+#[test]
+fn ether_proto_0x0800_rejects_arp() {
+    assert!(!run_filter("ether proto 0x0800", &eth_arp(IP_A, IP_B)));
+}
+
+#[test]
+fn ether_proto_ip_alias_matches_ipv4() {
+    assert!(run_filter("ether proto ip", &tcp(IP_A, IP_B, 1234, 80)));
+}
+
+#[test]
+fn ether_proto_ip_alias_rejects_arp() {
+    assert!(!run_filter("ether proto ip", &eth_arp(IP_A, IP_B)));
+}
+
+#[test]
+fn ether_proto_arp_matches_arp() {
+    assert!(run_filter("ether proto arp", &eth_arp(IP_A, IP_B)));
+}
+
+#[test]
+fn ether_proto_arp_rejects_ipv4() {
+    assert!(!run_filter("ether proto arp", &tcp(IP_A, IP_B, 1234, 80)));
+}
+
+// ── Additional ICMP named constants ──────────────────────────────────────────
+
+#[test]
+fn icmp_echoreply_constant() {
+    let reply = eth_ipv4_icmp(IP_B, IP_A, 0, 0); // type=0 = echo reply
+    let request = eth_ipv4_icmp(IP_A, IP_B, 8, 0);
+    assert!(run_filter("icmp[icmptype] = icmp-echoreply", &reply));
+    assert!(!run_filter("icmp[icmptype] = icmp-echoreply", &request));
+}
+
+#[test]
+fn icmp_unreach_constant() {
+    let unreach = eth_ipv4_icmp(IP_B, IP_A, 3, 0); // type=3 = destination unreachable
+    let echo = eth_ipv4_icmp(IP_A, IP_B, 8, 0);
+    assert!(run_filter("icmp[icmptype] = icmp-unreach", &unreach));
+    assert!(!run_filter("icmp[icmptype] = icmp-unreach", &echo));
+}
+
+#[test]
+fn icmp_redirect_constant() {
+    let redirect = eth_ipv4_icmp(IP_B, IP_A, 5, 0); // type=5 = redirect
+    let echo = eth_ipv4_icmp(IP_A, IP_B, 8, 0);
+    assert!(run_filter("icmp[icmptype] = icmp-redirect", &redirect));
+    assert!(!run_filter("icmp[icmptype] = icmp-redirect", &echo));
+}
