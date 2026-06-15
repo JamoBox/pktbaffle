@@ -35,7 +35,7 @@ use crate::lexer::{Spanned, Token};
 /// println!("{expr:#?}");
 /// ```
 pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser { tokens, pos: 0, depth: 0 };
     let expr = p.parse_expr()?;
     if p.pos < p.tokens.len() {
         return Err(p.err(format!(
@@ -46,9 +46,12 @@ pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
     Ok(expr)
 }
 
+const MAX_DEPTH: usize = 128;
+
 struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -94,7 +97,15 @@ impl Parser<'_> {
     // ── expression levels ────────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_or()
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err(format!(
+                "expression nested too deeply (max {MAX_DEPTH} levels)"
+            )));
+        }
+        let result = self.parse_or();
+        self.depth -= 1;
+        result
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -657,9 +668,14 @@ impl Parser<'_> {
             return Err(self.err("net range syntax not supported; use CIDR or mask notation"));
         }
         // CIDR prefix length immediately after the address (lexer splits on '/').
-        let mask = if let Some(Token::Num(n)) = self.cur_tok() {
-            let n = *n as u8;
+        let mask = if let Some(&Token::Num(raw_n)) = self.cur_tok() {
             self.advance();
+            if raw_n > 32 {
+                return Err(self.err(format!(
+                    "IPv4 prefix length {raw_n} out of range (0–32)"
+                )));
+            }
+            let n = raw_n as u8;
             if n == 0 {
                 0u32
             } else {

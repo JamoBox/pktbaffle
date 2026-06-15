@@ -978,3 +978,38 @@ fn very_complex_filter_does_not_panic() {
         let _ = r;
     }
 }
+
+// ── Regression: deeply-nested parentheses must not stack-overflow ────────────
+// The fuzzer (fuzz_compile) found that deeply nested `(` triggers unbounded
+// recursion in the parser and causes a deadly signal (stack overflow).
+// Fixed by enforcing a recursion depth limit in parse_expr.
+// Ref: GH issue #81, nightly CI failure 2026-06-15.
+#[test]
+fn deeply_nested_parens_returns_error_not_stack_overflow() {
+    use pktbaffle::{compile, Error, LinkType, Target};
+
+    // 200 open parens — well past the parser's depth limit — must return
+    // ParseError, not panic / SIGSEGV.
+    let deeply_nested = format!("{}tcp{}", "(".repeat(200), ")".repeat(200));
+    for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        let r = compile(&deeply_nested, link, Target::Classic);
+        assert!(
+            matches!(r, Err(Error::ParseError { .. })),
+            "expected ParseError for deeply nested input on {link:?}, got {r:?}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_crash_repro_deeply_nested_with_trailing_garbage() {
+    use pktbaffle::{compile, LinkType, Target};
+
+    // Exact bytes from the fuzz artifact that triggered the crash:
+    // (((((((((((((((0::00 81.010 80.0 net 1 8010 80.0 net 1 80.0 net 1.01 tcp!(t((cp(
+    let crash_input = "(((((((((((((((0::00 81.010 80.0 net 1 8010 80.0 net 1 80.0 net 1.01 tcp!(t((cp(";
+    for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        // Must not panic — either an Ok or an Err is acceptable.
+        let _ = compile(crash_input, link, Target::Classic);
+        let _ = compile(crash_input, link, Target::Extended);
+    }
+}
