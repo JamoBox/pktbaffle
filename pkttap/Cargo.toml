@@ -25,4 +25,4 @@ libloading = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
-pktbaffle = { path = "../pktbaffle", features = ["vm"] }
+pktbaffle = { version = "0.2.0", path = "../pktbaffle", features = ["vm"] }

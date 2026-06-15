@@ -40,7 +40,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
 
 ```toml
 [dependencies]
-pkttap = "0.1"
+pkttap = "0.2"
 ```
 
 **Runtime dependencies by platform:**

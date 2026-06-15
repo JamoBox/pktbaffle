@@ -15,7 +15,7 @@ Parses the same filter syntax used by `tcpdump` and Wireshark and produces class
 
 ```toml
 [dependencies]
-pktbaffle = "0.1"
+pktbaffle = "0.2"
 ```
 
 ```rust
@@ -34,7 +34,7 @@ Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows N
 
 ```toml
 [dependencies]
-pkttap = "0.1"
+pkttap = "0.2"
 ```
 
 ```rust
