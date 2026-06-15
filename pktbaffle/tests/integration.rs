@@ -1006,7 +1006,8 @@ fn fuzz_crash_repro_deeply_nested_with_trailing_garbage() {
 
     // Exact bytes from the fuzz artifact that triggered the crash:
     // (((((((((((((((0::00 81.010 80.0 net 1 8010 80.0 net 1 80.0 net 1.01 tcp!(t((cp(
-    let crash_input = "(((((((((((((((0::00 81.010 80.0 net 1 8010 80.0 net 1 80.0 net 1.01 tcp!(t((cp(";
+    let crash_input =
+        "(((((((((((((((0::00 81.010 80.0 net 1 8010 80.0 net 1 80.0 net 1.01 tcp!(t((cp(";
     for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
         // Must not panic — either an Ok or an Err is acceptable.
         let _ = compile(crash_input, link, Target::Classic);

@@ -35,7 +35,11 @@ use crate::lexer::{Spanned, Token};
 /// println!("{expr:#?}");
 /// ```
 pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
-    let mut p = Parser { tokens, pos: 0, depth: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let expr = p.parse_expr()?;
     if p.pos < p.tokens.len() {
         return Err(p.err(format!(
@@ -671,9 +675,7 @@ impl Parser<'_> {
         let mask = if let Some(&Token::Num(raw_n)) = self.cur_tok() {
             self.advance();
             if raw_n > 32 {
-                return Err(self.err(format!(
-                    "IPv4 prefix length {raw_n} out of range (0–32)"
-                )));
+                return Err(self.err(format!("IPv4 prefix length {raw_n} out of range (0–32)")));
             }
             let n = raw_n as u8;
             if n == 0 {
