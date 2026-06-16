@@ -12,7 +12,8 @@
 //!     .open()?;
 //!
 //! while let Some(pkt) = cap.next()? {
-//!     println!("{} bytes", pkt.data.len());
+//!     // `pkt` is a borrowed PacketRef — valid until the next `next()` call.
+//!     println!("{} bytes", pkt.data().len());
 //! }
 //!
 //! // File capture
@@ -21,7 +22,8 @@
 //!     .open()?;
 //!
 //! while let Some(pkt) = cap.next()? {
-//!     println!("{} bytes at {:?}", pkt.data.len(), pkt.timestamp);
+//!     // Call pkt.to_owned() to keep a packet beyond this iteration.
+//!     println!("{} bytes at {:?}", pkt.data().len(), pkt.timestamp());
 //! }
 //! # Ok::<(), pkttap::Error>(())
 //! ```
@@ -37,7 +39,7 @@ mod packet;
 pub use capture::{Capture, CaptureBuilder};
 pub use dump::{Dump, DumpBuilder};
 pub use error::{Error, Result};
-pub use packet::{LinkType, Packet};
+pub use packet::{LinkType, Packet, PacketRef};
 
 /// List available network interfaces by name.
 pub fn interfaces() -> Result<Vec<String>> {
@@ -68,7 +70,7 @@ pub fn dump_packets(
 ) -> Result<()> {
     let mut d = Dump::to_file(path).link_type(link_type).open()?;
     for pkt in packets {
-        d.write_packet(pkt)?;
+        d.write_packet(pkt.as_ref())?;
     }
     Ok(())
 }

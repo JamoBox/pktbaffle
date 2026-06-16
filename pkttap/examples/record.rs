@@ -163,14 +163,16 @@ fn run() -> Result<()> {
 
     // ── Packet loop ───────────────────────────────────────────────────────────
     //
-    // cap.next() returns Result<Option<Packet>>:
+    // cap.next() returns Result<Option<PacketRef>>:
     //   Ok(Some(pkt)) — packet available
     //   Ok(None)      — end of file (file captures only)
     //   Err(e)        — I/O or kernel error
     //
-    // dump.write_packet() appends a single packet record to the file.
-    // The Packet type is owned, so there are no lifetime constraints here;
-    // packets can be stored, filtered, or modified before being written.
+    // dump.write_packet() appends a single packet record to the file.  It takes
+    // a borrowed PacketRef — exactly what cap.next() yields — so the capture
+    // borrow flows straight into the write with no copy.  To retain a packet
+    // beyond this iteration (e.g. to buffer or reorder), call pkt.to_owned()
+    // and pass the owned Packet back with .as_ref().
     let limit = args.count.unwrap_or(u64::MAX);
     let mut written: u64 = 0;
 
@@ -180,9 +182,9 @@ fn run() -> Result<()> {
             break;
         };
 
-        // You can inspect, modify, or discard each Packet before writing it.
-        // Here we just pass it straight through.
-        dump.write_packet(&pkt)?;
+        // You can inspect or discard each PacketRef before writing it.
+        // Here we just pass it straight through (PacketRef is Copy).
+        dump.write_packet(pkt)?;
         written += 1;
 
         if written % 100 == 0 {

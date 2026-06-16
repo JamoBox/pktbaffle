@@ -34,7 +34,7 @@ Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows N
 
 ```toml
 [dependencies]
-pkttap = "0.1"
+pkttap = "0.3"
 ```
 
 ```rust
@@ -46,7 +46,8 @@ let mut cap = Capture::live("eth0")
     .open()?;
 
 while let Some(pkt) = cap.next()? {
-    println!("{} bytes", pkt.data.len());
+    // pkt is a borrowed PacketRef; call pkt.to_owned() to keep it.
+    println!("{} bytes", pkt.data().len());
 }
 ```
 

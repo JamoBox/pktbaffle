@@ -9,7 +9,7 @@ fn pcap_single_packet_roundtrip() {
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
     let got = cap.next().unwrap().expect("expected a packet");
-    assert_eq!(got.data, pkt);
+    assert_eq!(got.data(), pkt.as_slice());
 }
 
 #[test]
@@ -19,8 +19,8 @@ fn pcap_multiple_packets_all_returned() {
     let tmp = common::temp_file(&common::pcap_bytes(1, &[&p1, &p2]));
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
-    assert_eq!(cap.next().unwrap().unwrap().data, p1);
-    assert_eq!(cap.next().unwrap().unwrap().data, p2);
+    assert_eq!(cap.next().unwrap().unwrap().data(), p1.as_slice());
+    assert_eq!(cap.next().unwrap().unwrap().data(), p2.as_slice());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn pcap_orig_len_preserved() {
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
     let got = cap.next().unwrap().unwrap();
-    assert_eq!(got.orig_len, orig);
+    assert_eq!(got.orig_len(), orig);
     assert!(!got.is_truncated());
 }
 
@@ -67,7 +67,7 @@ fn pcapng_single_packet_roundtrip() {
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
     let got = cap.next().unwrap().expect("expected a packet");
-    assert_eq!(got.data, pkt);
+    assert_eq!(got.data(), pkt.as_slice());
 }
 
 #[test]
@@ -88,10 +88,12 @@ fn pcapng_per_packet_link_type_from_idb() {
     let tmp = common::temp_file(&bytes);
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
-    let pkt0 = cap.next().unwrap().unwrap();
-    assert_eq!(pkt0.link_type, LinkType::Ethernet);
-    let pkt1 = cap.next().unwrap().unwrap();
-    assert_eq!(pkt1.link_type, LinkType::RawIp);
+    // Copy each link type out before the next `next()` call — a PacketRef
+    // borrows the capture and cannot be held across iterations.
+    let lt0 = cap.next().unwrap().unwrap().link_type();
+    let lt1 = cap.next().unwrap().unwrap().link_type();
+    assert_eq!(lt0, LinkType::Ethernet);
+    assert_eq!(lt1, LinkType::RawIp);
 }
 
 #[test]
@@ -128,7 +130,7 @@ fn filter_skips_non_matching_and_returns_next_match() {
         .unwrap();
 
     let got = cap.next().unwrap().expect("should skip to TCP packet");
-    assert_eq!(got.data, tcp);
+    assert_eq!(got.data(), tcp.as_slice());
     assert!(cap.next().unwrap().is_none());
 }
 
@@ -153,7 +155,7 @@ fn precompiled_filter_program_works() {
         .next()
         .unwrap()
         .expect("pre-compiled filter should accept TCP");
-    assert_eq!(got.data, tcp);
+    assert_eq!(got.data(), tcp.as_slice());
     assert!(cap.next().unwrap().is_none());
 }
 
@@ -185,7 +187,7 @@ fn filter_option_some_filters_matching() {
     let expr: Option<&str> = Some("tcp port 80");
     let mut cap = Capture::from_file(tmp.path()).filter(expr).open().unwrap();
     let got = cap.next().unwrap().expect("should return TCP packet");
-    assert_eq!(got.data, tcp);
+    assert_eq!(got.data(), tcp.as_slice());
     assert!(cap.next().unwrap().is_none());
 }
 
@@ -211,7 +213,7 @@ fn pcap_timestamp_increases_with_packets() {
     ));
     let mut cap = Capture::from_file(tmp.path()).open().unwrap();
 
-    let t1 = cap.next().unwrap().unwrap().timestamp;
-    let t2 = cap.next().unwrap().unwrap().timestamp;
+    let t1 = cap.next().unwrap().unwrap().timestamp();
+    let t2 = cap.next().unwrap().unwrap().timestamp();
     assert!(t2 > t1);
 }

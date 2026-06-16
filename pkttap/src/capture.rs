@@ -9,7 +9,7 @@ use pktbaffle::{compile, Target};
 use crate::error::{Error, Result};
 use crate::file::FileCapture;
 use crate::live::{self, Live};
-use crate::packet::Packet;
+use crate::packet::PacketRef;
 
 // ── Filter specification ──────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ impl CaptureBuilder {
                 // string expression after detecting the file's link type.
                 let fc = FileCapture::open(&path, self.filter)?;
                 Ok(Capture {
-                    inner: Inner::File(fc),
+                    inner: Inner::File(Box::new(fc)),
                 })
             }
         }
@@ -135,7 +135,10 @@ impl CaptureBuilder {
 
 enum Inner {
     Live(Live),
-    File(FileCapture),
+    // Boxed because `FileCapture` carries large pcap-file reader + scratch-buffer
+    // state; without the box every `Capture` — live ones included — would pay
+    // that footprint inline.
+    File(Box<FileCapture>),
 }
 
 /// A packet source: either a live network interface or a pcap/pcapng file.
@@ -169,10 +172,16 @@ impl Capture {
     /// Returns `Ok(None)` at end-of-file for file captures.
     /// Live captures block indefinitely until a packet arrives.
     ///
-    /// Returns `Result<Option<Packet>>` rather than implementing `Iterator`
-    /// so that I/O errors propagate via `?` without panicking.
+    /// The yielded [`PacketRef`] borrows from the capture's internal buffer and
+    /// is only valid until the next call to `next`. Call
+    /// [`PacketRef::to_owned`] to retain a packet across iterations.
+    ///
+    /// Returns `Result<Option<PacketRef<'_>>>` rather than implementing
+    /// `Iterator` for two reasons: I/O errors propagate via `?` without
+    /// panicking, and the borrowed item makes this a lending iterator, which
+    /// `std::iter::Iterator` cannot express.
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Packet>> {
+    pub fn next(&mut self) -> Result<Option<PacketRef<'_>>> {
         match &mut self.inner {
             Inner::Live(l) => l.next_packet().map(Some),
             Inner::File(f) => f.next_packet(),

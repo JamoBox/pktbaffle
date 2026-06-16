@@ -25,7 +25,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Streaming writes](#streaming-writes)
   - [One-shot convenience function](#one-shot-convenience-function)
   - [pcapng output](#pcapng-output)
-- [The Packet type](#the-packet-type)
+- [The PacketRef and Packet types](#the-packetref-and-packet-types)
 - [Error handling](#error-handling)
 - [Platform notes](#platform-notes)
   - [Linux](#linux)
@@ -40,7 +40,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
 
 ```toml
 [dependencies]
-pkttap = "0.1"
+pkttap = "0.3"
 ```
 
 **Runtime dependencies by platform:**
@@ -80,24 +80,24 @@ let mut cap = Capture::live("eth0")
     .open()?;
 
 while let Some(pkt) = cap.next()? {
-    println!("{} bytes  orig={}", pkt.data.len(), pkt.orig_len);
+    // pkt is a borrowed PacketRef — valid until the next next() call.
+    println!("{} bytes  orig={}", pkt.data().len(), pkt.orig_len());
 }
 
-// ── File capture ──────────────────────────────────────────────────────────────
+// ── File capture, writing matches to a new pcap file ─────────────────────────
 let mut cap = Capture::from_file("traffic.pcap")
     .filter("udp port 53")
     .open()?;
 
-while let Some(pkt) = cap.next()? {
-    println!("{:?}  {} bytes", pkt.timestamp, pkt.data.len());
-}
-
-// ── Write packets to a new pcap file ─────────────────────────────────────────
 let mut dump = Dump::to_file("output.pcap")
-    .link_type(LinkType::Ethernet)
+    .link_type(cap.link_type())
     .open()?;
 
-dump.write_packet(&pkt)?;
+while let Some(pkt) = cap.next()? {
+    println!("{:?}  {} bytes", pkt.timestamp(), pkt.data().len());
+    // A PacketRef passes straight to write_packet; call pkt.to_owned() to keep it.
+    dump.write_packet(pkt)?;
+}
 ```
 
 ---
@@ -135,7 +135,7 @@ let mut cap = Capture::live("eth0").open()?;
 
 loop {
     match cap.next()? {
-        Some(pkt) => println!("{} bytes", pkt.data.len()),
+        Some(pkt) => println!("{} bytes", pkt.data().len()),
         None => break, // live captures never return None; this arm is unreachable
     }
 }
@@ -204,7 +204,7 @@ let mut cap = Capture::live("eth0")
 
 // Check whether a packet was truncated
 if pkt.is_truncated() {
-    println!("captured {} of {} bytes", pkt.data.len(), pkt.orig_len);
+    println!("captured {} of {} bytes", pkt.data().len(), pkt.orig_len());
 }
 ```
 
@@ -243,10 +243,10 @@ use pkttap::Capture;
 let mut cap = Capture::from_file("traffic.pcap").open()?;
 
 while let Some(pkt) = cap.next()? {
-    let ts = pkt.timestamp
+    let ts = pkt.timestamp()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    println!("[{}.{:06}] {} bytes", ts.as_secs(), ts.subsec_micros(), pkt.data.len());
+    println!("[{}.{:06}] {} bytes", ts.as_secs(), ts.subsec_micros(), pkt.data().len());
 }
 ```
 
@@ -254,13 +254,13 @@ while let Some(pkt) = cap.next()? {
 
 ### Reading a pcapng file
 
-pcapng files are handled identically from the caller's perspective. Per-interface link types (from Interface Description Blocks) are tracked automatically, so each `Packet` carries the correct `link_type` even in multi-interface captures.
+pcapng files are handled identically from the caller's perspective. Per-interface link types (from Interface Description Blocks) are tracked automatically, so each packet reports the correct `link_type()` even in multi-interface captures.
 
 ```rust
 let mut cap = Capture::from_file("multi_interface.pcapng").open()?;
 
 while let Some(pkt) = cap.next()? {
-    println!("{:?}  {} bytes", pkt.link_type, pkt.data.len());
+    println!("{:?}  {} bytes", pkt.link_type(), pkt.data().len());
 }
 ```
 
@@ -324,7 +324,7 @@ let mut dump = Dump::to_file("tls.pcap")
 let mut count = 0u32;
 while count < 1000 {
     if let Some(pkt) = cap.next()? {
-        dump.write_packet(&pkt)?;
+        dump.write_packet(pkt)?;
         count += 1;
     }
 }
@@ -356,7 +356,7 @@ let mut dump = Dump::to_file("output.pcapng")
     .open()?;
 
 for pkt in &packets {
-    dump.write_packet(pkt)?;
+    dump.write_packet(pkt.as_ref())?;
 }
 ```
 
@@ -369,32 +369,33 @@ for pkt in &packets {
 
 ---
 
-## The Packet type
+## The PacketRef and Packet types
 
-Every packet returned by `Capture::next()` or passed to `Dump::write_packet()` is a `Packet`:
+`Capture::next()` yields a **`PacketRef<'_>`** — a *borrowed* view into the capture's internal buffer. Capturing a packet performs no per-packet heap allocation; the bytes are read straight from the kernel/driver buffer. A `PacketRef` is only valid until the next `next()` call, so it cannot be stored across iterations — the borrow checker enforces this. Call `.to_owned()` to get an owned **`Packet`** you can move, store, or send to another thread.
 
-```rust
-pub struct Packet {
-    pub data: Vec<u8>,         // Captured bytes (up to snaplen)
-    pub timestamp: SystemTime, // Capture timestamp
-    pub orig_len: u32,         // On-wire length before any truncation
-    pub link_type: LinkType,   // Link-layer framing of this packet
-}
-```
+Both types expose the same accessors:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.data()` | `&[u8]` | Captured bytes (up to snaplen) |
+| `.timestamp()` | `SystemTime` | Capture timestamp |
+| `.orig_len()` | `u32` | On-wire length before any truncation |
+| `.link_type()` | `LinkType` | Link-layer framing of this packet |
+| `.is_truncated()` | `bool` | Whether snaplen truncated the packet |
 
 ```rust
 while let Some(pkt) = cap.next()? {
-    // Raw bytes
-    let raw: &[u8] = &pkt.data;
+    // Raw bytes — borrowed from the capture buffer
+    let raw: &[u8] = pkt.data();
 
     // Timestamp as seconds + microseconds since epoch
-    let ts = pkt.timestamp
+    let ts = pkt.timestamp()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     println!("{}.{:06}", ts.as_secs(), ts.subsec_micros());
 
-    // On-wire length (may be larger than data.len() if snaplen truncated)
-    println!("captured {} of {} bytes on wire", pkt.data.len(), pkt.orig_len);
+    // On-wire length (may exceed data().len() if snaplen truncated)
+    println!("captured {} of {} bytes on wire", pkt.data().len(), pkt.orig_len());
 
     // Was the packet truncated by snaplen?
     if pkt.is_truncated() {
@@ -402,14 +403,19 @@ while let Some(pkt) = cap.next()? {
     }
 
     // Link type (Ethernet, RawIp, or LinuxSll)
-    println!("{:?}", pkt.link_type);
+    println!("{:?}", pkt.link_type());
+
+    // To retain this packet beyond the current iteration, take ownership:
+    let owned: pkttap::Packet = pkt.to_owned();
 }
 ```
 
-**`LinkType`** determines the framing of `pkt.data`:
+An owned `Packet` borrows back as a `PacketRef` via `.as_ref()` — for example, to hand it to `Dump::write_packet()`, which takes a `PacketRef`. `Packet::new(...)` and `Packet::into_data()` let you build one from raw parts or reclaim its byte buffer.
 
-| `LinkType` | `pkt.data` starts with |
-|------------|------------------------|
+**`LinkType`** determines the framing of `pkt.data()`:
+
+| `LinkType` | `pkt.data()` starts with |
+|------------|--------------------------|
 | `Ethernet` | 14-byte Ethernet header (dst MAC, src MAC, EtherType) |
 | `RawIp`    | IP header directly (no link-layer header) |
 | `LinuxSll` | 16-byte Linux SLL header |
