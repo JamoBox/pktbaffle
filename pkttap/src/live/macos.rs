@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Error, Result};
-use crate::packet::{LinkType, Packet};
+use crate::packet::{LinkType, PacketRef};
 
 // BPF ioctl codes (macOS)
 const BIOCSETIF: libc::c_ulong = 0x8020426c;
@@ -154,12 +154,23 @@ impl MacosLive {
         self.link_type
     }
 
-    pub fn next_packet(&mut self) -> Result<Packet> {
+    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
+        let link_type = self.link_type;
         loop {
-            // If there's data remaining in the buffer, parse the next BPF frame
+            // If there's data remaining in the buffer, parse the next BPF frame.
+            // parse_next_frame returns Copy index metadata (not a borrow), so the
+            // PacketRef's slice is created only here on the return path — the
+            // fall-through to read() below never holds it. This keeps the lending
+            // iterator in safe Rust (see ADR 0002).
             if self.buf_pos < self.buf_filled {
-                if let Some(pkt) = self.parse_next_frame() {
-                    return Ok(pkt);
+                if let Some(meta) = self.parse_next_frame() {
+                    return Ok(PacketRef::new(
+                        &self.buf[meta.start..meta.end],
+                        meta.ts_sec,
+                        meta.ts_nsec,
+                        meta.orig_len,
+                        link_type,
+                    ));
                 }
             }
 
@@ -183,34 +194,68 @@ impl MacosLive {
         }
     }
 
-    fn parse_next_frame(&mut self) -> Option<Packet> {
-        let hdr_size = std::mem::size_of::<BpfHdr>();
-        if self.buf_pos + hdr_size > self.buf_filled {
-            return None;
-        }
-        let hdr = unsafe {
-            std::ptr::read_unaligned(self.buf.as_ptr().add(self.buf_pos) as *const BpfHdr)
-        };
-        let data_start = self.buf_pos + hdr.bh_hdrlen as usize;
-        let cap = (hdr.bh_caplen as usize).min(self.snaplen);
-        let data_end = data_start + cap;
-        if data_end > self.buf_filled {
-            return None;
-        }
-        let data = self.buf[data_start..data_end].to_vec();
-
-        // Advance past this frame (BPF frames are word-aligned)
-        let frame_len = hdr.bh_hdrlen as usize + hdr.bh_caplen as usize;
-        self.buf_pos += word_align(frame_len);
-
-        Some(Packet::new(
-            data,
-            hdr.bh_tstamp_sec as u64,
-            hdr.bh_tstamp_usec as u32 * 1000,
-            hdr.bh_datalen,
-            self.link_type,
-        ))
+    /// Parse the BPF frame at `buf_pos`, returning Copy index metadata and
+    /// advancing `buf_pos` past the (word-aligned) frame. Returns `None` if the
+    /// remaining buffer does not hold a complete frame, signalling the caller to
+    /// read a fresh batch. Delegates the pure offset arithmetic to
+    /// [`parse_bpf_frame`] so it can be unit-tested without a BPF device.
+    fn parse_next_frame(&mut self) -> Option<FrameMeta> {
+        let (meta, next_pos) =
+            parse_bpf_frame(&self.buf, self.buf_pos, self.buf_filled, self.snaplen)?;
+        self.buf_pos = next_pos;
+        Some(meta)
     }
+}
+
+/// Copy index metadata for a single parsed BPF frame: the buffer byte range
+/// holding the packet plus its timestamp and on-wire length. Returned instead of
+/// a borrow so the `PacketRef` slice is constructed only at the caller's return.
+#[derive(Clone, Copy)]
+struct FrameMeta {
+    start: usize,
+    end: usize,
+    ts_sec: u64,
+    ts_nsec: u32,
+    orig_len: u32,
+}
+
+/// Pure parser for the BPF frame at `buf[pos..filled]`. Returns the frame's
+/// index metadata and the word-aligned buffer position of the next frame, or
+/// `None` when the remaining bytes do not contain a complete header + caplen
+/// payload. Side-effect-free so it can be exercised by unit tests against a
+/// synthetic buffer.
+fn parse_bpf_frame(
+    buf: &[u8],
+    pos: usize,
+    filled: usize,
+    snaplen: usize,
+) -> Option<(FrameMeta, usize)> {
+    let hdr_size = std::mem::size_of::<BpfHdr>();
+    if pos + hdr_size > filled {
+        return None;
+    }
+    let hdr = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(pos) as *const BpfHdr) };
+    let data_start = pos + hdr.bh_hdrlen as usize;
+    let cap = (hdr.bh_caplen as usize).min(snaplen);
+    let data_end = data_start + cap;
+    if data_end > filled {
+        return None;
+    }
+
+    // Advance past this frame (BPF frames are word-aligned).
+    let frame_len = hdr.bh_hdrlen as usize + hdr.bh_caplen as usize;
+    let next_pos = pos + word_align(frame_len);
+
+    Some((
+        FrameMeta {
+            start: data_start,
+            end: data_end,
+            ts_sec: hdr.bh_tstamp_sec as u64,
+            ts_nsec: hdr.bh_tstamp_usec as u32 * 1000,
+            orig_len: hdr.bh_datalen,
+        },
+        next_pos,
+    ))
 }
 
 /// Open the first available /dev/bpfN device.
@@ -265,4 +310,92 @@ pub fn default_interface() -> Result<String> {
         .into_iter()
         .find(|name| !name.starts_with("lo"))
         .ok_or_else(|| Error::Platform("no non-loopback interface found".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize one BPF frame (header + payload, word-aligned) the way the
+    /// kernel lays it out in the read buffer. `bh_hdrlen` is set to the struct
+    /// size so the payload begins immediately after the header.
+    fn frame_bytes(sec: i64, usec: i64, datalen: u32, payload: &[u8]) -> Vec<u8> {
+        let hdr_size = std::mem::size_of::<BpfHdr>();
+        let hdr = BpfHdr {
+            bh_tstamp_sec: sec,
+            bh_tstamp_usec: usec,
+            bh_caplen: payload.len() as u32,
+            bh_datalen: datalen,
+            bh_hdrlen: hdr_size as u16,
+        };
+        let mut out = vec![0u8; hdr_size];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &hdr as *const BpfHdr as *const u8,
+                out.as_mut_ptr(),
+                hdr_size,
+            );
+        }
+        out.extend_from_slice(payload);
+        out.resize(word_align(hdr_size + payload.len()), 0); // trailing alignment padding
+        out
+    }
+
+    #[test]
+    fn parses_single_frame() {
+        let hdr_size = std::mem::size_of::<BpfHdr>();
+        let payload = [0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+        let buf = frame_bytes(1234, 567_000, 5, &payload);
+
+        let (meta, next_pos) = parse_bpf_frame(&buf, 0, buf.len(), 65535).expect("frame");
+        assert_eq!(&buf[meta.start..meta.end], &payload);
+        assert_eq!(meta.start, hdr_size);
+        assert_eq!(meta.end, hdr_size + 5);
+        assert_eq!(meta.ts_sec, 1234);
+        assert_eq!(meta.ts_nsec, 567_000 * 1000);
+        assert_eq!(meta.orig_len, 5);
+        assert_eq!(next_pos, word_align(hdr_size + 5));
+    }
+
+    #[test]
+    fn walks_two_frames_in_one_batch() {
+        let p1 = [1u8, 2, 3];
+        let p2 = [9u8, 8, 7, 6, 5];
+        let mut buf = frame_bytes(10, 0, 3, &p1);
+        buf.extend(frame_bytes(20, 0, 5, &p2));
+        let filled = buf.len();
+
+        let (m1, next) = parse_bpf_frame(&buf, 0, filled, 65535).expect("frame 1");
+        assert_eq!(&buf[m1.start..m1.end], &p1);
+        assert_eq!(m1.ts_sec, 10);
+
+        let (m2, _) = parse_bpf_frame(&buf, next, filled, 65535).expect("frame 2");
+        assert_eq!(&buf[m2.start..m2.end], &p2);
+        assert_eq!(m2.ts_sec, 20);
+    }
+
+    #[test]
+    fn snaplen_truncates_captured_range() {
+        let payload = [0u8; 100];
+        let buf = frame_bytes(0, 0, 100, &payload);
+        let (meta, _) = parse_bpf_frame(&buf, 0, buf.len(), 20).expect("frame");
+        // Captured range is clamped to snaplen; orig_len still reflects datalen.
+        assert_eq!(meta.end - meta.start, 20);
+        assert_eq!(meta.orig_len, 100);
+    }
+
+    #[test]
+    fn incomplete_header_returns_none() {
+        let buf = frame_bytes(0, 0, 4, &[1, 2, 3, 4]);
+        // Pretend the kernel only filled the first few bytes of the header.
+        assert!(parse_bpf_frame(&buf, 0, 4, 65535).is_none());
+    }
+
+    #[test]
+    fn payload_past_filled_returns_none() {
+        let hdr_size = std::mem::size_of::<BpfHdr>();
+        let buf = frame_bytes(0, 0, 10, &[0u8; 10]);
+        // Header is complete but the claimed caplen runs past `filled`.
+        assert!(parse_bpf_frame(&buf, 0, hdr_size + 4, 65535).is_none());
+    }
 }

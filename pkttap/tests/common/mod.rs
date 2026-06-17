@@ -1,3 +1,7 @@
+// Shared test helpers — each integration-test binary pulls in this module but
+// uses only a subset, so unused-helper warnings are expected and silenced.
+#![allow(dead_code)]
+
 use std::io::Write;
 
 use pkttap::{Capture, Packet};
@@ -168,11 +172,14 @@ pub fn temp_file(bytes: &[u8]) -> tempfile::NamedTempFile {
 }
 
 /// Read all packets from a file path into a Vec.
+///
+/// `cap.next()` yields borrowed `PacketRef`s, so each is promoted to an owned
+/// `Packet` with `.to_owned()` before being collected.
 pub fn read_all(path: &std::path::Path) -> Vec<Packet> {
     let mut cap = Capture::from_file(path).open().unwrap();
     let mut out = Vec::new();
     while let Some(pkt) = cap.next().unwrap() {
-        out.push(pkt);
+        out.push(pkt.to_owned());
     }
     out
 }

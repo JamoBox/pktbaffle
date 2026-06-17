@@ -49,12 +49,12 @@ fn dump_pcap_single_packet_roundtrip() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts[0]).unwrap();
+    dump.write_packet(src_pkts[0].as_ref()).unwrap();
     drop(dump);
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].data, src);
+    assert_eq!(got[0].data(), src.as_slice());
 }
 
 #[test]
@@ -74,14 +74,14 @@ fn dump_pcap_multiple_packets_in_order() {
         .open()
         .unwrap();
     for pkt in &src_pkts {
-        dump.write_packet(pkt).unwrap();
+        dump.write_packet(pkt.as_ref()).unwrap();
     }
     drop(dump);
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 3);
     for (g, f) in got.iter().zip(frames.iter()) {
-        assert_eq!(&g.data, f);
+        assert_eq!(g.data(), f.as_slice());
     }
 }
 
@@ -96,7 +96,7 @@ fn dump_pcap_link_type_written_to_header() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts[0]).unwrap();
+    dump.write_packet(src_pkts[0].as_ref()).unwrap();
     drop(dump);
 
     let cap = pkttap::Capture::from_file(out.path()).open().unwrap();
@@ -115,11 +115,11 @@ fn dump_pcap_orig_len_preserved() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts[0]).unwrap();
+    dump.write_packet(src_pkts[0].as_ref()).unwrap();
     drop(dump);
 
     let got = common::read_all(out.path());
-    assert_eq!(got[0].orig_len, expected_orig);
+    assert_eq!(got[0].orig_len(), expected_orig);
 }
 
 // ── pcapng roundtrips ─────────────────────────────────────────────────────────
@@ -135,12 +135,12 @@ fn dump_pcapng_single_packet_roundtrip() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts[0]).unwrap();
+    dump.write_packet(src_pkts[0].as_ref()).unwrap();
     drop(dump);
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].data, src);
+    assert_eq!(got[0].data(), src.as_slice());
 }
 
 #[test]
@@ -154,11 +154,11 @@ fn dump_pcapng_link_type_written_to_idb() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts[0]).unwrap();
+    dump.write_packet(src_pkts[0].as_ref()).unwrap();
     drop(dump);
 
     let got = common::read_all(out.path());
-    assert_eq!(got[0].link_type, LinkType::Ethernet);
+    assert_eq!(got[0].link_type(), LinkType::Ethernet);
 }
 
 #[test]
@@ -174,14 +174,14 @@ fn dump_pcapng_multiple_packets_in_order() {
         .open()
         .unwrap();
     for pkt in &src_pkts {
-        dump.write_packet(pkt).unwrap();
+        dump.write_packet(pkt.as_ref()).unwrap();
     }
     drop(dump);
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 2);
     for (g, f) in got.iter().zip(frames.iter()) {
-        assert_eq!(&g.data, f);
+        assert_eq!(g.data(), f.as_slice());
     }
 }
 
@@ -215,7 +215,7 @@ fn dump_overwrites_existing_file() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts_a[0]).unwrap();
+    dump.write_packet(src_pkts_a[0].as_ref()).unwrap();
     drop(dump);
 
     // Second dump to same path: overwrite with packet B only
@@ -223,12 +223,12 @@ fn dump_overwrites_existing_file() {
         .link_type(LinkType::Ethernet)
         .open()
         .unwrap();
-    dump.write_packet(&src_pkts_b[0]).unwrap();
+    dump.write_packet(src_pkts_b[0].as_ref()).unwrap();
     drop(dump);
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 1, "file should contain only the second write");
-    assert_eq!(got[0].data, src_b);
+    assert_eq!(got[0].data(), src_b.as_slice());
 }
 
 // ── convenience function ──────────────────────────────────────────────────────
@@ -245,6 +245,33 @@ fn convenience_dump_packets_roundtrip() {
 
     let got = common::read_all(out.path());
     assert_eq!(got.len(), 2);
-    assert_eq!(got[0].data, frames[0]);
-    assert_eq!(got[1].data, frames[1]);
+    assert_eq!(got[0].data(), frames[0].as_slice());
+    assert_eq!(got[1].data(), frames[1].as_slice());
+}
+
+// ── borrowed pipeline ─────────────────────────────────────────────────────────
+
+#[test]
+fn dump_writes_packetref_directly_from_capture() {
+    // End-to-end: borrowed PacketRefs from a Capture flow straight into a Dump
+    // with no to_owned() in between, then read back identical.
+    let frames: Vec<Vec<u8>> = vec![common::tcp_frame(80), common::udp_frame(53)];
+    let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
+    let src = common::temp_file(&common::pcap_bytes(1, &refs));
+
+    let mut cap = pkttap::Capture::from_file(src.path()).open().unwrap();
+    let out = pcap_tmp();
+    let mut dump = Dump::to_file(out.path())
+        .link_type(cap.link_type())
+        .open()
+        .unwrap();
+    while let Some(pkt) = cap.next().unwrap() {
+        dump.write_packet(pkt).unwrap();
+    }
+    drop(dump);
+
+    let got = common::read_all(out.path());
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].data(), frames[0].as_slice());
+    assert_eq!(got[1].data(), frames[1].as_slice());
 }

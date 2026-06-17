@@ -4,8 +4,10 @@
 //!
 //! 1. **Capture** — a unified packet source that abstracts live interfaces
 //!    and pcap/pcapng files behind the same builder + iterator API.
-//! 2. **Packet** — an owned, borrowed-lifetime-free snapshot of a single
-//!    captured frame: raw bytes, timestamp, on-wire length, and link type.
+//! 2. **PacketRef** — a borrowed view of a single captured frame (raw bytes,
+//!    timestamp, on-wire length, link type) that borrows from the capture's
+//!    internal buffer and is valid only until the next `next()` call. Call
+//!    `.to_owned()` for an owned `Packet` you can retain.
 //!
 //! Run it:
 //!
@@ -121,28 +123,30 @@ fn run() -> Result<()> {
     // ── Packet loop ───────────────────────────────────────────────────────────
     //
     // cap.next() is deliberately not an Iterator implementation — it returns
-    // Result<Option<Packet>> so that I/O errors propagate via `?` without
-    // panicking.  The pattern mirrors what you'd write for a fallible stream:
+    // Result<Option<PacketRef>> so that I/O errors propagate via `?` without
+    // panicking, and because the borrowed PacketRef makes this a lending
+    // iterator that std::iter::Iterator cannot express.  The pattern mirrors
+    // what you'd write for a fallible stream:
     //
-    //   Ok(Some(pkt))  — a packet arrived; process it
+    //   Ok(Some(pkt))  — a packet arrived; process it (before the next iteration)
     //   Ok(None)       — end-of-file (file captures only; live captures block forever)
     //   Err(e)         — a real I/O or kernel error
     let mut count: u64 = 0;
     while let Some(pkt) = cap.next()? {
         count += 1;
 
-        // timestamp is a std::time::SystemTime measured from UNIX_EPOCH.
+        // timestamp() is a std::time::SystemTime measured from UNIX_EPOCH.
         // We split it into seconds + microseconds for a tcpdump-style display.
         let ts = pkt
-            .timestamp
+            .timestamp()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
 
-        // orig_len is the packet's length on the wire *before* any snaplen
-        // truncation.  pkt.data.len() may be smaller if a snaplen was set.
-        // is_truncated() returns true when data.len() < orig_len.
+        // orig_len() is the packet's length on the wire *before* any snaplen
+        // truncation.  pkt.data().len() may be smaller if a snaplen was set.
+        // is_truncated() returns true when data().len() < orig_len().
         let trunc = if pkt.is_truncated() {
-            format!(" [truncated to {}]", pkt.data.len())
+            format!(" [truncated to {}]", pkt.data().len())
         } else {
             String::new()
         };
@@ -151,13 +155,13 @@ fn run() -> Result<()> {
             "\n[{count:>6}] {}.{:06}  {:?}  {} bytes{}",
             ts.as_secs(),
             ts.subsec_micros(),
-            pkt.link_type, // mirrors cap.link_type() for every packet
-            pkt.orig_len,  // on-wire length, not the (possibly truncated) captured length
+            pkt.link_type(), // mirrors cap.link_type() for every packet
+            pkt.orig_len(),  // on-wire length, not the (possibly truncated) captured length
             trunc,
         );
 
         // Print the captured bytes — may be shorter than orig_len if truncated.
-        hexdump(&pkt.data);
+        hexdump(pkt.data());
     }
 
     eprintln!("\n{count} packets captured");

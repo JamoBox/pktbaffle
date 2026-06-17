@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use libloading::Library;
 
 use crate::error::{Error, Result};
-use crate::packet::{LinkType, Packet};
+use crate::packet::{LinkType, PacketRef};
 
 // ── C types ──────────────────────────────────────────────────────────────────
 
@@ -324,7 +324,7 @@ impl WindowsLive {
         self.link_type
     }
 
-    pub fn next_packet(&mut self) -> Result<Packet> {
+    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
         let lib = npcap()?;
         loop {
             let mut hdr_ptr: *const PcapPkthdr = std::ptr::null();
@@ -334,8 +334,13 @@ impl WindowsLive {
                 1 => {
                     let hdr = unsafe { &*hdr_ptr };
                     let cap = (hdr.caplen as usize).min(self.snaplen);
-                    let data = unsafe { slice::from_raw_parts(data_ptr, cap).to_vec() };
-                    return Ok(Packet::new(
+                    // Zero-copy: pcap_next_ex hands back a pointer into Npcap's
+                    // own buffer that, per its contract, stays valid until the
+                    // next pcap_next_ex / pcap_close. Tying the slice lifetime to
+                    // `&mut self` lets the borrow checker enforce exactly that —
+                    // a PacketRef cannot outlive the next `next` call.
+                    let data: &[u8] = unsafe { slice::from_raw_parts(data_ptr, cap) };
+                    return Ok(PacketRef::new(
                         data,
                         hdr.ts.tv_sec as u64,
                         hdr.ts.tv_usec as u32 * 1000,

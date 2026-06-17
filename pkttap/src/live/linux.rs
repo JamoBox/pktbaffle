@@ -7,7 +7,7 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Error, Result};
-use crate::packet::{LinkType, Packet};
+use crate::packet::{LinkType, PacketRef};
 
 // Linux socket constants not always exposed by std
 const AF_PACKET: libc::c_int = 17;
@@ -148,7 +148,7 @@ impl LinuxLive {
     }
 
     /// Block until the next packet arrives and return it.
-    pub fn next_packet(&mut self) -> Result<Packet> {
+    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
         loop {
             let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
             let mut src_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
@@ -180,9 +180,14 @@ impl LinuxLive {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
 
-            let data = self.buf[..n].to_vec();
-            return Ok(Packet::new(
-                data,
+            // Zero-copy: borrow the receive buffer rather than allocating. The
+            // EINTR `continue` path above never creates this borrow, so the
+            // slice is born only on the return path — keeping the lending
+            // iterator in safe Rust. A TPACKET_V3 mmap ring (which would also
+            // eliminate the per-packet recvfrom syscall) is deferred; see
+            // ADR 0002 and the dedicated ring-buffer issue.
+            return Ok(PacketRef::new(
+                &self.buf[..n],
                 now.as_secs(),
                 now.subsec_nanos(),
                 orig_len,

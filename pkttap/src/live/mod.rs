@@ -19,7 +19,7 @@ use crate::error::Error;
 use crate::error::Result;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::packet::LinkType;
-use crate::packet::Packet;
+use crate::packet::PacketRef;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ impl Live {
         PlatformLive::open(iface, filter, snaplen, promiscuous).map(Live)
     }
 
-    pub fn next_packet(&mut self) -> Result<Packet> {
+    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
         self.0.next_packet()
     }
 

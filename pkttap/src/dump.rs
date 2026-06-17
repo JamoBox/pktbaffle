@@ -16,7 +16,7 @@ use pcap_file::pcapng::{Block, PcapNgWriter};
 
 use crate::codec::link_type_to_datalink;
 use crate::error::{Error, Result};
-use crate::packet::{LinkType, Packet};
+use crate::packet::{LinkType, PacketRef};
 
 enum Inner {
     Pcap(PcapWriter<File>),
@@ -48,14 +48,22 @@ impl Dump {
     }
 
     /// Write one packet to the file.
-    pub fn write_packet(&mut self, pkt: &Packet) -> Result<()> {
-        let ts = pkt.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
+    ///
+    /// Takes a borrowed [`PacketRef`] — the form a [`Capture`](crate::Capture)
+    /// yields, so live/file pipelines pass it straight through. To write an
+    /// owned [`Packet`](crate::Packet), borrow it with
+    /// [`Packet::as_ref`](crate::Packet::as_ref).
+    pub fn write_packet(&mut self, pkt: PacketRef<'_>) -> Result<()> {
+        let ts = pkt
+            .timestamp()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         match &mut self.inner {
             Inner::Pcap(w) => w
                 .write_packet(&PcapPacket {
                     timestamp: ts,
-                    orig_len: pkt.orig_len,
-                    data: Cow::Borrowed(&pkt.data),
+                    orig_len: pkt.orig_len(),
+                    data: Cow::Borrowed(pkt.data()),
                 })
                 .map(|_| ())
                 .map_err(Error::Pcap),
@@ -63,8 +71,8 @@ impl Dump {
                 .write_block(&Block::EnhancedPacket(EnhancedPacketBlock {
                     interface_id: 0,
                     timestamp: ts,
-                    original_len: pkt.orig_len,
-                    data: Cow::Borrowed(&pkt.data),
+                    original_len: pkt.orig_len(),
+                    data: Cow::Borrowed(pkt.data()),
                     options: vec![],
                 }))
                 .map(|_| ())

@@ -43,9 +43,9 @@ _Avoid_: frame, buffer
 The software cBPF interpreter in `pktbaffle` (behind the `vm` feature) that evaluates a Program against raw packet bytes in userspace. Used for file-based filtering where the kernel is not involved.
 _Avoid_: interpreter, evaluator, engine
 
-**Ring buffer**:
-The kernel-mapped memory region used for zero-copy packet delivery on Linux (TPACKET_V3) and Windows (Npcap). PacketRefs borrow directly from this region.
-_Avoid_: mmap buffer, socket buffer
+**Capture buffer**:
+The reusable internal buffer each capture source fills and that PacketRefs borrow from for zero-copy delivery: the `recvfrom` buffer on Linux, the BPF read buffer on macOS, Npcap's `pcap_next_ex` buffer on Windows, and a per-`FileCapture` scratch buffer for pcap/pcapng files. A true zero-copy kernel ring (Linux TPACKET_V3) is future work; see ADR 0002.
+_Avoid_: ring buffer (not yet a kernel ring), mmap buffer, socket buffer
 
 **Snaplen**:
 The maximum number of bytes captured per packet. Packets longer than snaplen are truncated; `PacketRef::orig_len()` reflects the on-wire length.
@@ -56,7 +56,7 @@ _Avoid_: capture length, truncation length
 - A **Filter** string is compiled by `pktbaffle::compile()` into a **Program** for a given **Target** and **LinkType**
 - A **Capture** is configured with a **Filter** string or a pre-compiled **Program** via its builder
 - A **Dump** is configured with a **LinkType** (required) and a file path via its builder; format is determined by file extension
-- A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the internal **Ring buffer** and must be consumed before the next iteration step
+- A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the source's **Capture buffer** and must be consumed before the next iteration step
 - The **VM** evaluates a **Program** against **PacketRef** bytes when the **Capture** source is a file (not a live interface)
 - **Snaplen** applies at the **Capture** level and affects all **PacketRef**s from that source
 
@@ -66,7 +66,7 @@ _Avoid_: capture length, truncation length
 > **Domain expert:** "Either — the builder accepts both. Pass a Filter string if you don't need to reuse the compiled Program; pass a Program directly if you're opening multiple Captures with the same filter."
 
 > **Dev:** "Can I store a PacketRef in a Vec for later?"
-> **Domain expert:** "No — a PacketRef borrows from the Ring buffer. Call `.to_owned()` to get a Packet you can store."
+> **Domain expert:** "No — a PacketRef borrows from the source's Capture buffer. Call `.to_owned()` to get a Packet you can store."
 
 ## Flagged ambiguities
 
