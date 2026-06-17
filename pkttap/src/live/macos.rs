@@ -9,6 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, PacketRef};
+use crate::stats::CaptureStats;
 
 // BPF ioctl codes (macOS)
 const BIOCSETIF: libc::c_ulong = 0x8020426c;
@@ -17,6 +18,17 @@ const BIOCIMMEDIATE: libc::c_ulong = 0x80044270;
 const BIOCPROMISC: libc::c_ulong = 0x20004269;
 const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCGDLT: libc::c_ulong = 0x4004426a;
+// _IOR('B', 111, struct bpf_stat) — 8-byte struct, group 'B'=0x42, num=0x6f
+const BIOCGSTATS: libc::c_ulong = 0x4008_426f;
+
+/// bpf_stat as returned by BIOCGSTATS on macOS. Counters are cumulative
+/// since the BPF device was opened; unlike Linux PACKET_STATISTICS, reading
+/// does not reset them.
+#[repr(C)]
+struct BpfStat {
+    bs_recv: u32,
+    bs_drop: u32,
+}
 
 /// Query the link type of an interface using getifaddrs / AF_LINK.
 /// This is a pre-open estimate; BIOCGDLT (called inside open()) is authoritative.
@@ -152,6 +164,23 @@ impl MacosLive {
 
     pub fn link_type(&self) -> LinkType {
         self.link_type
+    }
+
+    /// Return cumulative capture statistics via `BIOCGSTATS`.
+    ///
+    /// Unlike Linux `PACKET_STATISTICS`, the BPF counters are not reset on
+    /// read, so this always reflects totals since the device was opened.
+    pub fn stats(&mut self) -> Result<CaptureStats> {
+        let mut stat: BpfStat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(self.fd.as_raw_fd(), BIOCGSTATS, &mut stat as *mut _) };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+        Ok(CaptureStats {
+            received: stat.bs_recv as u64,
+            dropped: stat.bs_drop as u64,
+            if_dropped: 0,
+        })
     }
 
     pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {

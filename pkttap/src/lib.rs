@@ -35,11 +35,13 @@ mod error;
 mod file;
 mod live;
 mod packet;
+mod stats;
 
 pub use capture::{Capture, CaptureBuilder};
 pub use dump::{Dump, DumpBuilder};
 pub use error::{Error, Result};
 pub use packet::{LinkType, Packet, PacketRef};
+pub use stats::CaptureStats;
 
 /// List available network interfaces by name.
 pub fn interfaces() -> Result<Vec<String>> {

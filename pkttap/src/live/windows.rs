@@ -15,6 +15,7 @@ use libloading::Library;
 
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, PacketRef};
+use crate::stats::CaptureStats;
 
 // ── C types ──────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,14 @@ struct PcapPkthdr {
     ts: Timeval,
     caplen: u32,
     len: u32,
+}
+
+// Statistics struct returned by pcap_stats.
+#[repr(C)]
+struct PcapStat {
+    ps_recv: u32,
+    ps_drop: u32,
+    ps_ifdrop: u32,
 }
 
 // Passed to pcap_setfilter — same layout as Linux sock_fprog / macOS bpf_program.
@@ -71,6 +80,7 @@ struct NpcapLib {
     pcap_findalldevs: unsafe extern "C" fn(*mut *mut PcapIf, *mut i8) -> i32,
     pcap_freealldevs: unsafe extern "C" fn(*mut PcapIf),
     pcap_geterr: unsafe extern "C" fn(*mut PcapT) -> *const i8,
+    pcap_stats: unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> i32,
 }
 
 // SAFETY: Library and raw fn pointers are both Send+Sync on Windows.
@@ -110,6 +120,10 @@ impl NpcapLib {
                 b"pcap_geterr\0",
                 unsafe extern "C" fn(*mut PcapT) -> *const i8
             );
+            let pcap_stats = sym!(
+                b"pcap_stats\0",
+                unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> i32
+            );
 
             Ok(NpcapLib {
                 _lib: lib,
@@ -121,6 +135,7 @@ impl NpcapLib {
                 pcap_findalldevs,
                 pcap_freealldevs,
                 pcap_geterr,
+                pcap_stats,
             })
         }
     }
@@ -322,6 +337,26 @@ impl WindowsLive {
 
     pub fn link_type(&self) -> LinkType {
         self.link_type
+    }
+
+    /// Return cumulative capture statistics via `pcap_stats`.
+    pub fn stats(&mut self) -> Result<CaptureStats> {
+        let lib = npcap()?;
+        let mut stat: PcapStat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { (lib.pcap_stats)(self.handle, &mut stat) };
+        if rc < 0 {
+            let msg = unsafe {
+                CStr::from_ptr((lib.pcap_geterr)(self.handle))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(Error::Platform(format!("pcap_stats failed: {msg}")));
+        }
+        Ok(CaptureStats {
+            received: stat.ps_recv as u64,
+            dropped: stat.ps_drop as u64,
+            if_dropped: stat.ps_ifdrop as u64,
+        })
     }
 
     pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
