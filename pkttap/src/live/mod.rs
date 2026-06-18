@@ -20,6 +20,7 @@ use crate::error::Result;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use crate::packet::LinkType;
 use crate::packet::PacketRef;
+use crate::stats::CaptureStats;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -60,5 +61,9 @@ impl Live {
 
     pub fn link_type(&self) -> crate::packet::LinkType {
         self.0.link_type()
+    }
+
+    pub fn stats(&mut self) -> Result<CaptureStats> {
+        self.0.stats()
     }
 }

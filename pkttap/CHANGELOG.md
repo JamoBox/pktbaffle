@@ -4,6 +4,43 @@ All notable changes to **pkttap** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`Capture::stats()`** — returns a [`CaptureStats`] struct with cumulative
+  packet receive and drop counts from the kernel capture layer ([#87]).
+  Non-zero `dropped` means the kernel silently discarded packets because its
+  buffer was full; without this there was no way to detect loss.
+
+  ```rust
+  let s = cap.stats()?;
+  println!("received={} dropped={}", s.received, s.dropped);
+  ```
+
+  Platform implementations:
+  - **Linux**: `getsockopt(SOL_PACKET, PACKET_STATISTICS)`. The kernel resets
+    its counters on each read; pkttap accumulates them so `received` and
+    `dropped` are always totals from capture start.
+  - **macOS**: `ioctl(BIOCGSTATS)` on the BPF device fd. Counters are
+    cumulative; no accumulation needed.
+  - **Windows**: `pcap_stats()` dynamically loaded from `wpcap.dll`. Counters
+    are cumulative. Added `pcap_stats` to the Npcap function table.
+  - **File capture**: always returns a zeroed `CaptureStats`.
+
+- **`CaptureStats`** — public struct with fields `received: u64`,
+  `dropped: u64`, `if_dropped: u64`. Implements `Debug`, `Clone`, `Copy`,
+  `Default`, and `PartialEq`.
+
+- **`stats` example** (`examples/stats.rs`) — captures live traffic and
+  prints cumulative stats every N packets (default: 500), with a per-interval
+  drop rate and a warning when loss is detected. Run with:
+  ```
+  cargo run --example stats -p pkttap -- eth0
+  ```
+
+[#87]: https://github.com/JamoBox/pktbaffle/issues/87
+
 ## [0.3.0] - 2026-06-17
 
 Zero-copy capture: `Capture` no longer allocates a `Vec<u8>` per packet.

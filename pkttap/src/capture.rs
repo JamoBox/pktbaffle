@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::file::FileCapture;
 use crate::live::{self, Live};
 use crate::packet::PacketRef;
+use crate::stats::CaptureStats;
 
 // ── Filter specification ──────────────────────────────────────────────────────
 
@@ -157,6 +158,32 @@ impl Capture {
     /// Begin building a file capture from a pcap or pcapng file.
     pub fn from_file(path: impl AsRef<Path>) -> CaptureBuilder {
         CaptureBuilder::new_file(path.as_ref().to_owned())
+    }
+
+    /// Return cumulative packet statistics from the kernel capture layer.
+    ///
+    /// For live captures this queries the platform's capture statistics
+    /// (`PACKET_STATISTICS` on Linux, `BIOCGSTATS` on macOS, `pcap_stats`
+    /// on Windows). File-based captures always return a zeroed
+    /// [`CaptureStats`].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use pkttap::Capture;
+    ///
+    /// # fn run() -> pkttap::Result<()> {
+    /// let mut cap = Capture::live("eth0").open()?;
+    /// // … read packets …
+    /// let s = cap.stats()?;
+    /// println!("received={} dropped={}", s.received, s.dropped);
+    /// # Ok(()) }
+    /// ```
+    pub fn stats(&mut self) -> Result<CaptureStats> {
+        match &mut self.inner {
+            Inner::Live(l) => l.stats(),
+            Inner::File(_) => Ok(CaptureStats::default()),
+        }
     }
 
     /// Return the link type of the capture source.

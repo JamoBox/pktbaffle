@@ -8,6 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, PacketRef};
+use crate::stats::CaptureStats;
 
 // Linux socket constants not always exposed by std
 const AF_PACKET: libc::c_int = 17;
@@ -17,7 +18,17 @@ const SO_ATTACH_FILTER: libc::c_int = 26;
 const SOL_PACKET: libc::c_int = 263;
 #[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
 const PACKET_VERSION: libc::c_int = 10;
+const PACKET_STATISTICS: libc::c_int = 6;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+
+/// Kernel counter struct returned by getsockopt(SOL_PACKET, PACKET_STATISTICS).
+/// Reading this resets the kernel counters to zero, so LinuxLive accumulates
+/// across calls to preserve the total-since-open semantics.
+#[repr(C)]
+struct TpacketStats {
+    tp_packets: u32,
+    tp_drops: u32,
+}
 
 fn arphrd_to_link_type(arphrd: u32) -> LinkType {
     match arphrd {
@@ -52,6 +63,9 @@ pub struct LinuxLive {
     buf: Vec<u8>,
     snaplen: usize,
     link_type: LinkType,
+    /// Accumulated totals across PACKET_STATISTICS reads (kernel resets on each read).
+    recv_acc: u64,
+    drop_acc: u64,
 }
 
 impl LinuxLive {
@@ -140,11 +154,42 @@ impl LinuxLive {
             buf: vec![0u8; snaplen.max(65535)],
             snaplen,
             link_type,
+            recv_acc: 0,
+            drop_acc: 0,
         })
     }
 
     pub fn link_type(&self) -> LinkType {
         self.link_type
+    }
+
+    /// Return cumulative capture statistics.
+    ///
+    /// The kernel resets its `PACKET_STATISTICS` counters each time they are
+    /// read; this method accumulates the deltas so callers always see totals
+    /// from the start of the capture.
+    pub fn stats(&mut self) -> Result<CaptureStats> {
+        let mut ts: TpacketStats = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<TpacketStats>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                self.fd.as_raw_fd(),
+                SOL_PACKET,
+                PACKET_STATISTICS,
+                &mut ts as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+        self.recv_acc += ts.tp_packets as u64;
+        self.drop_acc += ts.tp_drops as u64;
+        Ok(CaptureStats {
+            received: self.recv_acc,
+            dropped: self.drop_acc,
+            if_dropped: 0,
+        })
     }
 
     /// Block until the next packet arrives and return it.
