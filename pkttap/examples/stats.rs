@@ -197,8 +197,7 @@ fn run() -> Result<()> {
     println!("  interface dropped       : {}", stats.if_dropped);
 
     if stats.received + stats.dropped > 0 {
-        let overall_drop =
-            100.0 * stats.dropped as f64 / (stats.received + stats.dropped) as f64;
+        let overall_drop = 100.0 * stats.dropped as f64 / (stats.received + stats.dropped) as f64;
         println!("  overall drop rate       : {overall_drop:.4}%");
     }
 

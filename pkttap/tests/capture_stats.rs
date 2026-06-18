@@ -73,7 +73,10 @@ fn capture_stats_debug_contains_fields() {
     let dbg = format!("{s:?}");
     assert!(dbg.contains("received"), "debug missing 'received': {dbg}");
     assert!(dbg.contains("dropped"), "debug missing 'dropped': {dbg}");
-    assert!(dbg.contains("if_dropped"), "debug missing 'if_dropped': {dbg}");
+    assert!(
+        dbg.contains("if_dropped"),
+        "debug missing 'if_dropped': {dbg}"
+    );
 }
 
 // ── File-based Capture::stats() ───────────────────────────────────────────────
