@@ -16,6 +16,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Applying a filter](#applying-a-filter)
   - [Snaplen](#snaplen)
   - [Pre-compiled filters](#pre-compiled-filters)
+  - [Capture statistics](#capture-statistics)
 - [File capture](#file-capture)
   - [Reading a pcap file](#reading-a-pcap-file)
   - [Reading a pcapng file](#reading-a-pcapng-file)
@@ -31,6 +32,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Linux](#linux)
   - [macOS](#macos)
   - [Windows](#windows)
+- [The stats example](#the-stats-example)
 - [The inspect example](#the-inspect-example)
 - [Filter expression language](#filter-expression-language)
 
@@ -61,6 +63,7 @@ pkttap = "0.3"
 | Kernel-level BPF filter | ✓ SO_ATTACH_FILTER | ✓ BIOCSETF | ✓ pcap_setfilter |
 | Promiscuous mode | ✓ | ✓ | ✓ |
 | Snaplen | ✓ | ✓ | ✓ |
+| Capture statistics | ✓ PACKET_STATISTICS | ✓ BIOCGSTATS | ✓ pcap_stats |
 | pcap file read | ✓ | ✓ | ✓ |
 | pcapng file read | ✓ | ✓ | ✓ |
 | pcap file write | ✓ | ✓ | ✓ |
@@ -228,6 +231,57 @@ let mut cap = Capture::live("eth0")
 ```
 
 This is useful when you want to compile the filter once and reuse it across multiple captures, or when you build the `bpf::Program` by hand.
+
+### Capture statistics
+
+`Capture::stats()` returns the cumulative number of packets the kernel received and dropped since the capture was opened. This is the only reliable way to detect silent packet loss — when the kernel buffer fills up, packets are dropped without any notification to your process.
+
+```rust
+use pkttap::{Capture, CaptureStats};
+
+let mut cap = Capture::live("eth0")
+    .promiscuous(true)
+    .open()?;
+
+let mut count = 0u64;
+loop {
+    let Some(pkt) = cap.next()? else { break };
+    let _ = pkt.data();
+    count += 1;
+
+    if count % 10_000 == 0 {
+        let s: CaptureStats = cap.stats()?;
+        println!(
+            "{count} processed — kernel received={} dropped={}",
+            s.received, s.dropped,
+        );
+        if s.dropped > 0 {
+            eprintln!("WARNING: packet loss detected! dropped={}", s.dropped);
+        }
+    }
+}
+```
+
+`CaptureStats` fields:
+
+| Field | Description |
+|-------|-------------|
+| `received` | Packets delivered to your process (after BPF filtering). Cumulative from capture start. |
+| `dropped` | Packets the kernel had to discard because its buffer was full. Non-zero means you are missing data. |
+| `if_dropped` | Packets dropped by the NIC driver before reaching the capture layer. Only reported on Windows (`pcap_stats`); always 0 on Linux and macOS. |
+
+**Platform sources:**
+
+| Platform | API used | Counter reset on read? |
+|----------|----------|------------------------|
+| Linux    | `getsockopt(SOL_PACKET, PACKET_STATISTICS)` | Yes — pkttap accumulates the deltas automatically |
+| macOS    | `ioctl(BIOCGSTATS)` | No — counters are cumulative |
+| Windows  | `pcap_stats()` via Npcap | No — counters are cumulative |
+| File     | — (returns zeroed `CaptureStats`) | — |
+
+File-based captures always return a zeroed `CaptureStats` — there is no kernel buffer involved so no drops are possible.
+
+See the [`stats` example](#the-stats-example) for a complete runnable demonstration.
 
 ---
 
@@ -536,6 +590,49 @@ for name in pkttap::interfaces()? {
 1. `%SystemRoot%\System32\Npcap\` (Npcap's default install path)
 2. `%SystemRoot%\System32\` (WinPcap legacy / manually placed)
 3. Directories on `%PATH%`
+
+---
+
+## The stats example
+
+The `stats` example opens a live interface and prints cumulative receive / drop counts every N packets. It shows how to use `Capture::stats()` to detect packet loss.
+
+```
+$ cargo run --example stats -p pkttap -- --help
+
+stats — live packet drop monitor
+
+USAGE:
+    stats <INTERFACE> [FILTER] [OPTIONS]
+    stats -h | --help
+...
+```
+
+**Common uses:**
+
+```bash
+# Monitor eth0 with default 500-packet interval
+cargo run --example stats -p pkttap -- eth0
+
+# Monitor with a filter (reduces CPU work and makes drops less likely)
+cargo run --example stats -p pkttap -- eth0 "tcp port 443"
+
+# Custom polling interval
+cargo run --example stats -p pkttap -- eth0 --interval 1000
+```
+
+**Sample output:**
+
+```
+capturing on eth0  link-type: Ethernet  filter: <none>
+printing stats every 500 packets  (Ctrl-C to stop)
+
+[     500 pkts]  received=     500  dropped=     0  if_dropped=     0  (interval drop rate: 0.00%)
+[    1000 pkts]  received=    1000  dropped=     0  if_dropped=     0  (interval drop rate: 0.00%)
+[    1500 pkts]  received=    1498  dropped=     2  if_dropped=     0  (interval drop rate: 0.40%)
+  WARNING: dropped 2 packet(s) in the last 500-packet window.  Consider reducing filter
+  complexity, increasing snaplen, or processing packets faster.
+```
 
 ---
 
