@@ -48,15 +48,20 @@ use pkttap::{Capture, CaptureStats, Result};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// Install a SIGINT handler (Unix only) that:
-/// 1. Reinstalls the default SIGINT action so that a second Ctrl-C terminates
-///    immediately.
-/// 2. Sets RUNNING=false so the packet loop exits cleanly after the next
+// Tracks whether a first Ctrl-C has already been received (Windows only).
+// On the second Ctrl-C the handler returns FALSE so the default handler
+// (process exit) runs immediately.
+#[cfg(windows)]
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Install a SIGINT / Ctrl-C handler that:
+/// 1. Sets RUNNING=false so the packet loop exits cleanly after the next
 ///    packet arrives.
+/// 2. On a second Ctrl-C: terminates immediately (reinstalls SIG_DFL on
+///    Unix; returns FALSE to fall through to the default handler on Windows).
 ///
-/// `cap.next()` blocks inside the kernel's `recvfrom` / `read` call and does
-/// not return until a packet arrives.  On a live interface one arrives within
-/// milliseconds, so the final stats print almost immediately after Ctrl-C.
+/// `cap.next()` blocks until a packet arrives — on a live interface that is
+/// within milliseconds — so the final stats print almost immediately.
 #[cfg(unix)]
 fn install_signal_handler() {
     extern "C" fn on_sigint(_: libc::c_int) {
@@ -67,11 +72,34 @@ fn install_signal_handler() {
     unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn install_signal_handler() {
-    // Windows: SetConsoleCtrlHandler is needed but requires winapi/windows-sys.
-    // Ctrl-C on Windows will terminate immediately without printing final stats.
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
+        const CTRL_C_EVENT: u32 = 0;
+        if ctrl_type != CTRL_C_EVENT {
+            return 0; // not our event — let the next handler decide
+        }
+        if STOPPING.swap(true, Ordering::Relaxed) {
+            // Second Ctrl-C: return FALSE so the default handler terminates
+            // the process immediately.
+            return 0;
+        }
+        RUNNING.store(false, Ordering::Relaxed);
+        1 // TRUE — handled; wait for next packet, then print final stats
+    }
+
+    unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
 }
+
+#[cfg(all(not(unix), not(windows)))]
+fn install_signal_handler() {}
 
 const HELP: &str = "\
 stats — live packet drop monitor
