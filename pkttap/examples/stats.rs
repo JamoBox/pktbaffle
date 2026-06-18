@@ -33,8 +33,45 @@
 //! # Custom polling interval (default: every 500 packets)
 //! cargo run --example stats -p pkttap -- eth0 --interval 1000
 //! ```
+//!
+//! ## Stopping
+//!
+//! Press **Ctrl-C once** to stop gracefully: the final stats are printed as
+//! soon as the next packet arrives (on a live interface this is nearly
+//! instantaneous).  Press **Ctrl-C a second time** to force-quit immediately.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pkttap::{Capture, CaptureStats, Result};
+
+// ── Signal handling ───────────────────────────────────────────────────────────
+
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// Install a SIGINT handler (Unix only) that:
+/// 1. Reinstalls the default SIGINT action so that a second Ctrl-C terminates
+///    immediately.
+/// 2. Sets RUNNING=false so the packet loop exits cleanly after the next
+///    packet arrives.
+///
+/// `cap.next()` blocks inside the kernel's `recvfrom` / `read` call and does
+/// not return until a packet arrives.  On a live interface one arrives within
+/// milliseconds, so the final stats print almost immediately after Ctrl-C.
+#[cfg(unix)]
+fn install_signal_handler() {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        // Reinstall the default handler so a second Ctrl-C kills immediately.
+        unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) };
+        RUNNING.store(false, Ordering::Relaxed);
+    }
+    unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
+}
+
+#[cfg(not(unix))]
+fn install_signal_handler() {
+    // Windows: SetConsoleCtrlHandler is needed but requires winapi/windows-sys.
+    // Ctrl-C on Windows will terminate immediately without printing final stats.
+}
 
 const HELP: &str = "\
 stats — live packet drop monitor
@@ -130,6 +167,8 @@ fn run() -> Result<()> {
     );
     eprintln!("printing stats every {interval} packets  (Ctrl-C to stop)\n");
 
+    install_signal_handler();
+
     // ── Packet loop with periodic stats ──────────────────────────────────────
 
     let mut total_packets: u64 = 0;
@@ -144,6 +183,10 @@ fn run() -> Result<()> {
         // Touch the first byte so the compiler cannot elide the read.
         let _ = pkt.data().first().copied();
         total_packets += 1;
+
+        if !RUNNING.load(Ordering::Relaxed) {
+            break;
+        }
 
         if total_packets % interval == 0 {
             // ── Query the kernel's capture counters ───────────────────────────
