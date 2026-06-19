@@ -359,7 +359,17 @@ impl WindowsLive {
         })
     }
 
-    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
+    /// Non-blocking mode is not yet implemented on Windows via the Npcap backend.
+    ///
+    /// Returns `Err(Error::Platform(...))`. Use a short `buffer_timeout` and
+    /// poll in a dedicated thread as a workaround.
+    pub fn set_nonblocking(&self, _nb: bool) -> Result<()> {
+        Err(Error::Platform(
+            "non-blocking capture is not yet supported on Windows".into(),
+        ))
+    }
+
+    pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
         let lib = npcap()?;
         loop {
             let mut hdr_ptr: *const PcapPkthdr = std::ptr::null();
@@ -375,13 +385,13 @@ impl WindowsLive {
                     // `&mut self` lets the borrow checker enforce exactly that —
                     // a PacketRef cannot outlive the next `next` call.
                     let data: &[u8] = unsafe { slice::from_raw_parts(data_ptr, cap) };
-                    return Ok(PacketRef::new(
+                    return Ok(Some(PacketRef::new(
                         data,
                         hdr.ts.tv_sec as u64,
                         hdr.ts.tv_usec as u32 * 1000,
                         hdr.len,
                         self.link_type,
-                    ));
+                    )));
                 }
                 0 => continue, // read timeout, no packet — retry
                 _ => {
