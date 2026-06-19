@@ -73,7 +73,7 @@ impl Dump {
                     timestamp: ts,
                     original_len: pkt.orig_len(),
                     data: Cow::Borrowed(pkt.data()),
-                    options: vec![],
+                    options: Vec::new(),
                 }))
                 .map(|_| ())
                 .map_err(Error::Pcap),
@@ -137,7 +137,7 @@ impl DumpBuilder {
                 w.write_block(&Block::InterfaceDescription(InterfaceDescriptionBlock {
                     linktype: link_type_to_datalink(lt),
                     snaplen: 65535,
-                    options: vec![],
+                    options: Vec::new(),
                 }))
                 .map_err(Error::Pcap)?;
                 Inner::PcapNg(w)
