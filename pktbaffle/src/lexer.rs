@@ -391,8 +391,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
-                if candidate.contains("::") || candidate.chars().filter(|&c| c == ':').count() >= 2
-                {
+                if candidate.contains("::") || has_at_least_n_colons(candidate, 2) {
                     if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
                         tokens.push(Spanned {
                             token: Token::Ipv6(addr),
@@ -466,7 +465,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             let word = &src[start..pos];
 
             // IPv6 contains "::" or 2+ colons.
-            if word.contains("::") || word.chars().filter(|&c| c == ':').count() >= 2 {
+            if word.contains("::") || has_at_least_n_colons(word, 2) {
                 if let Ok(addr) = word.parse::<std::net::Ipv6Addr>() {
                     tokens.push(Spanned {
                         token: Token::Ipv6(addr),
@@ -491,7 +490,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 }
             }
             // MAC: exactly five colons, all hex digits between them.
-            if word.chars().filter(|&c| c == ':').count() == 5 {
+            if has_at_least_n_colons(word, 5) && !has_at_least_n_colons(word, 6) {
                 if let Some(mac) = parse_mac(word) {
                     tokens.push(Spanned {
                         token: Token::Mac(mac),
@@ -515,6 +514,12 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
     }
 
     Ok(tokens)
+}
+
+/// Returns true if `s` contains at least `n` colon bytes.
+/// Uses `.bytes()` for ASCII-safe O(position-of-nth-colon) scanning.
+fn has_at_least_n_colons(s: &str, n: usize) -> bool {
+    s.bytes().filter(|&b| b == b':').take(n).count() >= n
 }
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
@@ -543,13 +548,13 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
         }
     }
     // IPv6 (contains "::" or two or more colons)
-    if raw.contains("::") || raw.chars().filter(|&c| c == ':').count() >= 2 {
+    if raw.contains("::") || has_at_least_n_colons(raw, 2) {
         if let Ok(addr) = raw.parse::<std::net::Ipv6Addr>() {
             return Ok(Token::Ipv6(addr));
         }
     }
     // MAC (five colons)
-    if raw.chars().filter(|&c| c == ':').count() == 5 {
+    if has_at_least_n_colons(raw, 5) && !has_at_least_n_colons(raw, 6) {
         if let Some(mac) = parse_mac(raw) {
             return Ok(Token::Mac(mac));
         }
@@ -866,5 +871,26 @@ mod tests {
         // tcp[13]|0x02 = 0x02 must produce a Pipe token
         let tokens = lex("tcp[13]|0x02 = 0x02").unwrap();
         assert!(tokens.iter().any(|s| s.token == Token::Pipe));
+    }
+
+    // ── has_at_least_n_colons helper (#97) ────────────────────────────────────
+
+    #[test]
+    fn has_at_least_n_colons_basic() {
+        assert!(has_at_least_n_colons("a:b:c", 2));
+        assert!(has_at_least_n_colons("::1", 2));
+        assert!(!has_at_least_n_colons("a:b", 2));
+        assert!(!has_at_least_n_colons("abc", 2));
+        assert!(has_at_least_n_colons("a:b:c:d", 2));
+        // early exit: still finds 2 colons even in long string
+        assert!(has_at_least_n_colons("2001:db8::1", 2));
+    }
+
+    #[test]
+    fn has_at_least_n_colons_edge_cases() {
+        assert!(!has_at_least_n_colons("", 2));
+        assert!(!has_at_least_n_colons(":", 2));
+        assert!(has_at_least_n_colons("::", 2));
+        assert!(has_at_least_n_colons(":::", 3));
     }
 }
