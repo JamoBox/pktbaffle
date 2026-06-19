@@ -192,8 +192,33 @@ impl LinuxLive {
         })
     }
 
-    /// Block until the next packet arrives and return it.
-    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
+    /// Set or clear `O_NONBLOCK` on the capture socket via `fcntl`.
+    ///
+    /// When non-blocking mode is active, [`Self::next_packet`] returns
+    /// `Ok(None)` immediately if no packet is available, rather than blocking.
+    pub fn set_nonblocking(&self, nb: bool) -> Result<()> {
+        let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(super::io_err());
+        }
+        let new_flags = if nb {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        let rc = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, new_flags) };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+        Ok(())
+    }
+
+    /// Return the next packet, blocking unless `O_NONBLOCK` was set via
+    /// [`Self::set_nonblocking`].
+    ///
+    /// Returns `Ok(None)` when non-blocking mode is active and no packet is
+    /// ready (EAGAIN / EWOULDBLOCK).
+    pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
         loop {
             let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
             let mut src_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
@@ -213,6 +238,9 @@ impl LinuxLive {
                 if e.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(None);
+                }
                 return Err(e.into());
             }
             let n = n as usize;
@@ -231,13 +259,13 @@ impl LinuxLive {
             // iterator in safe Rust. A TPACKET_V3 mmap ring (which would also
             // eliminate the per-packet recvfrom syscall) is deferred; see
             // ADR 0002 and the dedicated ring-buffer issue.
-            return Ok(PacketRef::new(
+            return Ok(Some(PacketRef::new(
                 &self.buf[..n],
                 now.as_secs(),
                 now.subsec_nanos(),
                 orig_len,
                 self.link_type,
-            ));
+            )));
         }
     }
 }
@@ -310,5 +338,14 @@ mod tests {
         // IFNAMSIZ has been 16 on Linux since the kernel was first written;
         // any value in [8, 64] is acceptable for our length check.
         assert!(libc::IFNAMSIZ >= 8 && libc::IFNAMSIZ <= 64);
+    }
+
+    #[test]
+    fn libc_fcntl_constants_present() {
+        // Compile-time check: F_GETFL, F_SETFL, O_NONBLOCK must be available.
+        // The actual values are not tested — only that they resolve.
+        let _f_getfl = libc::F_GETFL;
+        let _f_setfl = libc::F_SETFL;
+        let _o_nonblock = libc::O_NONBLOCK;
     }
 }
