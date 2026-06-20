@@ -15,6 +15,11 @@ const AF_PACKET: libc::c_int = 17;
 const ETH_P_ALL: u16 = 0x0003;
 const SOL_SOCKET: libc::c_int = 1;
 const SO_ATTACH_FILTER: libc::c_int = 26;
+const SO_TIMESTAMP: libc::c_int = 29;
+/// `SCM_TIMESTAMP` equals `SO_TIMESTAMP` on Linux; libc does not expose it for
+/// Linux (the definition is commented out in libc's source), so we define it
+/// ourselves.
+const SCM_TIMESTAMP: libc::c_int = 29;
 const SOL_PACKET: libc::c_int = 263;
 #[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
 const PACKET_VERSION: libc::c_int = 10;
@@ -106,6 +111,24 @@ impl LinuxLive {
             }
         }
 
+        // Enable SO_TIMESTAMP so the kernel records the packet arrival time and
+        // delivers it as ancillary data on recvmsg(). This is more accurate than
+        // calling SystemTime::now() after recvfrom() returns, which can be
+        // 10–100 µs later under load.
+        let one: libc::c_int = 1;
+        let rc = unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                SOL_SOCKET,
+                SO_TIMESTAMP,
+                &one as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+
         // Resolve interface index
         let ifindex = iface_index(fd.as_raw_fd(), iface)?;
 
@@ -193,21 +216,35 @@ impl LinuxLive {
     }
 
     /// Block until the next packet arrives and return it.
+    ///
+    /// The timestamp is read from the kernel-provided `SO_TIMESTAMP` ancillary
+    /// data delivered by `recvmsg()`. This is the moment the kernel received the
+    /// packet, which is 10–100 µs earlier than when userspace reads it under
+    /// load. If no timestamp is present in the ancillary data (e.g. on a kernel
+    /// that does not support `SO_TIMESTAMP`), `SystemTime::now()` is used as a
+    /// fallback.
     pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
         loop {
-            let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-            let mut src_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+            let fd = self.fd.as_raw_fd();
 
-            let n = unsafe {
-                libc::recvfrom(
-                    self.fd.as_raw_fd(),
-                    self.buf.as_mut_ptr() as *mut libc::c_void,
-                    self.buf.len(),
-                    0,
-                    &mut src as *mut libc::sockaddr_ll as *mut libc::sockaddr,
-                    &mut src_len,
-                )
+            let mut iov = libc::iovec {
+                iov_base: self.buf.as_mut_ptr() as *mut libc::c_void,
+                iov_len: self.buf.len(),
             };
+            // 128 bytes is always enough for a single cmsghdr + timeval.
+            let mut cmsg_buf = [0u8; 128];
+            let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+            let mut mhdr = libc::msghdr {
+                msg_name: &mut src as *mut libc::sockaddr_ll as *mut libc::c_void,
+                msg_namelen: std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+                msg_iov: &mut iov,
+                msg_iovlen: 1,
+                msg_control: cmsg_buf.as_mut_ptr() as *mut libc::c_void,
+                msg_controllen: cmsg_buf.len(),
+                msg_flags: 0,
+            };
+
+            let n = unsafe { libc::recvmsg(fd, &mut mhdr, 0) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted {
@@ -219,27 +256,59 @@ impl LinuxLive {
             let orig_len = n as u32;
             let n = n.min(self.snaplen);
 
-            // Timestamp from the socket (best effort via SO_TIMESTAMP would
-            // be more accurate, but CLOCK_REALTIME is simpler for now)
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
+            // Use the kernel-recorded arrival time from SO_TIMESTAMP ancillary
+            // data; fall back to SystemTime::now() if unavailable.
+            let ts = extract_so_timestamp(&mhdr).unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+            });
 
             // Zero-copy: borrow the receive buffer rather than allocating. The
             // EINTR `continue` path above never creates this borrow, so the
             // slice is born only on the return path — keeping the lending
             // iterator in safe Rust. A TPACKET_V3 mmap ring (which would also
-            // eliminate the per-packet recvfrom syscall) is deferred; see
+            // eliminate the per-packet recvmsg syscall) is deferred; see
             // ADR 0002 and the dedicated ring-buffer issue.
             return Ok(PacketRef::new(
                 &self.buf[..n],
-                now.as_secs(),
-                now.subsec_nanos(),
+                ts.as_secs(),
+                ts.subsec_nanos(),
                 orig_len,
                 self.link_type,
             ));
         }
     }
+}
+
+/// Walk the ancillary data chain in `mhdr` and return the `SO_TIMESTAMP`
+/// kernel arrival time as a `Duration` since the Unix epoch, or `None` if
+/// no such control message is present.
+fn extract_so_timestamp(mhdr: &libc::msghdr) -> Option<std::time::Duration> {
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(mhdr) };
+    while !cmsg.is_null() {
+        let hdr = unsafe { &*cmsg };
+        if hdr.cmsg_level == SOL_SOCKET && hdr.cmsg_type == SCM_TIMESTAMP {
+            // SAFETY: the kernel placed a valid `timeval` at CMSG_DATA; we copy
+            // it out via MaybeUninit to avoid alignment assumptions.
+            let tv = unsafe {
+                let data = libc::CMSG_DATA(cmsg);
+                let mut tv = std::mem::MaybeUninit::<libc::timeval>::uninit();
+                std::ptr::copy_nonoverlapping(
+                    data,
+                    tv.as_mut_ptr() as *mut u8,
+                    std::mem::size_of::<libc::timeval>(),
+                );
+                tv.assume_init()
+            };
+            return Some(std::time::Duration::new(
+                tv.tv_sec as u64,
+                (tv.tv_usec as u32) * 1000,
+            ));
+        }
+        cmsg = unsafe { libc::CMSG_NXTHDR(mhdr, cmsg) };
+    }
+    None
 }
 
 fn iface_index(fd: libc::c_int, name: &str) -> Result<libc::c_int> {
@@ -288,6 +357,8 @@ mod tests {
     // only added in libc 0.2.137, so any floor below that fails to compile here,
     // ensuring the Cargo.toml lower bound (0.2.140) stays honest.
 
+    use super::*;
+
     #[test]
     fn libc_packet_mreq_fields_accessible() {
         let mreq = libc::packet_mreq {
@@ -310,5 +381,21 @@ mod tests {
         // IFNAMSIZ has been 16 on Linux since the kernel was first written;
         // any value in [8, 64] is acceptable for our length check.
         assert!(libc::IFNAMSIZ >= 8 && libc::IFNAMSIZ <= 64);
+    }
+
+    /// SO_TIMESTAMP and SCM_TIMESTAMP must both equal 29 on Linux.
+    #[test]
+    fn so_timestamp_constant_value() {
+        assert_eq!(SO_TIMESTAMP, 29);
+        assert_eq!(SCM_TIMESTAMP, 29);
+    }
+
+    /// `extract_so_timestamp` must return `None` when `msg_controllen` is zero
+    /// (i.e. no ancillary data present), exercising the fallback path.
+    #[test]
+    fn extract_so_timestamp_empty_returns_none() {
+        // Build a zeroed msghdr with no control data.
+        let mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        assert!(extract_so_timestamp(&mhdr).is_none());
     }
 }
