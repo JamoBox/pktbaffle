@@ -391,7 +391,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
-                if candidate.contains("::") || has_at_least_n_colons(candidate, 2) {
+                if looks_like_ipv6(candidate) {
                     if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
                         tokens.push(Spanned {
                             token: Token::Ipv6(addr),
@@ -465,7 +465,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             let word = &src[start..pos];
 
             // IPv6 contains "::" or 2+ colons.
-            if word.contains("::") || has_at_least_n_colons(word, 2) {
+            if looks_like_ipv6(word) {
                 if let Ok(addr) = word.parse::<std::net::Ipv6Addr>() {
                     tokens.push(Spanned {
                         token: Token::Ipv6(addr),
@@ -490,8 +490,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 }
             }
             // MAC: exactly five colons, all hex digits between them.
-            // Single pass capped at 6: take(6) stops early, count == 5 checks exactly.
-            if word.bytes().filter(|&b| b == b':').take(6).count() == 5 {
+            if looks_like_mac(word) {
                 if let Some(mac) = parse_mac(word) {
                     tokens.push(Spanned {
                         token: Token::Mac(mac),
@@ -517,10 +516,12 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
     Ok(tokens)
 }
 
-/// Returns true if `s` contains at least `n` colon bytes.
-/// Uses `.bytes()` for ASCII-safe O(position-of-nth-colon) scanning.
-fn has_at_least_n_colons(s: &str, n: usize) -> bool {
-    s.bytes().filter(|&b| b == b':').take(n).count() >= n
+fn looks_like_ipv6(s: &str) -> bool {
+    s.contains("::") || s.bytes().filter(|&b| b == b':').take(2).count() >= 2
+}
+
+fn looks_like_mac(s: &str) -> bool {
+    s.bytes().filter(|&b| b == b':').take(6).count() == 5
 }
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
@@ -549,13 +550,13 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
         }
     }
     // IPv6 (contains "::" or two or more colons)
-    if raw.contains("::") || has_at_least_n_colons(raw, 2) {
+    if looks_like_ipv6(raw) {
         if let Ok(addr) = raw.parse::<std::net::Ipv6Addr>() {
             return Ok(Token::Ipv6(addr));
         }
     }
-    // MAC (five colons) — single pass capped at 6.
-    if raw.bytes().filter(|&b| b == b':').take(6).count() == 5 {
+    // MAC (five colons)
+    if looks_like_mac(raw) {
         if let Some(mac) = parse_mac(raw) {
             return Ok(Token::Mac(mac));
         }
@@ -874,24 +875,26 @@ mod tests {
         assert!(tokens.iter().any(|s| s.token == Token::Pipe));
     }
 
-    // ── has_at_least_n_colons helper (#97) ────────────────────────────────────
+    // ── looks_like_ipv6 / looks_like_mac helpers (#97) ───────────────────────
 
     #[test]
-    fn has_at_least_n_colons_basic() {
-        assert!(has_at_least_n_colons("a:b:c", 2));
-        assert!(has_at_least_n_colons("::1", 2));
-        assert!(!has_at_least_n_colons("a:b", 2));
-        assert!(!has_at_least_n_colons("abc", 2));
-        assert!(has_at_least_n_colons("a:b:c:d", 2));
-        // early exit: still finds 2 colons even in long string
-        assert!(has_at_least_n_colons("2001:db8::1", 2));
+    fn looks_like_ipv6_basic() {
+        assert!(looks_like_ipv6("2001:db8::1"));
+        assert!(looks_like_ipv6("::1"));
+        assert!(looks_like_ipv6("::"));
+        assert!(looks_like_ipv6("a:b:c"));
+        assert!(!looks_like_ipv6("a:b"));
+        assert!(!looks_like_ipv6("abc"));
+        assert!(!looks_like_ipv6(""));
     }
 
     #[test]
-    fn has_at_least_n_colons_edge_cases() {
-        assert!(!has_at_least_n_colons("", 2));
-        assert!(!has_at_least_n_colons(":", 2));
-        assert!(has_at_least_n_colons("::", 2));
-        assert!(has_at_least_n_colons(":::", 3));
+    fn looks_like_mac_basic() {
+        assert!(looks_like_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(looks_like_mac("00:00:00:00:00:00"));
+        assert!(!looks_like_mac("aa:bb:cc:dd:ee")); // only 4 colons
+        assert!(!looks_like_mac("aa:bb:cc:dd:ee:ff:00")); // 6 colons
+        assert!(!looks_like_mac(""));
+        assert!(!looks_like_mac("no colons here"));
     }
 }
