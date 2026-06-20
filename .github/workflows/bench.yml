@@ -12,6 +12,10 @@ on:
       - 'pkttap/src/**'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 concurrency:
@@ -26,8 +30,14 @@ jobs:
   benchmark:
     name: benchmark
     runs-on: ubuntu-latest
+    # For label events only fire on the `performance` label; all other triggers
+    # (schedule, push, workflow_dispatch) pass through unconditionally.
+    if: |
+      contains(fromJSON('["schedule", "push", "workflow_dispatch"]'), github.event_name) ||
+      github.event.label.name == 'performance'
     permissions:
-      contents: write  # required to push results to gh-pages
+      contents: write        # push results to gh-pages
+      pull-requests: write   # post regression comments on PRs
 
     steps:
       - uses: actions/checkout@v4
