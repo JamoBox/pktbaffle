@@ -490,7 +490,8 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 }
             }
             // MAC: exactly five colons, all hex digits between them.
-            if has_at_least_n_colons(word, 5) && !has_at_least_n_colons(word, 6) {
+            // Single pass capped at 6: take(6) stops early, count == 5 checks exactly.
+            if word.bytes().filter(|&b| b == b':').take(6).count() == 5 {
                 if let Some(mac) = parse_mac(word) {
                     tokens.push(Spanned {
                         token: Token::Mac(mac),
@@ -553,8 +554,8 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
             return Ok(Token::Ipv6(addr));
         }
     }
-    // MAC (five colons)
-    if has_at_least_n_colons(raw, 5) && !has_at_least_n_colons(raw, 6) {
+    // MAC (five colons) — single pass capped at 6.
+    if raw.bytes().filter(|&b| b == b':').take(6).count() == 5 {
         if let Some(mac) = parse_mac(raw) {
             return Ok(Token::Mac(mac));
         }
