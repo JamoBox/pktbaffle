@@ -21,6 +21,16 @@ vm = []
 # single libc version, and pkttap requires >= 0.2.140 (for `libc::ifreq`), so
 # this floor must match to avoid a conflict under `-Z direct-minimal-versions`.
 libc = "0.2.140"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "compiler"
+harness = false
+
+[[bench]]
+name = "vm"
+harness = false
+required-features = ["vm"]
 
 [[example]]
 name = "dump_filter"
