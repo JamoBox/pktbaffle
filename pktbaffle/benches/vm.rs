@@ -34,31 +34,70 @@
 //! | complex/reject | same                                                    | ARP frame                     | false    |
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use pktbaffle::{compile, Target};
 use pktbaffle::codegen::LinkType;
+use pktbaffle::{compile, Target};
 
 // ── Synthetic packet builders ─────────────────────────────────────────────────
 
 fn eth_ipv4_tcp(src_port: u16, dst_port: u16) -> Vec<u8> {
     let mut f = vec![
         // Ethernet header (14 bytes)
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
-        0x08, 0x00,                           // EtherType IPv4
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff, // dst MAC
+        0x00,
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55, // src MAC
+        0x08,
+        0x00, // EtherType IPv4
         // IPv4 header (20 bytes): IHL=5, proto=6 (TCP), src=192.168.0.1, dst=10.0.0.1
-        0x45, 0x00, 0x00, 0x28,
-        0x00, 0x01, 0x00, 0x00,
-        0x40, 0x06, 0x00, 0x00,
-        0xc0, 0xa8, 0x00, 0x01, // src 192.168.0.1
-        0x0a, 0x00, 0x00, 0x01, // dst 10.0.0.1
+        0x45,
+        0x00,
+        0x00,
+        0x28,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x40,
+        0x06,
+        0x00,
+        0x00,
+        0xc0,
+        0xa8,
+        0x00,
+        0x01, // src 192.168.0.1
+        0x0a,
+        0x00,
+        0x00,
+        0x01, // dst 10.0.0.1
         // TCP header (20 bytes)
-        (src_port >> 8) as u8, src_port as u8,
-        (dst_port >> 8) as u8, dst_port as u8,
-        0x00, 0x00, 0x00, 0x01, // seq
-        0x00, 0x00, 0x00, 0x00, // ack
-        0x50, 0x02,             // data offset=5, SYN
-        0xff, 0xff, 0x00, 0x00, // window, checksum
-        0x00, 0x00,             // urgent
+        (src_port >> 8) as u8,
+        src_port as u8,
+        (dst_port >> 8) as u8,
+        dst_port as u8,
+        0x00,
+        0x00,
+        0x00,
+        0x01, // seq
+        0x00,
+        0x00,
+        0x00,
+        0x00, // ack
+        0x50,
+        0x02, // data offset=5, SYN
+        0xff,
+        0xff,
+        0x00,
+        0x00, // window, checksum
+        0x00,
+        0x00, // urgent
     ];
     f.resize(60, 0u8);
     f
@@ -67,20 +106,50 @@ fn eth_ipv4_tcp(src_port: u16, dst_port: u16) -> Vec<u8> {
 fn eth_ipv4_udp(src_port: u16, dst_port: u16) -> Vec<u8> {
     vec![
         // Ethernet header (14 bytes)
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
-        0x08, 0x00,                           // EtherType IPv4
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff, // dst MAC
+        0x00,
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55, // src MAC
+        0x08,
+        0x00, // EtherType IPv4
         // IPv4 header (20 bytes): IHL=5, proto=17 (UDP), src=192.168.0.1, dst=10.0.0.1
-        0x45, 0x00, 0x00, 0x1c,
-        0x00, 0x02, 0x00, 0x00,
-        0x40, 0x11, 0x00, 0x00,
-        0xc0, 0xa8, 0x00, 0x01, // src 192.168.0.1
-        0x0a, 0x00, 0x00, 0x01, // dst 10.0.0.1
+        0x45,
+        0x00,
+        0x00,
+        0x1c,
+        0x00,
+        0x02,
+        0x00,
+        0x00,
+        0x40,
+        0x11,
+        0x00,
+        0x00,
+        0xc0,
+        0xa8,
+        0x00,
+        0x01, // src 192.168.0.1
+        0x0a,
+        0x00,
+        0x00,
+        0x01, // dst 10.0.0.1
         // UDP header (8 bytes)
-        (src_port >> 8) as u8, src_port as u8,
-        (dst_port >> 8) as u8, dst_port as u8,
-        0x00, 0x08,             // length
-        0x00, 0x00,             // checksum
+        (src_port >> 8) as u8,
+        src_port as u8,
+        (dst_port >> 8) as u8,
+        dst_port as u8,
+        0x00,
+        0x08, // length
+        0x00,
+        0x00, // checksum
     ]
 }
 
@@ -89,7 +158,7 @@ fn eth_arp() -> Vec<u8> {
         // Ethernet header (14 bytes)
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // dst MAC (broadcast)
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // src MAC
-        0x08, 0x06,                           // EtherType ARP
+        0x08, 0x06, // EtherType ARP
     ];
     // Minimal ARP payload (28 bytes)
     f.extend_from_slice(&[0u8; 28]);
@@ -122,13 +191,17 @@ fn bench_filter(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("filter");
     for &(label, prog, pkt, expected) in cases {
-        g.bench_with_input(BenchmarkId::from_parameter(label), &(prog, pkt), |b, &(prog, pkt)| {
-            b.iter(|| {
-                let result = prog.matches(criterion::black_box(pkt));
-                assert_eq!(result, expected);
-                result
-            })
-        });
+        g.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &(prog, pkt),
+            |b, &(prog, pkt)| {
+                b.iter(|| {
+                    let result = prog.matches(criterion::black_box(pkt));
+                    assert_eq!(result, expected);
+                    result
+                })
+            },
+        );
     }
     g.finish();
 }

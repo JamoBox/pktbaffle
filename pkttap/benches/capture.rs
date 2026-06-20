@@ -54,21 +54,12 @@ use pkttap::{Capture, Dump, LinkType, Packet};
 fn eth_ipv4_tcp() -> Vec<u8> {
     let mut f = vec![
         // Ethernet header (14 bytes)
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x08, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00,
         // IPv4 header (20 bytes): IHL=5, proto=6 (TCP), src=192.168.0.1, dst=10.0.0.1
-        0x45, 0x00, 0x00, 0x28,
-        0x00, 0x01, 0x00, 0x00,
-        0x40, 0x06, 0x00, 0x00,
-        0xc0, 0xa8, 0x00, 0x01,
-        0x0a, 0x00, 0x00, 0x01,
-        // TCP header (20 bytes): src=12345, dst=80, SYN
-        0x30, 0x39, 0x00, 0x50,
-        0x00, 0x00, 0x00, 0x01,
-        0x00, 0x00, 0x00, 0x00,
-        0x50, 0x02, 0xff, 0xff,
-        0x00, 0x00, 0x00, 0x00,
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0xa8, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x01, // TCP header (20 bytes): src=12345, dst=80, SYN
+        0x30, 0x39, 0x00, 0x50, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0xff,
+        0xff, 0x00, 0x00, 0x00, 0x00,
     ];
     f.resize(60, 0u8);
     f
@@ -77,18 +68,11 @@ fn eth_ipv4_tcp() -> Vec<u8> {
 fn eth_ipv4_udp() -> Vec<u8> {
     vec![
         // Ethernet header (14 bytes)
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x08, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x08, 0x00,
         // IPv4 header (20 bytes): IHL=5, proto=17 (UDP)
-        0x45, 0x00, 0x00, 0x1c,
-        0x00, 0x02, 0x00, 0x00,
-        0x40, 0x11, 0x00, 0x00,
-        0xc0, 0xa8, 0x00, 0x01,
-        0x0a, 0x00, 0x00, 0x01,
-        // UDP header (8 bytes): src=12345, dst=53
-        0x30, 0x39, 0x00, 0x35,
-        0x00, 0x08, 0x00, 0x00,
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x02, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8, 0x00,
+        0x01, 0x0a, 0x00, 0x00, 0x01, // UDP header (8 bytes): src=12345, dst=53
+        0x30, 0x39, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00,
     ]
 }
 
@@ -99,13 +83,13 @@ fn pcap_bytes(frame: &[u8], count: usize) -> Vec<u8> {
     buf.extend_from_slice(&0xa1b2c3d4u32.to_le_bytes()); // magic
     buf.extend_from_slice(&2u16.to_le_bytes());
     buf.extend_from_slice(&4u16.to_le_bytes());
-    buf.extend_from_slice(&0i32.to_le_bytes());  // GMT offset
-    buf.extend_from_slice(&0u32.to_le_bytes());  // accuracy
+    buf.extend_from_slice(&0i32.to_le_bytes()); // GMT offset
+    buf.extend_from_slice(&0u32.to_le_bytes()); // accuracy
     buf.extend_from_slice(&65535u32.to_le_bytes());
     buf.extend_from_slice(&1u32.to_le_bytes()); // DLT_EN10MB
     for i in 0..count {
         buf.extend_from_slice(&(i as u32).to_le_bytes()); // ts_sec
-        buf.extend_from_slice(&0u32.to_le_bytes());       // ts_usec
+        buf.extend_from_slice(&0u32.to_le_bytes()); // ts_usec
         buf.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         buf.extend_from_slice(&(frame.len() as u32).to_le_bytes());
         buf.extend_from_slice(frame);
@@ -151,7 +135,12 @@ fn bench_packet(c: &mut Criterion) {
     g.bench_function("as_ref_fields", |b| {
         b.iter(|| {
             let r = owned.as_ref();
-            criterion::black_box((r.data().len(), r.orig_len(), r.link_type(), r.is_truncated()))
+            criterion::black_box((
+                r.data().len(),
+                r.orig_len(),
+                r.link_type(),
+                r.is_truncated(),
+            ))
         })
     });
 
@@ -169,7 +158,12 @@ fn bench_file_capture(c: &mut Criterion) {
     // Compile the "tcp" filter once; use it as a pre-compiled program so that
     // compilation cost is excluded from the capture benchmarks.
     let tcp_prog = {
-        let p = compile("tcp", pktbaffle::codegen::LinkType::Ethernet, Target::Classic).unwrap();
+        let p = compile(
+            "tcp",
+            pktbaffle::codegen::LinkType::Ethernet,
+            Target::Classic,
+        )
+        .unwrap();
         p.as_classic().unwrap().clone()
     };
 

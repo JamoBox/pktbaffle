@@ -30,8 +30,8 @@
 //! | boolean_chain  | `tcp and not port 22 and not port 23 and src host 192.168.1.100`       | Long AND chain; measures path-fact tracking benefit |
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use pktbaffle::{compile, parse, Target};
 use pktbaffle::codegen::LinkType;
+use pktbaffle::{compile, parse, Target};
 
 const SIMPLE: &str = "tcp";
 const MEDIUM: &str = "tcp port 80";
@@ -63,7 +63,12 @@ fn bench_cbpf(c: &mut Criterion) {
     ] {
         g.bench_with_input(BenchmarkId::from_parameter(label), &expr, |b, &expr| {
             b.iter(|| {
-                compile(criterion::black_box(expr), LinkType::Ethernet, Target::Classic).unwrap()
+                compile(
+                    criterion::black_box(expr),
+                    LinkType::Ethernet,
+                    Target::Classic,
+                )
+                .unwrap()
             })
         });
     }
@@ -79,7 +84,12 @@ fn bench_ebpf(c: &mut Criterion) {
     ] {
         g.bench_with_input(BenchmarkId::from_parameter(label), &expr, |b, &expr| {
             b.iter(|| {
-                compile(criterion::black_box(expr), LinkType::Ethernet, Target::Extended).unwrap()
+                compile(
+                    criterion::black_box(expr),
+                    LinkType::Ethernet,
+                    Target::Extended,
+                )
+                .unwrap()
             })
         });
     }
