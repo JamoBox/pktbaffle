@@ -696,6 +696,26 @@ Each packet shows:
 
 ---
 
+## Benchmarks
+
+pkttap ships a [Criterion](https://bheisler.github.io/criterion.rs/book/) benchmark suite covering capture throughput, write throughput, packet allocation cost, and filter compilation overhead.
+
+```bash
+cargo bench -p pkttap
+```
+
+HTML reports with per-benchmark time series and violin plots are written to `target/criterion/`. Open `target/criterion/report/index.html` in a browser after the run.
+
+| Benchmark | What it measures |
+|-----------|-----------------|
+| `file_capture/throughput` | Raw read rate over a 1 000-packet synthetic pcap file |
+| `file_capture/with_filter_tcp` | Same read path with a "tcp" BPF filter applied in the pktbaffle software VM |
+| `dump_write/throughput` | Write rate for 1 000 packets to a temp pcap file |
+| `packet_construction` | Per-packet `Packet::new` / `Vec` allocation cost for a 60-byte frame |
+| `filter_compilation` | Parse + codegen cost for a representative filter expression |
+
+---
+
 ## Filter expression language
 
 pkttap uses [pktbaffle](../) to compile filter expressions. The same libpcap / `tcpdump` syntax applies:
