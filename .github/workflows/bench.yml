@@ -1,0 +1,66 @@
+name: Benchmarks
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Mondays at 04:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - 'pktbaffle/benches/**'
+      - 'pktbaffle/src/**'
+      - 'pkttap/benches/**'
+      - 'pkttap/src/**'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  workflow_dispatch:
+
+concurrency:
+  group: bench
+  cancel-in-progress: false  # never interrupt an in-flight bench run
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to push results to gh-pages
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      # Run all three benchmark targets in sequence, capturing combined output.
+      # `tee -a` appends so a single file feeds the store step below.
+      - name: Run compiler benchmarks
+        run: cargo bench -p pktbaffle --bench compiler 2>&1 | tee output.txt
+
+      - name: Run VM benchmarks
+        run: cargo bench -p pktbaffle --bench vm --features vm 2>&1 | tee -a output.txt
+
+      - name: Run capture benchmarks
+        run: cargo bench -p pkttap --bench capture 2>&1 | tee -a output.txt
+
+      # Parse Criterion stdout, append to the historical dataset in gh-pages,
+      # and rebuild the chart page.  On PRs the action posts a regression comment
+      # instead of pushing (auto-push only fires on the default branch).
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name != 'pull_request' }}
+          alert-threshold: '120%'
+          comment-on-alert: true
+          fail-on-alert: false
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
