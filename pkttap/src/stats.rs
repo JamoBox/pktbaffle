@@ -1,6 +1,6 @@
 /// Cumulative packet statistics from the kernel capture layer.
 ///
-/// Returned by [`Capture::stats`] for live captures. All counters are
+/// Returned by [`crate::Capture::stats`] for live captures. All counters are
 /// cumulative since the capture was opened. File-based captures always
 /// return a zeroed struct.
 ///
