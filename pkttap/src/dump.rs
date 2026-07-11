@@ -73,7 +73,11 @@ impl Dump {
                     timestamp: ts,
                     original_len: pkt.orig_len(),
                     data: Cow::Borrowed(pkt.data()),
-                    options: vec![],
+                    // Vec::new() is guaranteed not to heap-allocate; vec![] is
+                    // semantically identical in current Rust but less explicit.
+                    // This is in the per-packet hot path, so zero-allocation
+                    // behaviour must be preserved.
+                    options: Vec::new(),
                 }))
                 .map(|_| ())
                 .map_err(Error::Pcap),
@@ -137,7 +141,7 @@ impl DumpBuilder {
                 w.write_block(&Block::InterfaceDescription(InterfaceDescriptionBlock {
                     linktype: link_type_to_datalink(lt),
                     snaplen: 65535,
-                    options: vec![],
+                    options: Vec::new(),
                 }))
                 .map_err(Error::Pcap)?;
                 Inner::PcapNg(w)
