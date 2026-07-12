@@ -7,6 +7,10 @@ pub enum Error {
     Pcap(pcap_file::PcapError),
     Platform(String),
     PermissionDenied,
+    /// No packet is currently available. Returned by [`crate::Capture::next`]
+    /// when the capture was opened in non-blocking mode (via
+    /// [`crate::CaptureBuilder::nonblocking`]) and no data is ready.
+    WouldBlock,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -22,6 +26,7 @@ impl fmt::Display for Error {
                 f,
                 "permission denied — packet capture requires elevated privileges (root / CAP_NET_RAW)"
             ),
+            Error::WouldBlock => write!(f, "no packet available (non-blocking capture)"),
         }
     }
 }
