@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::packet::LinkType;
 use crate::packet::PacketRef;
 use crate::stats::CaptureStats;
+use crate::timestamp::TimestampMode;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -51,8 +52,9 @@ impl Live {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        timestamp_mode: TimestampMode,
     ) -> Result<Self> {
-        PlatformLive::open(iface, filter, snaplen, promiscuous).map(Live)
+        PlatformLive::open(iface, filter, snaplen, promiscuous, timestamp_mode).map(Live)
     }
 
     pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {

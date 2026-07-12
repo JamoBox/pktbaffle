@@ -3,23 +3,61 @@
 //! Uses a pre-allocated receive buffer to avoid per-packet heap allocation.
 //! The kernel applies the cBPF filter before copying, so only matching
 //! packets reach userspace.
+//!
+//! # Timestamps
+//!
+//! Two modes are supported, selected by [`TimestampMode`]:
+//!
+//! - **`Software`** (default): `SO_TIMESTAMPNS` is enabled on the socket.
+//!   The kernel records a `timespec` at the moment the packet enters the
+//!   receive queue — accurate to ≈1 μs and far more reliable than calling
+//!   `SystemTime::now()` after `recvfrom()` returns. The timestamp is
+//!   delivered as `SCM_TIMESTAMPNS` ancillary data via `recvmsg()`.
+//!
+//! - **`Hardware`**: `SO_TIMESTAMPING` is enabled with hardware + software
+//!   fallback flags. The kernel delivers `SCM_TIMESTAMPING` ancillary data
+//!   containing three `timespec` values; we use the raw hardware field
+//!   (`scm_timestamping[2]`) when non-zero, otherwise fall back to the
+//!   software field (`scm_timestamping[0]`). NICs that do not support
+//!   hardware timestamping report a zero `timespec` for the hardware field;
+//!   check `ethtool -T <iface>` to see what your NIC supports.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, PacketRef};
 use crate::stats::CaptureStats;
+use crate::timestamp::TimestampMode;
 
 // Linux socket constants not always exposed by std
 const AF_PACKET: libc::c_int = 17;
 const ETH_P_ALL: u16 = 0x0003;
 const SOL_SOCKET: libc::c_int = 1;
 const SO_ATTACH_FILTER: libc::c_int = 26;
+/// `SO_TIMESTAMPNS` — delivers a `timespec` via `SCM_TIMESTAMPNS` ancillary data.
+const SO_TIMESTAMPNS: libc::c_int = 35;
+/// `SO_TIMESTAMPING` — delivers an `scm_timestamping` struct (3× `timespec`) via
+/// `SCM_TIMESTAMPING` ancillary data.
+const SO_TIMESTAMPING: libc::c_int = 37;
 const SOL_PACKET: libc::c_int = 263;
 #[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
 const PACKET_VERSION: libc::c_int = 10;
 const PACKET_STATISTICS: libc::c_int = 6;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+
+// SO_TIMESTAMPING flags (linux/net_tstamp.h)
+/// Request hardware Rx timestamp from the NIC.
+const SOF_TIMESTAMPING_RX_HARDWARE: u32 = 1 << 2;
+/// Also request a software Rx timestamp (used as fallback).
+const SOF_TIMESTAMPING_RX_SOFTWARE: u32 = 1 << 3;
+/// Report the software timestamp in scm_timestamping[0].
+const SOF_TIMESTAMPING_SOFTWARE: u32 = 1 << 4;
+/// Report the raw (unmodified) hardware timestamp in scm_timestamping[2].
+const SOF_TIMESTAMPING_RAW_HARDWARE: u32 = 1 << 6;
+
+// SCM types returned in ancillary data (same numeric values as the SO_ options)
+const SCM_TIMESTAMPNS: libc::c_int = SO_TIMESTAMPNS;
+const SCM_TIMESTAMPING: libc::c_int = SO_TIMESTAMPING;
 
 /// Kernel counter struct returned by getsockopt(SOL_PACKET, PACKET_STATISTICS).
 /// Reading this resets the kernel counters to zero, so LinuxLive accumulates
@@ -58,11 +96,26 @@ struct SockFprog {
     filter: *const pktbaffle::bpf::Insn,
 }
 
+/// `scm_timestamping` as returned in `SCM_TIMESTAMPING` ancillary data.
+/// Contains three `timespec` values (software, deprecated hw-transformed, raw hw).
+#[repr(C)]
+struct ScmTimestamping {
+    /// Software timestamp (kernel receive queue).
+    ts_sw: libc::timespec,
+    /// Deprecated hardware-transformed timestamp — do not use.
+    ts_hw_deprecated: libc::timespec,
+    /// Raw hardware timestamp from the NIC (zero if unsupported).
+    ts_hw_raw: libc::timespec,
+}
+
 pub struct LinuxLive {
     fd: OwnedFd,
     buf: Vec<u8>,
+    /// Ancillary data buffer for `recvmsg()`.
+    cmsg_buf: Vec<u8>,
     snaplen: usize,
     link_type: LinkType,
+    timestamp_mode: TimestampMode,
     /// Accumulated totals across PACKET_STATISTICS reads (kernel resets on each read).
     recv_acc: u64,
     drop_acc: u64,
@@ -74,6 +127,7 @@ impl LinuxLive {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        timestamp_mode: TimestampMode,
     ) -> Result<Self> {
         let snaplen = snaplen as usize;
 
@@ -103,6 +157,50 @@ impl LinuxLive {
             };
             if rc < 0 {
                 return Err(super::io_err());
+            }
+        }
+
+        // Enable kernel timestamping based on requested mode.
+        // This must be done before bind() so that the first received packets
+        // already carry timestamps.
+        match timestamp_mode {
+            TimestampMode::Software => {
+                // SO_TIMESTAMPNS: kernel stores a timespec in SCM_TIMESTAMPNS cmsg.
+                let one: libc::c_int = 1;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        fd.as_raw_fd(),
+                        SOL_SOCKET,
+                        SO_TIMESTAMPNS,
+                        &one as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if rc < 0 {
+                    return Err(super::io_err());
+                }
+            }
+            TimestampMode::Hardware => {
+                // SO_TIMESTAMPING with hardware + software fallback flags.
+                // SOF_TIMESTAMPING_RX_SOFTWARE / SOF_TIMESTAMPING_SOFTWARE ensure
+                // scm_timestamping[0] is always populated even when the NIC does
+                // not support hardware timestamping, giving us a reliable fallback.
+                let flags: u32 = SOF_TIMESTAMPING_RX_HARDWARE
+                    | SOF_TIMESTAMPING_RAW_HARDWARE
+                    | SOF_TIMESTAMPING_RX_SOFTWARE
+                    | SOF_TIMESTAMPING_SOFTWARE;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        fd.as_raw_fd(),
+                        SOL_SOCKET,
+                        SO_TIMESTAMPING,
+                        &flags as *const _ as *const libc::c_void,
+                        std::mem::size_of::<u32>() as libc::socklen_t,
+                    )
+                };
+                if rc < 0 {
+                    return Err(super::io_err());
+                }
             }
         }
 
@@ -149,11 +247,21 @@ impl LinuxLive {
 
         let link_type = query_link_type(iface).unwrap_or(LinkType::Ethernet);
 
+        // Size the ancillary data buffer to accommodate the largest cmsg we may
+        // receive. SCM_TIMESTAMPING carries ScmTimestamping (3 × timespec = 24 bytes);
+        // the CMSG_SPACE macro rounds up to alignment. We size for that plus a
+        // comfortable margin for any extra cmsgs the kernel might include.
+        let cmsg_space = unsafe {
+            libc::CMSG_SPACE(std::mem::size_of::<ScmTimestamping>() as libc::c_uint) as usize
+        };
+
         Ok(Self {
             fd,
             buf: vec![0u8; snaplen.max(65535)],
+            cmsg_buf: vec![0u8; cmsg_space.max(256)],
             snaplen,
             link_type,
+            timestamp_mode,
             recv_acc: 0,
             drop_acc: 0,
         })
@@ -193,21 +301,27 @@ impl LinuxLive {
     }
 
     /// Block until the next packet arrives and return it.
+    ///
+    /// Uses `recvmsg()` to receive both packet data and ancillary timestamp
+    /// data in a single syscall.
     pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
         loop {
             let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-            let mut src_len = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
 
-            let n = unsafe {
-                libc::recvfrom(
-                    self.fd.as_raw_fd(),
-                    self.buf.as_mut_ptr() as *mut libc::c_void,
-                    self.buf.len(),
-                    0,
-                    &mut src as *mut libc::sockaddr_ll as *mut libc::sockaddr,
-                    &mut src_len,
-                )
+            let mut iov = libc::iovec {
+                iov_base: self.buf.as_mut_ptr() as *mut libc::c_void,
+                iov_len: self.buf.len(),
             };
+
+            let mut mhdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            mhdr.msg_name = &mut src as *mut libc::sockaddr_ll as *mut libc::c_void;
+            mhdr.msg_namelen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+            mhdr.msg_iov = &mut iov;
+            mhdr.msg_iovlen = 1;
+            mhdr.msg_control = self.cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            mhdr.msg_controllen = self.cmsg_buf.len();
+
+            let n = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &mut mhdr, 0) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted {
@@ -219,27 +333,84 @@ impl LinuxLive {
             let orig_len = n as u32;
             let n = n.min(self.snaplen);
 
-            // Timestamp from the socket (best effort via SO_TIMESTAMP would
-            // be more accurate, but CLOCK_REALTIME is simpler for now)
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
+            // Extract timestamp from ancillary data.
+            let (ts_sec, ts_nsec) = extract_timestamp(&mhdr, self.timestamp_mode);
 
             // Zero-copy: borrow the receive buffer rather than allocating. The
             // EINTR `continue` path above never creates this borrow, so the
             // slice is born only on the return path — keeping the lending
             // iterator in safe Rust. A TPACKET_V3 mmap ring (which would also
-            // eliminate the per-packet recvfrom syscall) is deferred; see
+            // eliminate the per-packet recvmsg syscall) is deferred; see
             // ADR 0002 and the dedicated ring-buffer issue.
             return Ok(PacketRef::new(
                 &self.buf[..n],
-                now.as_secs(),
-                now.subsec_nanos(),
+                ts_sec,
+                ts_nsec,
                 orig_len,
                 self.link_type,
             ));
         }
     }
+}
+
+/// Extract a (seconds, nanoseconds) timestamp from `recvmsg()` ancillary data.
+///
+/// For `TimestampMode::Software`, we look for `SCM_TIMESTAMPNS` which contains
+/// a single `timespec`. For `TimestampMode::Hardware`, we look for
+/// `SCM_TIMESTAMPING` which contains `ScmTimestamping` (3× `timespec`); we
+/// prefer the raw hardware field and fall back to the software field.
+///
+/// If no recognised cmsg is found (e.g. the kernel is very old), we fall back
+/// to `SystemTime::now()` as a last resort — this matches the pre-#88 behaviour
+/// and is safe even on paths that should never reach it.
+fn extract_timestamp(mhdr: &libc::msghdr, mode: TimestampMode) -> (u64, u32) {
+    // SAFETY: we only read cmsg headers within the buffer we provided and that
+    // the kernel has filled; all pointer arithmetic uses the CMSG_* macros.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(mhdr);
+        while !cmsg.is_null() {
+            let level = (*cmsg).cmsg_level;
+            let ty = (*cmsg).cmsg_type;
+
+            if level == SOL_SOCKET {
+                match mode {
+                    TimestampMode::Software if ty == SCM_TIMESTAMPNS => {
+                        // SCM_TIMESTAMPNS delivers a single timespec.
+                        let data = libc::CMSG_DATA(cmsg) as *const libc::timespec;
+                        let ts = std::ptr::read_unaligned(data);
+                        return timespec_to_pair(ts);
+                    }
+                    TimestampMode::Hardware if ty == SCM_TIMESTAMPING => {
+                        // SCM_TIMESTAMPING delivers ScmTimestamping (3 × timespec).
+                        let data = libc::CMSG_DATA(cmsg) as *const ScmTimestamping;
+                        let scts = std::ptr::read_unaligned(data);
+                        // Prefer raw hardware timestamp; fall back to software.
+                        let ts = if scts.ts_hw_raw.tv_sec != 0 || scts.ts_hw_raw.tv_nsec != 0 {
+                            scts.ts_hw_raw
+                        } else {
+                            scts.ts_sw
+                        };
+                        return timespec_to_pair(ts);
+                    }
+                    _ => {}
+                }
+            }
+
+            cmsg = libc::CMSG_NXTHDR(mhdr, cmsg);
+        }
+    }
+
+    // Fallback: no matching cmsg found. This should not happen when the socket
+    // option was set successfully, but guard against it defensively.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (now.as_secs(), now.subsec_nanos())
+}
+
+/// Convert a `libc::timespec` to `(seconds, nanoseconds)`.
+fn timespec_to_pair(ts: libc::timespec) -> (u64, u32) {
+    (ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
 fn iface_index(fd: libc::c_int, name: &str) -> Result<libc::c_int> {
@@ -283,6 +454,8 @@ pub fn default_interface() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // These tests verify that the libc symbols required by the live capture
     // implementation are present. They act as compile-time guards: `ifreq` was
     // only added in libc 0.2.137, so any floor below that fails to compile here,
@@ -310,5 +483,30 @@ mod tests {
         // IFNAMSIZ has been 16 on Linux since the kernel was first written;
         // any value in [8, 64] is acceptable for our length check.
         assert!(libc::IFNAMSIZ >= 8 && libc::IFNAMSIZ <= 64);
+    }
+
+    #[test]
+    fn so_timestamping_flags_have_expected_values() {
+        // These constants are ABI — they must match linux/net_tstamp.h exactly.
+        assert_eq!(SOF_TIMESTAMPING_RX_HARDWARE, 1 << 2);
+        assert_eq!(SOF_TIMESTAMPING_RX_SOFTWARE, 1 << 3);
+        assert_eq!(SOF_TIMESTAMPING_SOFTWARE, 1 << 4);
+        assert_eq!(SOF_TIMESTAMPING_RAW_HARDWARE, 1 << 6);
+    }
+
+    #[test]
+    fn timestamp_mode_default_is_software() {
+        assert_eq!(TimestampMode::default(), TimestampMode::Software);
+    }
+
+    #[test]
+    fn timespec_to_pair_converts_correctly() {
+        let ts = libc::timespec {
+            tv_sec: 1_700_000_000,
+            tv_nsec: 123_456_789,
+        };
+        let (sec, ns) = timespec_to_pair(ts);
+        assert_eq!(sec, 1_700_000_000u64);
+        assert_eq!(ns, 123_456_789u32);
     }
 }

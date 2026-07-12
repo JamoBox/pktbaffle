@@ -11,6 +11,7 @@ use crate::file::FileCapture;
 use crate::live::{self, Live};
 use crate::packet::PacketRef;
 use crate::stats::CaptureStats;
+use crate::timestamp::TimestampMode;
 
 // ── Filter specification ──────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ pub struct CaptureBuilder {
     snaplen: u32,
     promiscuous: bool,
     buffer_timeout: Duration,
+    timestamp_mode: TimestampMode,
 }
 
 impl CaptureBuilder {
@@ -45,6 +47,7 @@ impl CaptureBuilder {
             snaplen: 65535,
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
+            timestamp_mode: TimestampMode::default(),
         }
     }
 
@@ -55,6 +58,7 @@ impl CaptureBuilder {
             snaplen: 65535,
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
+            timestamp_mode: TimestampMode::default(),
         }
     }
 
@@ -107,6 +111,15 @@ impl CaptureBuilder {
         self
     }
 
+    /// Set the timestamp source for live capture (default: [`TimestampMode::Software`]).
+    ///
+    /// See [`TimestampMode`] for platform support details. Ignored for file
+    /// captures, which always use the timestamp embedded in the pcap/pcapng record.
+    pub fn timestamp_mode(mut self, mode: TimestampMode) -> Self {
+        self.timestamp_mode = mode;
+        self
+    }
+
     /// Open the capture source.
     pub fn open(self) -> Result<Capture> {
         match self.source {
@@ -115,7 +128,13 @@ impl CaptureBuilder {
                 // so that field offsets in the BPF program match the captured frames.
                 let link_type = live::query_link_type(&iface)?;
                 let prog = compile_filter(self.filter, link_type)?;
-                let live = Live::open(&iface, prog.as_ref(), self.snaplen, self.promiscuous)?;
+                let live = Live::open(
+                    &iface,
+                    prog.as_ref(),
+                    self.snaplen,
+                    self.promiscuous,
+                    self.timestamp_mode,
+                )?;
                 Ok(Capture {
                     inner: Inner::Live(live),
                 })
