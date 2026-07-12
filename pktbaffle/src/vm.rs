@@ -28,126 +28,112 @@ fn inner(insns: &[Insn], pkt: &[u8]) -> Option<bool> {
         let insn = *insns.get(pc)?;
         pc += 1;
 
-        let class = insn.code & 0x07;
-
-        if class == BPF_LD {
-            let size = insn.code & 0x18;
-            let mode = insn.code & 0xe0;
-            if mode == BPF_ABS {
-                a = sized_load(pkt, insn.k, size)?;
-            } else if mode == BPF_IND {
-                a = sized_load(pkt, x.wrapping_add(insn.k), size)?;
-            } else if mode == BPF_LEN {
-                a = pkt_len;
-            } else if mode == BPF_IMM {
-                a = insn.k;
-            } else if mode == BPF_MEM {
-                a = scratch.get(insn.k as usize).copied().unwrap_or(0);
-            } else {
-                return None;
+        match insn.code & 0x07 {
+            BPF_LD => {
+                let mode = insn.code & 0xe0;
+                a = match mode {
+                    BPF_ABS => sized_load(pkt, insn.k, insn.code & 0x18)?,
+                    BPF_IND => sized_load(pkt, x.wrapping_add(insn.k), insn.code & 0x18)?,
+                    BPF_LEN => pkt_len,
+                    BPF_IMM => insn.k,
+                    BPF_MEM => *scratch.get(insn.k as usize)?,
+                    _ => return None,
+                };
             }
-        } else if class == BPF_LDX {
-            let size = insn.code & 0x18;
-            let mode = insn.code & 0xe0;
-            if size == BPF_B && mode == BPF_MSH {
-                x = 4 * (*pkt.get(insn.k as usize)? as u32 & 0xf);
-            } else if mode == BPF_IMM {
-                x = insn.k;
-            } else if mode == BPF_MEM {
-                x = scratch.get(insn.k as usize).copied().unwrap_or(0);
-            } else if mode == BPF_LEN {
-                x = pkt_len;
-            } else {
-                return None;
+            BPF_LDX => {
+                let size = insn.code & 0x18;
+                let mode = insn.code & 0xe0;
+                x = if size == BPF_B && mode == BPF_MSH {
+                    4 * (*pkt.get(insn.k as usize)? as u32 & 0xf)
+                } else {
+                    match mode {
+                        BPF_IMM => insn.k,
+                        BPF_MEM => *scratch.get(insn.k as usize)?,
+                        BPF_LEN => pkt_len,
+                        _ => return None,
+                    }
+                };
             }
-        } else if class == BPF_ST {
-            if let Some(slot) = scratch.get_mut(insn.k as usize) {
-                *slot = a;
+            BPF_ST => *scratch.get_mut(insn.k as usize)? = a,
+            BPF_STX => *scratch.get_mut(insn.k as usize)? = x,
+            BPF_ALU => {
+                let v = if uses_x(insn) { x } else { insn.k };
+                a = match insn.code & 0xf0 {
+                    BPF_ADD => a.wrapping_add(v),
+                    BPF_SUB => a.wrapping_sub(v),
+                    BPF_MUL => a.wrapping_mul(v),
+                    BPF_DIV => {
+                        if v == 0 {
+                            return None;
+                        }
+                        a / v
+                    }
+                    BPF_OR => a | v,
+                    BPF_AND => a & v,
+                    BPF_LSH => a << (v & 31),
+                    BPF_RSH => a >> (v & 31),
+                    BPF_NEG => a.wrapping_neg(),
+                    BPF_XOR => a ^ v,
+                    _ => return None,
+                };
             }
-        } else if class == BPF_STX {
-            if let Some(slot) = scratch.get_mut(insn.k as usize) {
-                *slot = x;
-            }
-        } else if class == BPF_ALU {
-            let op = insn.code & 0xf0;
-            let v = if insn.code & 0x08 == BPF_X { x } else { insn.k };
-            if op == BPF_ADD {
-                a = a.wrapping_add(v);
-            } else if op == BPF_SUB {
-                a = a.wrapping_sub(v);
-            } else if op == BPF_MUL {
-                a = a.wrapping_mul(v);
-            } else if op == BPF_DIV {
-                if v == 0 {
-                    return None;
+            BPF_JMP => {
+                let op = insn.code & 0xf0;
+                if op == BPF_JA {
+                    pc = pc.wrapping_add(insn.k as usize);
+                    continue;
                 }
-                a /= v;
-            } else if op == BPF_OR {
-                a |= v;
-            } else if op == BPF_AND {
-                a &= v;
-            } else if op == BPF_LSH {
-                a <<= v & 31;
-            } else if op == BPF_RSH {
-                a >>= v & 31;
-            } else if op == BPF_NEG {
-                a = a.wrapping_neg();
-            } else if op == BPF_XOR {
-                a ^= v;
-            } else {
-                return None;
+                let v = if uses_x(insn) { x } else { insn.k };
+                let taken = match op {
+                    BPF_JEQ => a == v,
+                    BPF_JGT => a > v,
+                    BPF_JGE => a >= v,
+                    BPF_JSET => (a & v) != 0,
+                    _ => return None,
+                };
+                pc += if taken {
+                    insn.jt as usize
+                } else {
+                    insn.jf as usize
+                };
             }
-        } else if class == BPF_JMP {
-            let op = insn.code & 0xf0;
-            if op == BPF_JA {
-                pc = pc.wrapping_add(insn.k as usize);
-                continue;
+            BPF_RET => {
+                let retval = if insn.code & 0x10 != 0 { a } else { insn.k };
+                return Some(retval != 0);
             }
-            let v = if insn.code & 0x08 == BPF_X { x } else { insn.k };
-            let taken = if op == BPF_JEQ {
-                a == v
-            } else if op == BPF_JGT {
-                a > v
-            } else if op == BPF_JGE {
-                a >= v
-            } else if op == BPF_JSET {
-                (a & v) != 0
-            } else {
-                return None;
-            };
-            pc += if taken {
-                insn.jt as usize
-            } else {
-                insn.jf as usize
-            };
-        } else if class == BPF_RET {
-            let retval = if insn.code & 0x10 != 0 { a } else { insn.k };
-            return Some(retval != 0);
-        } else if class == BPF_MISC {
-            if insn.code & 0x80 != 0 {
-                a = x; // TXA
-            } else {
-                x = a; // TAX
+            BPF_MISC => {
+                if insn.code & 0x80 != 0 {
+                    a = x; // TXA
+                } else {
+                    x = a; // TAX
+                }
             }
-        } else {
-            return None;
+            _ => return None,
         }
     }
+}
+
+/// Returns `true` if an ALU/JMP instruction's second operand is the `X`
+/// register rather than the immediate `k`.
+#[inline]
+fn uses_x(insn: Insn) -> bool {
+    insn.code & 0x08 == BPF_X
 }
 
 #[inline]
 fn sized_load(pkt: &[u8], off: u32, size: u16) -> Option<u32> {
     let off = off as usize;
-    if size == BPF_W {
-        let b = pkt.get(off..off + 4)?;
-        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    } else if size == BPF_H {
-        let b = pkt.get(off..off + 2)?;
-        Some(u16::from_be_bytes([b[0], b[1]]) as u32)
-    } else if size == BPF_B {
-        Some(*pkt.get(off)? as u32)
-    } else {
-        None
+    match size {
+        BPF_W => {
+            let b = pkt.get(off..off.checked_add(4)?)?;
+            Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        }
+        BPF_H => {
+            let b = pkt.get(off..off.checked_add(2)?)?;
+            Some(u16::from_be_bytes([b[0], b[1]]) as u32)
+        }
+        BPF_B => Some(*pkt.get(off)? as u32),
+        _ => None,
     }
 }
 
@@ -227,5 +213,37 @@ mod tests {
             Insn::ret_k(0),
         ];
         assert!(run(&insns, b"x"));
+    }
+
+    #[test]
+    fn out_of_range_scratch_load_drops() {
+        use crate::bpf::BPF_MEM;
+        // M[16] is out of range (SCRATCH == 16 valid slots: 0..=15).
+        let insns = vec![
+            Insn {
+                code: BPF_LD | BPF_MEM,
+                jt: 0,
+                jf: 0,
+                k: SCRATCH as u32,
+            },
+            Insn::ret_k(BPF_ACCEPT),
+        ];
+        assert!(!run(&insns, b"x"));
+    }
+
+    #[test]
+    fn out_of_range_scratch_store_drops() {
+        use crate::bpf::BPF_ST;
+        let insns = vec![
+            Insn::ld_imm(1),
+            Insn {
+                code: BPF_ST,
+                jt: 0,
+                jf: 0,
+                k: SCRATCH as u32,
+            },
+            Insn::ret_k(BPF_ACCEPT),
+        ];
+        assert!(!run(&insns, b"x"));
     }
 }

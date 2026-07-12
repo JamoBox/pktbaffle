@@ -73,6 +73,10 @@ impl Dump {
                     timestamp: ts,
                     original_len: pkt.orig_len(),
                     data: Cow::Borrowed(pkt.data()),
+                    // Vec::new() is guaranteed not to heap-allocate; vec![] is
+                    // semantically identical in current Rust but less explicit.
+                    // This is in the per-packet hot path, so zero-allocation
+                    // behaviour must be preserved.
                     options: Vec::new(),
                 }))
                 .map(|_| ())
