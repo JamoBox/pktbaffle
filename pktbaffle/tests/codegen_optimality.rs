@@ -1971,6 +1971,78 @@ fn ip6_proto_named_keywords() {
     }
 }
 
+/// Additional IP protocol keywords: `ip proto <gre|dccp|eigrp|ospf|l2tp|ipencap|egp|isis|ipcomp>`
+/// produces identical BPF to `ip proto <N>`.
+#[test]
+fn ip_proto_additional_keywords() {
+    for (named, numeric) in [
+        ("ip proto gre", "ip proto 47"),
+        ("ip proto ip6encap", "ip proto 41"),
+        ("ip proto dccp", "ip proto 33"),
+        ("ip proto eigrp", "ip proto 88"),
+        ("ip proto ospf", "ip proto 89"),
+        ("ip proto l2tp", "ip proto 115"),
+        ("ip proto ipencap", "ip proto 4"),
+        ("ip proto egp", "ip proto 8"),
+        ("ip proto isis", "ip proto 124"),
+        ("ip proto ipcomp", "ip proto 108"),
+    ] {
+        assert_eq!(
+            cbpf(named),
+            cbpf(numeric),
+            "'{named}' should produce identical BPF to '{numeric}'"
+        );
+    }
+}
+
+/// Additional IP protocol keywords after `ip6 proto`: `ip6 proto <gre|dccp|eigrp|ospf|l2tp|ipencap|egp|isis|ipcomp>`
+/// produces identical BPF to `ip6 proto <N>`.
+#[test]
+fn ip6_proto_additional_keywords() {
+    for (named, numeric) in [
+        ("ip6 proto gre", "ip6 proto 47"),
+        ("ip6 proto ip6encap", "ip6 proto 41"),
+        ("ip6 proto dccp", "ip6 proto 33"),
+        ("ip6 proto eigrp", "ip6 proto 88"),
+        ("ip6 proto ospf", "ip6 proto 89"),
+        ("ip6 proto l2tp", "ip6 proto 115"),
+        ("ip6 proto ipencap", "ip6 proto 4"),
+        ("ip6 proto egp", "ip6 proto 8"),
+        ("ip6 proto isis", "ip6 proto 124"),
+        ("ip6 proto ipcomp", "ip6 proto 108"),
+    ] {
+        assert_eq!(
+            cbpf(named),
+            cbpf(numeric),
+            "'{named}' should produce identical BPF to '{numeric}'"
+        );
+    }
+}
+
+/// Bare protocol keywords (without `ip proto`): `<gre|dccp|eigrp|ospf|l2tp|ipencap|egp|isis|ipcomp>`
+/// produce identical BPF to `ip proto <N>`.
+#[test]
+fn bare_protocol_keywords_additional() {
+    for (bare, equiv) in [
+        ("gre", "ip proto 47"),
+        ("ip6encap", "ip proto 41"),
+        ("dccp", "ip proto 33"),
+        ("eigrp", "ip proto 88"),
+        ("ospf", "ip proto 89"),
+        ("l2tp", "ip proto 115"),
+        ("ipencap", "ip proto 4"),
+        ("egp", "ip proto 8"),
+        ("isis", "ip proto 124"),
+        ("ipcomp", "ip proto 108"),
+    ] {
+        assert_eq!(
+            cbpf(bare),
+            cbpf(equiv),
+            "bare '{bare}' should produce identical BPF to '{equiv}'"
+        );
+    }
+}
+
 // ── §15j `src or dst` direction qualifier ───────────────────────────────────
 
 /// libpcap allows explicit `src or dst` direction qualifier.

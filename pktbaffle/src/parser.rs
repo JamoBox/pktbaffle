@@ -176,6 +176,16 @@ impl Parser<'_> {
                     | Token::Pim
                     | Token::Igrp
                     | Token::Vrrp
+                    | Token::Gre
+                    | Token::Ipv6Encap
+                    | Token::Dccp
+                    | Token::Eigrp
+                    | Token::Ospf
+                    | Token::L2tp
+                    | Token::Ipencap
+                    | Token::Egp
+                    | Token::Isis
+                    | Token::Ipcomp
                     | Token::Vlan
                     | Token::Mpls
                     | Token::Pppoed
@@ -382,6 +392,46 @@ impl Parser<'_> {
             Some(Token::Vrrp) => {
                 self.advance();
                 Ok(Primitive::Proto(Proto::Num(112)))
+            }
+            Some(Token::Gre) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(47)))
+            }
+            Some(Token::Ipv6Encap) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(41)))
+            }
+            Some(Token::Dccp) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(33)))
+            }
+            Some(Token::Eigrp) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(88)))
+            }
+            Some(Token::Ospf) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(89)))
+            }
+            Some(Token::L2tp) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(115)))
+            }
+            Some(Token::Ipencap) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(4)))
+            }
+            Some(Token::Egp) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(8)))
+            }
+            Some(Token::Isis) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(124)))
+            }
+            Some(Token::Ipcomp) => {
+                self.advance();
+                Ok(Primitive::Proto(Proto::Num(108)))
             }
 
             // ── encapsulation primitives ─────────────────────────────────────
@@ -947,6 +997,46 @@ impl Parser<'_> {
             Some(Token::Vrrp) => {
                 self.advance();
                 112
+            }
+            Some(Token::Gre) => {
+                self.advance();
+                47
+            }
+            Some(Token::Ipv6Encap) => {
+                self.advance();
+                41
+            }
+            Some(Token::Dccp) => {
+                self.advance();
+                33
+            }
+            Some(Token::Eigrp) => {
+                self.advance();
+                88
+            }
+            Some(Token::Ospf) => {
+                self.advance();
+                89
+            }
+            Some(Token::L2tp) => {
+                self.advance();
+                115
+            }
+            Some(Token::Ipencap) => {
+                self.advance();
+                4
+            }
+            Some(Token::Egp) => {
+                self.advance();
+                8
+            }
+            Some(Token::Isis) => {
+                self.advance();
+                124
+            }
+            Some(Token::Ipcomp) => {
+                self.advance();
+                108
             }
             _ => {
                 let n = self.parse_u32()?;

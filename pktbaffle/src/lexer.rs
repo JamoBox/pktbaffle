@@ -43,11 +43,21 @@ pub enum Token {
     Proto,
 
     // ── additional IP protocol keywords ─────────────────────────────────────
-    Ah,   // Authentication Header (proto 51)
-    Esp,  // Encapsulating Security Payload (proto 50)
-    Pim,  // Protocol Independent Multicast (proto 103)
-    Igrp, // IGRP (proto 9)
-    Vrrp, // VRRP (proto 112)
+    Ah,      // Authentication Header (proto 51)
+    Esp,     // Encapsulating Security Payload (proto 50)
+    Pim,     // Protocol Independent Multicast (proto 103)
+    Igrp,    // IGRP (proto 9)
+    Vrrp,    // VRRP (proto 112)
+    Gre,      // Generic Routing Encapsulation (proto 47)
+    Ipv6Encap, // IPv6 Encapsulation (proto 41)
+    Dccp,     // Datagram Congestion Control Protocol (proto 33)
+    Eigrp,   // Enhanced IGRP (proto 88)
+    Ospf,    // Open Shortest Path First (proto 89)
+    L2tp,    // Layer 2 Tunneling Protocol (proto 115)
+    Ipencap, // IP Encapsulation (proto 4)
+    Egp,     // Exterior Gateway Protocol (proto 8)
+    Isis,    // IS-IS over IPv4 (proto 124)
+    Ipcomp,  // IP Payload Compression Protocol (proto 108)
 
     // ── protocol chain traversal ─────────────────────────────────────────────
     Protochain,
@@ -616,6 +626,16 @@ fn keyword_or_ident(s: &str) -> Token {
         "pim" => Token::Pim,
         "igrp" => Token::Igrp,
         "vrrp" => Token::Vrrp,
+        "gre" => Token::Gre,
+        "ip6encap" => Token::Ipv6Encap,
+        "dccp" => Token::Dccp,
+        "eigrp" => Token::Eigrp,
+        "ospf" => Token::Ospf,
+        "l2tp" => Token::L2tp,
+        "ipencap" => Token::Ipencap,
+        "egp" => Token::Egp,
+        "isis" => Token::Isis,
+        "ipcomp" => Token::Ipcomp,
         // Encapsulation
         "vlan" => Token::Vlan,
         "mpls" => Token::Mpls,
