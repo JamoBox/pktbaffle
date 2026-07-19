@@ -36,12 +36,14 @@ mod file;
 mod live;
 mod packet;
 mod stats;
+mod timestamp;
 
 pub use capture::{Capture, CaptureBuilder};
 pub use dump::{Dump, DumpBuilder};
 pub use error::{Error, Result};
 pub use packet::{LinkType, Packet, PacketRef};
 pub use stats::CaptureStats;
+pub use timestamp::TimestampMode;
 
 /// List available network interfaces by name.
 pub fn interfaces() -> Result<Vec<String>> {

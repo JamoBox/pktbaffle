@@ -8,6 +8,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`TimestampMode` enum** — controls the kernel timestamp source for live
+  captures ([#94]). Two variants:
+  - `Software` (default): `SO_TIMESTAMPNS` — kernel assigns a nanosecond
+    timestamp at the socket receive queue. Replaces the previous
+    `SystemTime::now()` call (see [#88]) with a value that reflects when the
+    packet actually arrived rather than when userspace was scheduled.
+  - `Hardware`: `SO_TIMESTAMPING` — requests a raw NIC hardware timestamp
+    (Linux only). pkttap uses the raw hardware field from `scm_timestamping[2]`
+    when non-zero and automatically falls back to the software field
+    (`scm_timestamping[0]`) when the NIC driver does not support hardware
+    timestamping. macOS and Windows silently use their platform-default
+    timestamps.
+
+  ```rust
+  use pkttap::{Capture, TimestampMode};
+
+  // Default — kernel software timestamp (nanosecond, much better than SystemTime::now())
+  let mut cap = Capture::live("eth0").open()?;
+
+  // Hardware timestamp for latency-sensitive workloads (Linux + supported NIC)
+  let mut cap = Capture::live("eth0")
+      .timestamp_mode(TimestampMode::Hardware)
+      .open()?;
+  ```
+
+  Check NIC hardware timestamp support with `ethtool -T <iface>`.
+
+- **`CaptureBuilder::timestamp_mode()`** — builder method to set the
+  [`TimestampMode`] for a live capture ([#94]).
+
+### Fixed
+
+- **Linux: timestamps are now kernel-assigned, not userspace wall-clock**
+  ([#88]). Previously, Linux live capture used `SystemTime::now()` immediately
+  after `recvfrom()` returned, introducing 10–100 μs of jitter per packet under
+  load. The Linux backend now uses `recvmsg()` with `SO_TIMESTAMPNS` so the
+  timestamp reflects when the packet entered the kernel receive queue — matching
+  the accuracy of the macOS BPF and Windows Npcap paths.
+
+- **Linux: `recvfrom()` replaced by `recvmsg()`** — required to receive
+  ancillary timestamp data. The receive buffer is still reused across calls
+  (zero-copy, no per-packet allocation).
+
+[#88]: https://github.com/JamoBox/pktbaffle/issues/88
+[#94]: https://github.com/JamoBox/pktbaffle/issues/94
+
 - **`Capture::stats()`** — returns a [`CaptureStats`] struct with cumulative
   packet receive and drop counts from the kernel capture layer ([#87]).
   Non-zero `dropped` means the kernel silently discarded packets because its
@@ -40,6 +86,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ```
 
 [#87]: https://github.com/JamoBox/pktbaffle/issues/87
+
 
 ## [0.3.0] - 2026-06-17
 
