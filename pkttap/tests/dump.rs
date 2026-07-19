@@ -1,6 +1,8 @@
 mod common;
 
-use pkttap::{Dump, LinkType};
+use std::time::UNIX_EPOCH;
+
+use pkttap::{Dump, LinkType, Packet};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -183,6 +185,27 @@ fn dump_pcapng_multiple_packets_in_order() {
     for (g, f) in got.iter().zip(frames.iter()) {
         assert_eq!(g.data(), f.as_slice());
     }
+}
+
+// Exercises the Vec::new() hot path in write_packet() (pcapng mode) — previously
+// vec![] would heap-allocate on every call; Vec::new() is zero-cost until pushed.
+#[test]
+fn dump_pcapng_write_many_packets_vec_new_hot_path() {
+    let out = pcapng_tmp();
+    let mut dump = Dump::to_file(out.path())
+        .link_type(LinkType::Ethernet)
+        .open()
+        .unwrap();
+    let data = common::tcp_frame(80);
+    let orig_len = data.len() as u32;
+    for _ in 0..1000 {
+        let pkt = Packet::new(data.clone(), UNIX_EPOCH, orig_len, LinkType::Ethernet);
+        dump.write_packet(pkt.as_ref()).unwrap();
+    }
+    drop(dump);
+
+    let got = common::read_all(out.path());
+    assert_eq!(got.len(), 1000);
 }
 
 // ── flush / drop ──────────────────────────────────────────────────────────────
