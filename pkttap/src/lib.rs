@@ -32,6 +32,8 @@ mod capture;
 mod codec;
 mod dump;
 mod error;
+#[cfg(target_os = "linux")]
+mod fanout;
 mod file;
 mod live;
 mod packet;
@@ -40,6 +42,8 @@ mod stats;
 pub use capture::{Capture, CaptureBuilder};
 pub use dump::{Dump, DumpBuilder};
 pub use error::{Error, Result};
+#[cfg(target_os = "linux")]
+pub use fanout::{FanoutGroup, FanoutMode};
 pub use packet::{LinkType, Packet, PacketRef};
 pub use stats::CaptureStats;
 

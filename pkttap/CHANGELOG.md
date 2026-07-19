@@ -8,6 +8,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`FanoutGroup` / `FanoutMode`** (Linux only) — multi-consumer capture via
+  `PACKET_FANOUT` ([#91]). `Capture` is single-threaded, so distributing
+  packets across worker threads previously required a channel-based fan-out
+  layer on top. `FanoutGroup` instead opens several raw sockets joined to the
+  same kernel fanout group; the kernel splits the interface's traffic between
+  them directly, and each member `Capture` can be moved to its own thread.
+
+  ```rust
+  use pkttap::{FanoutGroup, FanoutMode};
+
+  let mut captures = FanoutGroup::new("eth0", FanoutMode::CpuAffinity)
+      .into_captures(4)?;
+  for mut cap in captures.drain(..) {
+      std::thread::spawn(move || {
+          while let Ok(Some(pkt)) = cap.next() {
+              // process pkt
+          }
+      });
+  }
+  ```
+
+### Fixed
+
+- **Linux live capture could abort with a misaligned-pointer panic on every
+  real packet.** `next_packet()` read `SO_TIMESTAMP` ancillary data out of a
+  plain `[u8; 128]` stack buffer, which only guarantees 1-byte alignment;
+  `cmsghdr` requires 8-byte alignment for its `size_t` length field. On stack
+  layouts that left the buffer misaligned, dereferencing the `CMSG_FIRSTHDR`
+  pointer was undefined behavior, and Rust's runtime alignment check aborted
+  the process. The buffer is now wrapped in an `#[repr(align(8))]` type so
+  the ancillary-data pointers are always valid to dereference.
+
 - **`Capture::stats()`** — returns a [`CaptureStats`] struct with cumulative
   packet receive and drop counts from the kernel capture layer ([#87]).
   Non-zero `dropped` means the kernel silently discarded packets because its
@@ -40,6 +72,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ```
 
 [#87]: https://github.com/JamoBox/pktbaffle/issues/87
+[#91]: https://github.com/JamoBox/pktbaffle/issues/91
 
 ## [0.3.0] - 2026-06-17
 

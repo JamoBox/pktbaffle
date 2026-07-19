@@ -179,6 +179,15 @@ impl Capture {
         CaptureBuilder::new_live(iface)
     }
 
+    /// Wrap an already-open [`Live`] source, e.g. one member socket of a
+    /// [`crate::FanoutGroup`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_live(live: Live) -> Self {
+        Self {
+            inner: Inner::Live(live),
+        }
+    }
+
     /// Begin building a file capture from a pcap or pcapng file.
     pub fn from_file(path: impl AsRef<Path>) -> CaptureBuilder {
         CaptureBuilder::new_file(path.as_ref().to_owned())
