@@ -36,6 +36,7 @@ pub struct CaptureBuilder {
     snaplen: u32,
     promiscuous: bool,
     buffer_timeout: Duration,
+    nonblocking: bool,
     timestamp_mode: TimestampMode,
 }
 
@@ -47,6 +48,7 @@ impl CaptureBuilder {
             snaplen: 65535,
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
+            nonblocking: false,
             timestamp_mode: TimestampMode::default(),
         }
     }
@@ -58,6 +60,7 @@ impl CaptureBuilder {
             snaplen: 65535,
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
+            nonblocking: false,
             timestamp_mode: TimestampMode::default(),
         }
     }
@@ -111,6 +114,24 @@ impl CaptureBuilder {
         self
     }
 
+    /// Enable non-blocking mode for live capture.
+    ///
+    /// When enabled, [`Capture::next`] returns `Ok(None)` immediately if no
+    /// packet is available, rather than blocking until one arrives. Use this
+    /// when integrating with an event loop or polling multiple sources.
+    ///
+    /// On Linux and macOS this sets `O_NONBLOCK` on the capture socket/fd via
+    /// `fcntl`. On Windows this option is not yet supported and
+    /// [`CaptureBuilder::open`] will return an error.
+    ///
+    /// Ignored for file-based captures (they never block).
+    ///
+    /// Defaults to `false` (blocking).
+    pub fn nonblocking(mut self, nb: bool) -> Self {
+        self.nonblocking = nb;
+        self
+    }
+
     /// Set the timestamp source for live capture (default: [`TimestampMode::Software`]).
     ///
     /// See [`TimestampMode`] for platform support details. Ignored for file
@@ -135,6 +156,9 @@ impl CaptureBuilder {
                     self.promiscuous,
                     self.timestamp_mode,
                 )?;
+                if self.nonblocking {
+                    live.set_nonblocking(true)?;
+                }
                 Ok(Capture {
                     inner: Inner::Live(live),
                 })
@@ -216,7 +240,9 @@ impl Capture {
     /// Return the next matching packet, blocking if necessary.
     ///
     /// Returns `Ok(None)` at end-of-file for file captures.
-    /// Live captures block indefinitely until a packet arrives.
+    /// In blocking mode (the default), live captures block until a packet arrives.
+    /// In non-blocking mode (enabled via [`CaptureBuilder::nonblocking`]),
+    /// returns `Ok(None)` immediately when no packet is available.
     ///
     /// The yielded [`PacketRef`] borrows from the capture's internal buffer and
     /// is only valid until the next call to `next`. Call
@@ -229,7 +255,7 @@ impl Capture {
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<PacketRef<'_>>> {
         match &mut self.inner {
-            Inner::Live(l) => l.next_packet().map(Some),
+            Inner::Live(l) => l.next_packet(),
             Inner::File(f) => f.next_packet(),
         }
     }

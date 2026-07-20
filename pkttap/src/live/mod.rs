@@ -57,7 +57,11 @@ impl Live {
         PlatformLive::open(iface, filter, snaplen, promiscuous, timestamp_mode).map(Live)
     }
 
-    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
+    pub fn set_nonblocking(&self, nb: bool) -> Result<()> {
+        self.0.set_nonblocking(nb)
+    }
+
+    pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
         self.0.next_packet()
     }
 

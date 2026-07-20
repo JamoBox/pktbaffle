@@ -391,8 +391,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
-                if candidate.contains("::") || candidate.chars().filter(|&c| c == ':').count() >= 2
-                {
+                if looks_like_ipv6(candidate) {
                     if let Ok(addr) = candidate.parse::<std::net::Ipv6Addr>() {
                         tokens.push(Spanned {
                             token: Token::Ipv6(addr),
@@ -466,7 +465,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             let word = &src[start..pos];
 
             // IPv6 contains "::" or 2+ colons.
-            if word.contains("::") || word.chars().filter(|&c| c == ':').count() >= 2 {
+            if looks_like_ipv6(word) {
                 if let Ok(addr) = word.parse::<std::net::Ipv6Addr>() {
                     tokens.push(Spanned {
                         token: Token::Ipv6(addr),
@@ -491,7 +490,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 }
             }
             // MAC: exactly five colons, all hex digits between them.
-            if word.chars().filter(|&c| c == ':').count() == 5 {
+            if looks_like_mac(word) {
                 if let Some(mac) = parse_mac(word) {
                     tokens.push(Spanned {
                         token: Token::Mac(mac),
@@ -515,6 +514,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
     }
 
     Ok(tokens)
+}
+
+fn looks_like_ipv6(s: &str) -> bool {
+    s.contains("::") || s.bytes().filter(|&b| b == b':').take(2).count() >= 2
+}
+
+fn looks_like_mac(s: &str) -> bool {
+    s.bytes().filter(|&b| b == b':').take(6).count() == 5
 }
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
@@ -543,13 +550,13 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
         }
     }
     // IPv6 (contains "::" or two or more colons)
-    if raw.contains("::") || raw.chars().filter(|&c| c == ':').count() >= 2 {
+    if looks_like_ipv6(raw) {
         if let Ok(addr) = raw.parse::<std::net::Ipv6Addr>() {
             return Ok(Token::Ipv6(addr));
         }
     }
     // MAC (five colons)
-    if raw.chars().filter(|&c| c == ':').count() == 5 {
+    if looks_like_mac(raw) {
         if let Some(mac) = parse_mac(raw) {
             return Ok(Token::Mac(mac));
         }
@@ -866,5 +873,28 @@ mod tests {
         // tcp[13]|0x02 = 0x02 must produce a Pipe token
         let tokens = lex("tcp[13]|0x02 = 0x02").unwrap();
         assert!(tokens.iter().any(|s| s.token == Token::Pipe));
+    }
+
+    // ── looks_like_ipv6 / looks_like_mac helpers (#97) ───────────────────────
+
+    #[test]
+    fn looks_like_ipv6_basic() {
+        assert!(looks_like_ipv6("2001:db8::1"));
+        assert!(looks_like_ipv6("::1"));
+        assert!(looks_like_ipv6("::"));
+        assert!(looks_like_ipv6("a:b:c"));
+        assert!(!looks_like_ipv6("a:b"));
+        assert!(!looks_like_ipv6("abc"));
+        assert!(!looks_like_ipv6(""));
+    }
+
+    #[test]
+    fn looks_like_mac_basic() {
+        assert!(looks_like_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(looks_like_mac("00:00:00:00:00:00"));
+        assert!(!looks_like_mac("aa:bb:cc:dd:ee")); // only 4 colons
+        assert!(!looks_like_mac("aa:bb:cc:dd:ee:ff:00")); // 6 colons
+        assert!(!looks_like_mac(""));
+        assert!(!looks_like_mac("no colons here"));
     }
 }

@@ -186,7 +186,33 @@ impl MacosLive {
         })
     }
 
-    pub fn next_packet(&mut self) -> Result<PacketRef<'_>> {
+    /// Set or clear `O_NONBLOCK` on the BPF device fd via `fcntl`.
+    ///
+    /// When non-blocking mode is active, [`Self::next_packet`] returns
+    /// `Ok(None)` immediately if no data is ready, rather than blocking.
+    pub fn set_nonblocking(&self, nb: bool) -> Result<()> {
+        let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(super::io_err());
+        }
+        let new_flags = if nb {
+            flags | libc::O_NONBLOCK
+        } else {
+            flags & !libc::O_NONBLOCK
+        };
+        let rc = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, new_flags) };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+        Ok(())
+    }
+
+    /// Return the next packet, blocking unless `O_NONBLOCK` was set via
+    /// [`Self::set_nonblocking`].
+    ///
+    /// Returns `Ok(None)` when non-blocking mode is active and no data is
+    /// ready (EAGAIN / EWOULDBLOCK).
+    pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
         let link_type = self.link_type;
         loop {
             // If there's data remaining in the buffer, parse the next BPF frame.
@@ -196,13 +222,13 @@ impl MacosLive {
             // iterator in safe Rust (see ADR 0002).
             if self.buf_pos < self.buf_filled {
                 if let Some(meta) = self.parse_next_frame() {
-                    return Ok(PacketRef::new(
+                    return Ok(Some(PacketRef::new(
                         &self.buf[meta.start..meta.end],
                         meta.ts_sec,
                         meta.ts_nsec,
                         meta.orig_len,
                         link_type,
-                    ));
+                    )));
                 }
             }
 
@@ -218,6 +244,9 @@ impl MacosLive {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted {
                     continue;
+                }
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    return Ok(None);
                 }
                 return Err(e.into());
             }
