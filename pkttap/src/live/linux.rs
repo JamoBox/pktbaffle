@@ -24,6 +24,7 @@ const SOL_PACKET: libc::c_int = 263;
 #[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
 const PACKET_VERSION: libc::c_int = 10;
 const PACKET_STATISTICS: libc::c_int = 6;
+const PACKET_FANOUT: libc::c_int = 18;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
 
 /// Kernel counter struct returned by getsockopt(SOL_PACKET, PACKET_STATISTICS).
@@ -62,6 +63,12 @@ struct SockFprog {
     len: u16,
     filter: *const pktbaffle::bpf::Insn,
 }
+
+/// A `recvmsg` ancillary-data buffer aligned to `cmsghdr`'s requirements
+/// (8 bytes on 64-bit Linux, for its `size_t` length field). See the comment
+/// at its use site in `next_packet` for why a plain `[u8; N]` is unsound here.
+#[repr(align(8))]
+struct CmsgBuf([u8; 128]);
 
 pub struct LinuxLive {
     fd: OwnedFd,
@@ -182,6 +189,41 @@ impl LinuxLive {
         })
     }
 
+    /// Open a socket like [`Self::open`], then join a `PACKET_FANOUT` group so
+    /// the kernel distributes traffic between this socket and every other
+    /// member of the same `group_id`, according to `mode`.
+    ///
+    /// `mode` is a raw `PACKET_FANOUT_*` value (see `man 7 packet`); the
+    /// `pkttap::FanoutMode` enum maps to these. All members of a group must
+    /// join with the same mode — the kernel rejects a mismatched join with
+    /// `EINVAL`.
+    pub fn open_fanout(
+        iface: &str,
+        filter: Option<&pktbaffle::bpf::Program>,
+        snaplen: u32,
+        promiscuous: bool,
+        group_id: u16,
+        mode: u16,
+    ) -> Result<Self> {
+        let live = Self::open(iface, filter, snaplen, promiscuous)?;
+
+        // Low 16 bits: group id: high 16 bits: mode (+ optional flags).
+        let fanout_arg: libc::c_int = (group_id as libc::c_int) | ((mode as libc::c_int) << 16);
+        let rc = unsafe {
+            libc::setsockopt(
+                live.fd.as_raw_fd(),
+                SOL_PACKET,
+                PACKET_FANOUT,
+                &fanout_arg as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+        Ok(live)
+    }
+
     pub fn link_type(&self) -> LinkType {
         self.link_type
     }
@@ -256,15 +298,23 @@ impl LinuxLive {
                 iov_len: self.buf.len(),
             };
             // 128 bytes is always enough for a single cmsghdr + timeval.
-            let mut cmsg_buf = [0u8; 128];
+            // `cmsghdr` requires 8-byte alignment (it holds a `size_t`
+            // length field); a plain `[u8; 128]` only guarantees 1-byte
+            // alignment; and CMSG_FIRSTHDR/CMSG_DATA hand back pointers into
+            // this buffer without re-aligning them. On an unlucky stack
+            // layout that produced a misaligned `cmsghdr` read here, which
+            // is undefined behavior and aborts under Rust's runtime
+            // alignment checks. `CmsgBuf` forces 8-byte alignment so the
+            // pointers CMSG_* returns are always valid to dereference.
+            let mut cmsg_buf = CmsgBuf([0u8; 128]);
             let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
             let mut mhdr = libc::msghdr {
                 msg_name: &mut src as *mut libc::sockaddr_ll as *mut libc::c_void,
                 msg_namelen: std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
                 msg_iov: &mut iov,
                 msg_iovlen: 1,
-                msg_control: cmsg_buf.as_mut_ptr() as *mut libc::c_void,
-                msg_controllen: cmsg_buf.len(),
+                msg_control: cmsg_buf.0.as_mut_ptr() as *mut libc::c_void,
+                msg_controllen: cmsg_buf.0.len(),
                 msg_flags: 0,
             };
 
@@ -415,6 +465,20 @@ mod tests {
     fn so_timestamp_constant_value() {
         assert_eq!(SO_TIMESTAMP, 29);
         assert_eq!(SCM_TIMESTAMP, 29);
+    }
+
+    /// `CmsgBuf` must satisfy `cmsghdr`'s alignment requirement, otherwise
+    /// `CMSG_FIRSTHDR`/`CMSG_DATA` hand back pointers that are unsound to
+    /// dereference (this previously crashed real captures under Rust's
+    /// runtime misaligned-pointer-dereference check; see next_packet).
+    #[test]
+    fn cmsg_buf_meets_cmsghdr_alignment() {
+        assert!(std::mem::align_of::<CmsgBuf>() >= std::mem::align_of::<libc::cmsghdr>());
+        let buf = CmsgBuf([0u8; 128]);
+        assert_eq!(
+            buf.0.as_ptr() as usize % std::mem::align_of::<libc::cmsghdr>(),
+            0
+        );
     }
 
     /// `extract_so_timestamp` must return `None` when `msg_controllen` is zero
