@@ -27,6 +27,16 @@
 //! }
 //! # Ok::<(), pkttap::Error>(())
 //! ```
+//!
+//! # Linux extras
+//!
+//! Two capture features exist only on Linux, and so are compiled in only
+//! there:
+//!
+//! - `CaptureBuilder::ring` captures through a `TPACKET_V3` mmap ring buffer,
+//!   so a packet costs neither a syscall nor a kernel→userspace copy.
+//! - `FanoutGroup` splits one interface's traffic across several `Capture`s —
+//!   one per worker thread — inside the kernel.
 
 mod capture;
 mod codec;
@@ -37,6 +47,8 @@ mod fanout;
 mod file;
 mod live;
 mod packet;
+#[cfg(target_os = "linux")]
+mod ring;
 mod stats;
 
 pub use capture::{Capture, CaptureBuilder};
@@ -45,6 +57,8 @@ pub use error::{Error, Result};
 #[cfg(target_os = "linux")]
 pub use fanout::{FanoutGroup, FanoutMode};
 pub use packet::{LinkType, Packet, PacketRef};
+#[cfg(target_os = "linux")]
+pub use ring::RingConfig;
 pub use stats::CaptureStats;
 
 /// List available network interfaces by name.

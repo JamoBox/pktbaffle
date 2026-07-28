@@ -8,6 +8,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`RingConfig` / `CaptureBuilder::ring`** (Linux only) — capture through a
+  `TPACKET_V3` mmap ring buffer instead of `recvmsg()` ([#90]). The default
+  Linux path costs a syscall and a kernel→userspace copy per packet; the ring
+  has the kernel write frames straight into memory shared with the process and
+  flip a per-block status word, so reading a packet costs neither. Capturing
+  2 000 packets on loopback issues 2 007 `recvmsg` calls on the default path
+  and zero receive syscalls through the ring.
+
+  ```rust
+  use pkttap::{Capture, RingConfig};
+
+  let mut cap = Capture::live("eth0")
+      .filter("tcp port 443")
+      .ring(RingConfig::new())
+      .open()?;
+
+  while let Some(pkt) = cap.next()? {
+      // pkt borrows directly from the ring — nothing was copied.
+  }
+  ```
+
+  - Opt-in per capture: without `.ring()` the `recvmsg()` path is unchanged.
+  - Same filter, snaplen, `stats()`, blocking/non-blocking behaviour and
+    borrowed `PacketRef` as the default path; timestamps now come from the
+    frame header at nanosecond resolution.
+  - `RingConfig` tunes the geometry — `block_size` (default 256 KiB),
+    `block_count` (default 16, so a 4 MiB ring) and `retire_timeout`
+    (default 100 ms, bounding delivery latency on quiet links). Sizes are
+    rounded up where the kernel requires it.
+  - Requires Linux 3.2+. If the kernel does not support `TPACKET_V3`, or
+    cannot allocate the requested ring, `open()` returns an error naming the
+    reason rather than silently falling back.
+  - **`FanoutGroup::ring`** gives each member socket its own ring, so a worker
+    thread reads its share of a fanout group with no syscall and no copy.
+
+  See [ADR 0005](../pktbaffle/docs/adr/0005-tpacket-v3-ring.md) for the design
+  rationale.
+
 - **`FanoutGroup` / `FanoutMode`** (Linux only) — multi-consumer capture via
   `PACKET_FANOUT` ([#91]). `Capture` is single-threaded, so distributing
   packets across worker threads previously required a channel-based fan-out
@@ -72,6 +110,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ```
 
 [#87]: https://github.com/JamoBox/pktbaffle/issues/87
+[#90]: https://github.com/JamoBox/pktbaffle/issues/90
 [#91]: https://github.com/JamoBox/pktbaffle/issues/91
 
 ## [0.3.0] - 2026-06-17

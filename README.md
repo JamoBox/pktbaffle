@@ -30,7 +30,7 @@ See [pktbaffle/README.md](pktbaffle/README.md) for the full filter expression re
 
 ## pkttap
 
-Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows Npcap) and pcap/pcapng file I/O behind a unified API, using pktbaffle to compile filter expressions.
+Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows Npcap) and pcap/pcapng file I/O behind a unified API, using pktbaffle to compile filter expressions. Packets are yielded as borrowed views with no per-packet allocation; on Linux, `.ring(RingConfig::new())` opts into a `TPACKET_V3` mmap ring that drops the per-packet syscall and kernel copy as well.
 
 ```toml
 [dependencies]

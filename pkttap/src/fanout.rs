@@ -30,6 +30,7 @@
 use crate::capture::{compile_filter, Capture, FilterSpec};
 use crate::error::{Error, Result};
 use crate::live::{query_link_type, Live, PlatformLive};
+use crate::ring::RingConfig;
 
 /// Packet distribution strategy for a [`FanoutGroup`].
 ///
@@ -84,6 +85,7 @@ pub struct FanoutGroup {
     promiscuous: bool,
     mode: FanoutMode,
     group_id: u16,
+    ring: Option<RingConfig>,
 }
 
 impl FanoutGroup {
@@ -101,6 +103,7 @@ impl FanoutGroup {
             promiscuous: false,
             mode,
             group_id: default_group_id(),
+            ring: None,
         }
     }
 
@@ -133,6 +136,33 @@ impl FanoutGroup {
         self
     }
 
+    /// Give every member socket its own `TPACKET_V3` mmap ring instead of
+    /// reading with `recvmsg()` — see [`CaptureBuilder::ring`].
+    ///
+    /// This is the pairing the two features were designed for: the kernel
+    /// splits traffic across the group and writes each share straight into
+    /// that member's ring, so a worker thread reads its packets with no
+    /// syscall and no copy.
+    ///
+    /// Note that each member allocates a full ring, so the group's memory is
+    /// `block_size × block_count × n`.
+    ///
+    /// ```no_run
+    /// use pkttap::{FanoutGroup, FanoutMode, RingConfig};
+    ///
+    /// # fn run() -> pkttap::Result<()> {
+    /// let captures = FanoutGroup::new("eth0", FanoutMode::CpuAffinity)
+    ///     .ring(RingConfig::new())
+    ///     .into_captures(4)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// [`CaptureBuilder::ring`]: crate::CaptureBuilder::ring
+    pub fn ring(mut self, cfg: impl Into<Option<RingConfig>>) -> Self {
+        self.ring = cfg.into();
+        self
+    }
+
     /// Open `n` member captures joined to the same fanout group.
     ///
     /// Every member receives a disjoint subset of the interface's traffic,
@@ -157,6 +187,7 @@ impl FanoutGroup {
                 self.promiscuous,
                 self.group_id,
                 mode,
+                self.ring.as_ref(),
             )?;
             captures.push(Capture::from_live(Live(live)));
         }
