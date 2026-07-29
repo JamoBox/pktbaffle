@@ -13,9 +13,11 @@ unsuitable for high-throughput capture.
 As built, the borrowed buffer differs per backend:
 
 - **Linux** reuses the existing `recvfrom` receive buffer (`self.buf`). A
-  TPACKET_V3 mmap ring — which would additionally remove the per-packet
-  `recvfrom` syscall — is deferred to its own issue; this ADR supersedes the
-  original "TPACKET_V3 first" framing.
+  TPACKET_V3 mmap ring — which additionally removes the per-packet `recvfrom`
+  syscall and the kernel→userspace copy — has since been added as an opt-in
+  backend (`CaptureBuilder::ring`); see ADR 0005. This ADR supersedes the
+  original "TPACKET_V3 first" framing: the borrowed `PacketRef` came first and
+  the ring slotted in behind it, borrowing from the mapping instead.
 - **macOS** borrows the BPF batch read buffer, walking each `bpf_hdr` frame in
   place.
 - **Windows** borrows the buffer `pcap_next_ex` returns, which Npcap guarantees

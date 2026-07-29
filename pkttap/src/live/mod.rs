@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_ring;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -53,6 +55,19 @@ impl Live {
         promiscuous: bool,
     ) -> Result<Self> {
         PlatformLive::open(iface, filter, snaplen, promiscuous).map(Live)
+    }
+
+    /// Open a live capture reading from a `TPACKET_V3` mmap ring instead of
+    /// `recvmsg()` (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn open_ring(
+        iface: &str,
+        filter: Option<&pktbaffle::bpf::Program>,
+        snaplen: u32,
+        promiscuous: bool,
+        ring: &crate::ring::RingConfig,
+    ) -> Result<Self> {
+        PlatformLive::open_ring(iface, filter, snaplen, promiscuous, ring).map(Live)
     }
 
     pub fn set_nonblocking(&self, nb: bool) -> Result<()> {

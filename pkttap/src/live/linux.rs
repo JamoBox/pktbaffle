@@ -1,13 +1,22 @@
 //! Linux live capture via AF_PACKET raw socket + SO_ATTACH_FILTER.
 //!
-//! Uses a pre-allocated receive buffer to avoid per-packet heap allocation.
-//! The kernel applies the cBPF filter before copying, so only matching
-//! packets reach userspace.
+//! Two receive paths share this socket setup:
+//!
+//! - the default `recvmsg()` path, which copies each packet from the kernel
+//!   into a pre-allocated receive buffer (one syscall per packet), and
+//! - the opt-in `TPACKET_V3` mmap ring in [`super::linux_ring`], which has the
+//!   kernel write frames straight into shared memory (no syscall, no copy).
+//!
+//! Either way the kernel applies the cBPF filter before the packet is stored,
+//! so only matching packets reach userspace, and neither path allocates per
+//! packet.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
+use super::linux_ring::Ring;
 use crate::error::{Error, Result};
 use crate::packet::{LinkType, PacketRef};
+use crate::ring::RingConfig;
 use crate::stats::CaptureStats;
 
 // Linux socket constants not always exposed by std
@@ -20,9 +29,9 @@ const SO_TIMESTAMP: libc::c_int = 29;
 /// Linux (the definition is commented out in libc's source), so we define it
 /// ourselves.
 const SCM_TIMESTAMP: libc::c_int = 29;
-const SOL_PACKET: libc::c_int = 263;
-#[allow(dead_code)] // Reserved for future TPACKET_V3 ring-buffer support (ADR 0002).
-const PACKET_VERSION: libc::c_int = 10;
+pub(super) const SOL_PACKET: libc::c_int = 263;
+/// Selects the ring ABI version; the ring backend sets it to `TPACKET_V3`.
+pub(super) const PACKET_VERSION: libc::c_int = 10;
 const PACKET_STATISTICS: libc::c_int = 6;
 const PACKET_FANOUT: libc::c_int = 18;
 const SIOCGIFINDEX: libc::c_ulong = 0x8933;
@@ -70,9 +79,21 @@ struct SockFprog {
 #[repr(align(8))]
 struct CmsgBuf([u8; 128]);
 
+/// Where captured frames are read from.
+///
+/// Both variants own the memory a [`PacketRef`] borrows, so neither allocates
+/// per packet; they differ in how the frame gets there.
+enum Rx {
+    /// `recvmsg()` into a reusable heap buffer: one syscall and one
+    /// kernel→userspace copy per packet.
+    Recv { buf: Vec<u8> },
+    /// A `TPACKET_V3` mmap ring the kernel writes frames into directly.
+    Ring(Ring),
+}
+
 pub struct LinuxLive {
     fd: OwnedFd,
-    buf: Vec<u8>,
+    rx: Rx,
     snaplen: usize,
     link_type: LinkType,
     /// Accumulated totals across PACKET_STATISTICS reads (kernel resets on each read).
@@ -81,11 +102,37 @@ pub struct LinuxLive {
 }
 
 impl LinuxLive {
+    /// Open a capture socket reading via `recvmsg()`.
     pub fn open(
         iface: &str,
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+    ) -> Result<Self> {
+        Self::open_inner(iface, filter, snaplen, promiscuous, None)
+    }
+
+    /// Open a capture socket reading from a `TPACKET_V3` mmap ring instead of
+    /// `recvmsg()`, eliminating the per-packet syscall and copy.
+    ///
+    /// Returns an error if the kernel does not support `TPACKET_V3` (pre-3.2)
+    /// or cannot allocate a ring of the requested geometry.
+    pub fn open_ring(
+        iface: &str,
+        filter: Option<&pktbaffle::bpf::Program>,
+        snaplen: u32,
+        promiscuous: bool,
+        ring: &RingConfig,
+    ) -> Result<Self> {
+        Self::open_inner(iface, filter, snaplen, promiscuous, Some(ring))
+    }
+
+    fn open_inner(
+        iface: &str,
+        filter: Option<&pktbaffle::bpf::Program>,
+        snaplen: u32,
+        promiscuous: bool,
+        ring: Option<&RingConfig>,
     ) -> Result<Self> {
         let snaplen = snaplen as usize;
 
@@ -118,23 +165,34 @@ impl LinuxLive {
             }
         }
 
-        // Enable SO_TIMESTAMP so the kernel records the packet arrival time and
-        // delivers it as ancillary data on recvmsg(). This is more accurate than
-        // calling SystemTime::now() after recvfrom() returns, which can be
-        // 10–100 µs later under load.
-        let one: libc::c_int = 1;
-        let rc = unsafe {
-            libc::setsockopt(
-                fd.as_raw_fd(),
-                SOL_SOCKET,
-                SO_TIMESTAMP,
-                &one as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
+        // Set up the receive path before binding, so nothing is captured before
+        // there is somewhere to put it.
+        let rx = match ring {
+            Some(cfg) => Rx::Ring(Ring::open(fd.as_raw_fd(), cfg, snaplen)?),
+            None => {
+                // Enable SO_TIMESTAMP so the kernel records the packet arrival
+                // time and delivers it as ancillary data on recvmsg(). This is
+                // more accurate than calling SystemTime::now() after recvfrom()
+                // returns, which can be 10–100 µs later under load. (The ring
+                // carries its own per-frame timestamp, so it needs none of this.)
+                let one: libc::c_int = 1;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        fd.as_raw_fd(),
+                        SOL_SOCKET,
+                        SO_TIMESTAMP,
+                        &one as *const libc::c_int as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if rc < 0 {
+                    return Err(super::io_err());
+                }
+                Rx::Recv {
+                    buf: vec![0u8; snaplen.max(65535)],
+                }
+            }
         };
-        if rc < 0 {
-            return Err(super::io_err());
-        }
 
         // Resolve interface index
         let ifindex = iface_index(fd.as_raw_fd(), iface)?;
@@ -181,7 +239,7 @@ impl LinuxLive {
 
         Ok(Self {
             fd,
-            buf: vec![0u8; snaplen.max(65535)],
+            rx,
             snaplen,
             link_type,
             recv_acc: 0,
@@ -189,9 +247,10 @@ impl LinuxLive {
         })
     }
 
-    /// Open a socket like [`Self::open`], then join a `PACKET_FANOUT` group so
-    /// the kernel distributes traffic between this socket and every other
-    /// member of the same `group_id`, according to `mode`.
+    /// Open a socket like [`Self::open`] (or [`Self::open_ring`], when `ring`
+    /// is set), then join a `PACKET_FANOUT` group so the kernel distributes
+    /// traffic between this socket and every other member of the same
+    /// `group_id`, according to `mode`.
     ///
     /// `mode` is a raw `PACKET_FANOUT_*` value (see `man 7 packet`); the
     /// `pkttap::FanoutMode` enum maps to these. All members of a group must
@@ -204,8 +263,9 @@ impl LinuxLive {
         promiscuous: bool,
         group_id: u16,
         mode: u16,
+        ring: Option<&RingConfig>,
     ) -> Result<Self> {
-        let live = Self::open(iface, filter, snaplen, promiscuous)?;
+        let live = Self::open_inner(iface, filter, snaplen, promiscuous, ring)?;
 
         // Low 16 bits: group id: high 16 bits: mode (+ optional flags).
         let fanout_arg: libc::c_int = (group_id as libc::c_int) | ((mode as libc::c_int) << 16);
@@ -233,6 +293,11 @@ impl LinuxLive {
     /// The kernel resets its `PACKET_STATISTICS` counters each time they are
     /// read; this method accumulates the deltas so callers always see totals
     /// from the start of the capture.
+    ///
+    /// A `TPACKET_V3` socket answers with the longer `tpacket_stats_v3`, whose
+    /// first two counters are the same `tp_packets` / `tp_drops` pair; the
+    /// kernel truncates its reply to the size requested here, so both receive
+    /// paths read the same two fields.
     pub fn stats(&mut self) -> Result<CaptureStats> {
         let mut ts: TpacketStats = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<TpacketStats>() as libc::socklen_t;
@@ -261,7 +326,14 @@ impl LinuxLive {
     ///
     /// When non-blocking mode is active, [`Self::next_packet`] returns
     /// `Ok(None)` immediately if no packet is available, rather than blocking.
+    ///
+    /// Ring reads are not affected by `O_NONBLOCK` — they never call `read`
+    /// family syscalls — so the ring is told separately whether an empty ring
+    /// should block in `poll()` or return immediately.
     pub fn set_nonblocking(&self, nb: bool) -> Result<()> {
+        if let Rx::Ring(ring) = &self.rx {
+            ring.set_nonblocking(nb);
+        }
         let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
             return Err(super::io_err());
@@ -278,83 +350,102 @@ impl LinuxLive {
         Ok(())
     }
 
-    /// Return the next packet, blocking unless `O_NONBLOCK` was set via
+    /// Return the next packet, blocking unless non-blocking mode was set via
     /// [`Self::set_nonblocking`].
     ///
-    /// The timestamp is read from the kernel-provided `SO_TIMESTAMP` ancillary
-    /// data delivered by `recvmsg()`. This is the moment the kernel received the
-    /// packet, which is 10–100 µs earlier than when userspace reads it under
-    /// load. Falls back to `SystemTime::now()` if no ancillary timestamp is
-    /// present.
+    /// On the `recvmsg()` path the timestamp is read from the kernel-provided
+    /// `SO_TIMESTAMP` ancillary data. This is the moment the kernel received
+    /// the packet, which is 10–100 µs earlier than when userspace reads it
+    /// under load. Falls back to `SystemTime::now()` if no ancillary timestamp
+    /// is present. On the ring path the kernel stamps each frame header
+    /// directly, at nanosecond resolution.
     ///
     /// Returns `Ok(None)` when non-blocking mode is active and no packet is
-    /// ready (EAGAIN / EWOULDBLOCK).
+    /// ready (EAGAIN / EWOULDBLOCK, or an empty ring).
     pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
-        loop {
-            let fd = self.fd.as_raw_fd();
-
-            let mut iov = libc::iovec {
-                iov_base: self.buf.as_mut_ptr() as *mut libc::c_void,
-                iov_len: self.buf.len(),
-            };
-            // 128 bytes is always enough for a single cmsghdr + timeval.
-            // `cmsghdr` requires 8-byte alignment (it holds a `size_t`
-            // length field); a plain `[u8; 128]` only guarantees 1-byte
-            // alignment; and CMSG_FIRSTHDR/CMSG_DATA hand back pointers into
-            // this buffer without re-aligning them. On an unlucky stack
-            // layout that produced a misaligned `cmsghdr` read here, which
-            // is undefined behavior and aborts under Rust's runtime
-            // alignment checks. `CmsgBuf` forces 8-byte alignment so the
-            // pointers CMSG_* returns are always valid to dereference.
-            let mut cmsg_buf = CmsgBuf([0u8; 128]);
-            let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-            let mut mhdr = libc::msghdr {
-                msg_name: &mut src as *mut libc::sockaddr_ll as *mut libc::c_void,
-                msg_namelen: std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-                msg_iov: &mut iov,
-                msg_iovlen: 1,
-                msg_control: cmsg_buf.0.as_mut_ptr() as *mut libc::c_void,
-                msg_controllen: cmsg_buf.0.len(),
-                msg_flags: 0,
-            };
-
-            let n = unsafe { libc::recvmsg(fd, &mut mhdr, 0) };
-            if n < 0 {
-                let e = std::io::Error::last_os_error();
-                if e.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    return Ok(None);
-                }
-                return Err(e.into());
-            }
-            let n = n as usize;
-            let orig_len = n as u32;
-            let n = n.min(self.snaplen);
-
-            // Use the kernel-recorded arrival time from SO_TIMESTAMP ancillary
-            // data; fall back to SystemTime::now() if unavailable.
-            let ts = extract_so_timestamp(&mhdr).unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-            });
-
-            // Zero-copy: borrow the receive buffer rather than allocating. The
-            // EINTR `continue` path above never creates this borrow, so the
-            // slice is born only on the return path — keeping the lending
-            // iterator in safe Rust. A TPACKET_V3 mmap ring (which would also
-            // eliminate the per-packet recvmsg syscall) is deferred; see
-            // ADR 0002 and the dedicated ring-buffer issue.
-            return Ok(Some(PacketRef::new(
-                &self.buf[..n],
-                ts.as_secs(),
-                ts.subsec_nanos(),
-                orig_len,
-                self.link_type,
-            )));
+        // Split the borrow: everything the receive paths need besides the
+        // buffer itself is Copy, so `self.rx` can be borrowed mutably for the
+        // lifetime of the returned PacketRef.
+        let fd = self.fd.as_raw_fd();
+        let snaplen = self.snaplen;
+        let link_type = self.link_type;
+        match &mut self.rx {
+            Rx::Recv { buf } => recv_packet(fd, buf, snaplen, link_type),
+            Rx::Ring(ring) => ring.next_packet(fd, link_type),
         }
+    }
+}
+
+/// Read one packet with `recvmsg()` into `buf`, returning a borrowed view of it.
+///
+/// Returns `Ok(None)` when the socket is non-blocking and nothing is ready.
+fn recv_packet<'a>(
+    fd: libc::c_int,
+    buf: &'a mut [u8],
+    snaplen: usize,
+    link_type: LinkType,
+) -> Result<Option<PacketRef<'a>>> {
+    loop {
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        // 128 bytes is always enough for a single cmsghdr + timeval.
+        // `cmsghdr` requires 8-byte alignment (it holds a `size_t`
+        // length field); a plain `[u8; 128]` only guarantees 1-byte
+        // alignment; and CMSG_FIRSTHDR/CMSG_DATA hand back pointers into
+        // this buffer without re-aligning them. On an unlucky stack
+        // layout that produced a misaligned `cmsghdr` read here, which
+        // is undefined behavior and aborts under Rust's runtime
+        // alignment checks. `CmsgBuf` forces 8-byte alignment so the
+        // pointers CMSG_* returns are always valid to dereference.
+        let mut cmsg_buf = CmsgBuf([0u8; 128]);
+        let mut src: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        let mut mhdr = libc::msghdr {
+            msg_name: &mut src as *mut libc::sockaddr_ll as *mut libc::c_void,
+            msg_namelen: std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            msg_iov: &mut iov,
+            msg_iovlen: 1,
+            msg_control: cmsg_buf.0.as_mut_ptr() as *mut libc::c_void,
+            msg_controllen: cmsg_buf.0.len(),
+            msg_flags: 0,
+        };
+
+        let n = unsafe { libc::recvmsg(fd, &mut mhdr, 0) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+        let n = n as usize;
+        let orig_len = n as u32;
+        let n = n.min(snaplen);
+
+        // Use the kernel-recorded arrival time from SO_TIMESTAMP ancillary
+        // data; fall back to SystemTime::now() if unavailable.
+        let ts = extract_so_timestamp(&mhdr).unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+        });
+
+        // Zero-copy: borrow the receive buffer rather than allocating. The
+        // EINTR `continue` path above never creates this borrow, so the
+        // slice is born only on the return path — keeping the lending
+        // iterator in safe Rust (see ADR 0002). The kernel→userspace copy
+        // recvmsg performs is what the TPACKET_V3 ring path avoids.
+        return Ok(Some(PacketRef::new(
+            &buf[..n],
+            ts.as_secs(),
+            ts.subsec_nanos(),
+            orig_len,
+            link_type,
+        )));
     }
 }
 
