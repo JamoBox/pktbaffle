@@ -17,6 +17,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Snaplen](#snaplen)
   - [Pre-compiled filters](#pre-compiled-filters)
   - [Capture statistics](#capture-statistics)
+  - [Zero-copy ring buffer (Linux)](#zero-copy-ring-buffer-linux)
 - [File capture](#file-capture)
   - [Reading a pcap file](#reading-a-pcap-file)
   - [Reading a pcapng file](#reading-a-pcapng-file)
@@ -64,6 +65,7 @@ pkttap = "0.3"
 | Promiscuous mode | ✓ | ✓ | ✓ |
 | Snaplen | ✓ | ✓ | ✓ |
 | Capture statistics | ✓ PACKET_STATISTICS | ✓ BIOCGSTATS | ✓ pcap_stats |
+| Zero-copy kernel ring | ✓ TPACKET_V3 (opt-in) | — | — |
 | pcap file read | ✓ | ✓ | ✓ |
 | pcapng file read | ✓ | ✓ | ✓ |
 | pcap file write | ✓ | ✓ | ✓ |
@@ -282,6 +284,73 @@ loop {
 File-based captures always return a zeroed `CaptureStats` — there is no kernel buffer involved so no drops are possible.
 
 See the [`stats` example](#the-stats-example) for a complete runnable demonstration.
+
+### Zero-copy ring buffer (Linux)
+
+By default, Linux capture calls `recvmsg()` once per packet: one syscall and one kernel→userspace copy each time. `TPACKET_V3` replaces both with a ring of memory shared between the kernel and your process — the kernel writes frames straight into it and flips a status word when a block is ready. Capturing 2 000 packets on loopback issues **2 007 `recvmsg` calls on the default path and zero receive syscalls through the ring**.
+
+Opt in with `.ring()`:
+
+```rust
+use pkttap::{Capture, RingConfig};
+
+let mut cap = Capture::live("eth0")
+    .filter("tcp port 443")
+    .ring(RingConfig::new())
+    .open()?;
+
+while let Some(pkt) = cap.next()? {
+    // pkt borrows directly from the mmap'd ring — nothing was copied.
+    println!("{} bytes", pkt.data().len());
+}
+```
+
+Everything else behaves identically: the same filter, snaplen, `stats()`, blocking/non-blocking behaviour, and the same borrowed `PacketRef`.
+
+**Tuning the geometry.** The ring is `block_count` blocks of `block_size` bytes; the kernel fills one block at a time and hands it over when it is full or when `retire_timeout` expires:
+
+```rust
+use std::time::Duration;
+
+let cfg = RingConfig::new()
+    .block_size(1 << 20)                        // 1 MiB per block
+    .block_count(64)                            // 64 MiB ring
+    .retire_timeout(Duration::from_millis(5));  // bound delivery latency
+
+let mut cap = Capture::live("eth0").ring(cfg).open()?;
+```
+
+| Setting | Default | Raise it when | Lower it when |
+|---------|---------|---------------|---------------|
+| `block_size` | 256 KiB | Individual blocks fill too quickly at line rate | Kernel cannot allocate contiguous pages (prefer more blocks instead) |
+| `block_count` | 16 | `stats().dropped` is climbing — the kernel needs more room while your loop works | Memory is tight; the whole ring is reserved for the capture's lifetime |
+| `retire_timeout` | 100 ms | Traffic is heavy enough that blocks fill on their own | You need packets promptly on a quiet link |
+
+Sizes are rounded up where the kernel requires it (`block_size` to a page multiple, and to at least one full frame). Note the kernel sizes frames from the on-wire packet rather than the snaplen, so a small snaplen does not shrink the ring memory each packet occupies.
+
+**Requirements and fallback.** `TPACKET_V3` needs Linux 3.2 or newer. If the kernel does not support it — or cannot allocate a ring of the requested geometry — `open()` returns an error rather than silently falling back, so you always know which path you got. Retry without `.ring()` if you want a fallback:
+
+```rust
+let mut cap = match Capture::live("eth0").filter(expr).ring(RingConfig::new()).open() {
+    Ok(cap) => cap,
+    Err(e) => {
+        eprintln!("ring capture unavailable ({e}); falling back to recvmsg");
+        Capture::live("eth0").filter(expr).open()?
+    }
+};
+```
+
+**With fanout.** `FanoutGroup::ring()` gives every member socket its own ring — the kernel splits traffic across the group and each worker thread reads its share with no syscall and no copy:
+
+```rust
+use pkttap::{FanoutGroup, FanoutMode, RingConfig};
+
+let captures = FanoutGroup::new("eth0", FanoutMode::CpuAffinity)
+    .ring(RingConfig::new())
+    .into_captures(4)?;
+```
+
+Each member allocates a full ring, so the group's memory is `block_size × block_count × n`.
 
 ---
 
@@ -545,6 +614,10 @@ sudo setcap cap_net_raw=ep ./your_binary
 // All interfaces (including loopback)
 let mut cap = Capture::live("lo").filter("icmp").open()?;
 ```
+
+**Receive path:** `recvmsg()` by default, with packet arrival times taken from the kernel's `SO_TIMESTAMP` ancillary data. Opting into [`.ring()`](#zero-copy-ring-buffer-linux) switches to a `TPACKET_V3` mmap ring, which drops the per-packet syscall and copy and takes timestamps from the frame header instead (nanosecond resolution).
+
+**Multi-threaded capture:** `FanoutGroup` opens several sockets joined to one `PACKET_FANOUT` group, letting the kernel distribute packets across worker threads with no userspace fan-out layer.
 
 ### macOS
 

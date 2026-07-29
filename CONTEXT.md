@@ -44,8 +44,12 @@ The software cBPF interpreter in `pktbaffle` (behind the `vm` feature) that eval
 _Avoid_: interpreter, evaluator, engine
 
 **Capture buffer**:
-The reusable internal buffer each capture source fills and that PacketRefs borrow from for zero-copy delivery: the `recvfrom` buffer on Linux, the BPF read buffer on macOS, Npcap's `pcap_next_ex` buffer on Windows, and a per-`FileCapture` scratch buffer for pcap/pcapng files. A true zero-copy kernel ring (Linux TPACKET_V3) is future work; see ADR 0002.
-_Avoid_: ring buffer (not yet a kernel ring), mmap buffer, socket buffer
+The reusable internal buffer each capture source fills and that PacketRefs borrow from for zero-copy delivery: the `recvfrom` buffer on Linux, the BPF read buffer on macOS, Npcap's `pcap_next_ex` buffer on Windows, and a per-`FileCapture` scratch buffer for pcap/pcapng files. See ADR 0002.
+_Avoid_: ring buffer (that now means the Linux TPACKET_V3 kernel ring specifically), mmap buffer, socket buffer
+
+**Ring**:
+The Linux-only `TPACKET_V3` mmap region the kernel writes frames straight into, opted into with `CaptureBuilder::ring(RingConfig)`. It replaces the Capture buffer on that path: PacketRefs borrow from the mapping itself, so a packet costs neither a syscall nor a kernel→userspace copy. Sized in blocks (`RingConfig::block_size` × `block_count`); the kernel hands over one block at a time. See ADR 0005.
+_Avoid_: ring buffer for anything else, mmap buffer, zero-copy buffer
 
 **Snaplen**:
 The maximum number of bytes captured per packet. Packets longer than snaplen are truncated; `PacketRef::orig_len()` reflects the on-wire length.
@@ -56,7 +60,7 @@ _Avoid_: capture length, truncation length
 - A **Filter** string is compiled by `pktbaffle::compile()` into a **Program** for a given **Target** and **LinkType**
 - A **Capture** is configured with a **Filter** string or a pre-compiled **Program** via its builder
 - A **Dump** is configured with a **LinkType** (required) and a file path via its builder; format is determined by file extension
-- A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the source's **Capture buffer** and must be consumed before the next iteration step
+- A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the source's **Capture buffer** — or, on Linux with a **Ring** configured, from the ring mapping — and must be consumed before the next iteration step
 - The **VM** evaluates a **Program** against **PacketRef** bytes when the **Capture** source is a file (not a live interface)
 - **Snaplen** applies at the **Capture** level and affects all **PacketRef**s from that source
 

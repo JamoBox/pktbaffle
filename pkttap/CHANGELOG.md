@@ -38,21 +38,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`CaptureBuilder::timestamp_mode()`** — builder method to set the
   [`TimestampMode`] for a live capture ([#94]).
 
-### Fixed
+- **`RingConfig` / `CaptureBuilder::ring`** (Linux only) — capture through a
+  `TPACKET_V3` mmap ring buffer instead of `recvmsg()` ([#90]). The default
+  Linux path costs a syscall and a kernel→userspace copy per packet; the ring
+  has the kernel write frames straight into memory shared with the process and
+  flip a per-block status word, so reading a packet costs neither. Capturing
+  2 000 packets on loopback issues 2 007 `recvmsg` calls on the default path
+  and zero receive syscalls through the ring.
 
-- **Linux: timestamps are now kernel-assigned, not userspace wall-clock**
-  ([#88]). Previously, Linux live capture used `SystemTime::now()` immediately
-  after `recvfrom()` returned, introducing 10–100 μs of jitter per packet under
-  load. The Linux backend now uses `recvmsg()` with `SO_TIMESTAMPNS` so the
-  timestamp reflects when the packet entered the kernel receive queue — matching
-  the accuracy of the macOS BPF and Windows Npcap paths.
+  ```rust
+  use pkttap::{Capture, RingConfig};
 
-- **Linux: `recvfrom()` replaced by `recvmsg()`** — required to receive
-  ancillary timestamp data. The receive buffer is still reused across calls
-  (zero-copy, no per-packet allocation).
+  let mut cap = Capture::live("eth0")
+      .filter("tcp port 443")
+      .ring(RingConfig::new())
+      .open()?;
 
-[#88]: https://github.com/JamoBox/pktbaffle/issues/88
-[#94]: https://github.com/JamoBox/pktbaffle/issues/94
+  while let Some(pkt) = cap.next()? {
+      // pkt borrows directly from the ring — nothing was copied.
+  }
+  ```
+
+  - Opt-in per capture: without `.ring()` the `recvmsg()` path is unchanged.
+  - Same filter, snaplen, `stats()`, blocking/non-blocking behaviour and
+    borrowed `PacketRef` as the default path; timestamps now come from the
+    frame header at nanosecond resolution.
+  - `RingConfig` tunes the geometry — `block_size` (default 256 KiB),
+    `block_count` (default 16, so a 4 MiB ring) and `retire_timeout`
+    (default 100 ms, bounding delivery latency on quiet links). Sizes are
+    rounded up where the kernel requires it.
+  - Requires Linux 3.2+. If the kernel does not support `TPACKET_V3`, or
+    cannot allocate the requested ring, `open()` returns an error naming the
+    reason rather than silently falling back.
+  - **`FanoutGroup::ring`** gives each member socket its own ring, so a worker
+    thread reads its share of a fanout group with no syscall and no copy.
+
+  See [ADR 0005](../pktbaffle/docs/adr/0005-tpacket-v3-ring.md) for the design
+  rationale.
+
+- **`FanoutGroup` / `FanoutMode`** (Linux only) — multi-consumer capture via
+  `PACKET_FANOUT` ([#91]). `Capture` is single-threaded, so distributing
+  packets across worker threads previously required a channel-based fan-out
+  layer on top. `FanoutGroup` instead opens several raw sockets joined to the
+  same kernel fanout group; the kernel splits the interface's traffic between
+  them directly, and each member `Capture` can be moved to its own thread.
+
+  ```rust
+  use pkttap::{FanoutGroup, FanoutMode};
+
+  let mut captures = FanoutGroup::new("eth0", FanoutMode::CpuAffinity)
+      .into_captures(4)?;
+  for mut cap in captures.drain(..) {
+      std::thread::spawn(move || {
+          while let Ok(Some(pkt)) = cap.next() {
+              // process pkt
+          }
+      });
+  }
+  ```
 
 - **`Capture::stats()`** — returns a [`CaptureStats`] struct with cumulative
   packet receive and drop counts from the kernel capture layer ([#87]).
@@ -85,7 +128,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cargo run --example stats -p pkttap -- eth0
   ```
 
+### Fixed
+
+- **Linux live capture could abort with a misaligned-pointer panic on every
+  real packet.** `next_packet()` read timestamp ancillary data out of a
+  plain `[u8; 128]` stack buffer, which only guarantees 1-byte alignment;
+  `cmsghdr` requires 8-byte alignment for its `size_t` length field. On stack
+  layouts that left the buffer misaligned, dereferencing the `CMSG_FIRSTHDR`
+  pointer was undefined behavior, and Rust's runtime alignment check aborted
+  the process. The buffer is now wrapped in an `#[repr(align(8))]` type so
+  the ancillary-data pointers are always valid to dereference.
+
+- **Linux: timestamps are now kernel-assigned, not userspace wall-clock**
+  ([#88]). Previously, Linux live capture used `SystemTime::now()` immediately
+  after `recvfrom()` returned, introducing 10–100 μs of jitter per packet under
+  load. The Linux backend now uses `recvmsg()` with `SO_TIMESTAMPNS` so the
+  timestamp reflects when the packet entered the kernel receive queue — matching
+  the accuracy of the macOS BPF and Windows Npcap paths.
+
+- **Linux: `recvfrom()` replaced by `recvmsg()`** — required to receive
+  ancillary timestamp data. The receive buffer is still reused across calls
+  (zero-copy, no per-packet allocation).
+
 [#87]: https://github.com/JamoBox/pktbaffle/issues/87
+[#88]: https://github.com/JamoBox/pktbaffle/issues/88
+[#90]: https://github.com/JamoBox/pktbaffle/issues/90
+[#91]: https://github.com/JamoBox/pktbaffle/issues/91
+[#94]: https://github.com/JamoBox/pktbaffle/issues/94
 
 
 ## [0.3.0] - 2026-06-17

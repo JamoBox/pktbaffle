@@ -10,6 +10,8 @@ use crate::error::{Error, Result};
 use crate::file::FileCapture;
 use crate::live::{self, Live};
 use crate::packet::PacketRef;
+#[cfg(target_os = "linux")]
+use crate::ring::RingConfig;
 use crate::stats::CaptureStats;
 use crate::timestamp::TimestampMode;
 
@@ -38,6 +40,8 @@ pub struct CaptureBuilder {
     buffer_timeout: Duration,
     nonblocking: bool,
     timestamp_mode: TimestampMode,
+    #[cfg(target_os = "linux")]
+    ring: Option<RingConfig>,
 }
 
 impl CaptureBuilder {
@@ -50,6 +54,8 @@ impl CaptureBuilder {
             buffer_timeout: Duration::from_millis(100),
             nonblocking: false,
             timestamp_mode: TimestampMode::default(),
+            #[cfg(target_os = "linux")]
+            ring: None,
         }
     }
 
@@ -62,6 +68,8 @@ impl CaptureBuilder {
             buffer_timeout: Duration::from_millis(100),
             nonblocking: false,
             timestamp_mode: TimestampMode::default(),
+            #[cfg(target_os = "linux")]
+            ring: None,
         }
     }
 
@@ -141,6 +149,40 @@ impl CaptureBuilder {
         self
     }
 
+    /// Capture through a `TPACKET_V3` mmap ring buffer instead of `recvmsg()`
+    /// (Linux only).
+    ///
+    /// The kernel writes frames straight into memory shared with this process,
+    /// so reading a packet costs neither a syscall nor a kernel→userspace copy
+    /// — the two per-packet costs the default path pays. Everything else is
+    /// unchanged: the same filter, snaplen, statistics and non-blocking
+    /// behaviour, and [`Capture::next`] still yields a borrowed
+    /// [`PacketRef`](crate::PacketRef), now pointing into the ring itself.
+    ///
+    /// Accepts a [`RingConfig`], an `Option<RingConfig>`, or `None` — passing
+    /// `None` keeps the default `recvmsg()` path.
+    ///
+    /// ```no_run
+    /// use pkttap::{Capture, RingConfig};
+    ///
+    /// # fn run() -> pkttap::Result<()> {
+    /// let mut cap = Capture::live("eth0")
+    ///     .filter("tcp port 443")
+    ///     .ring(RingConfig::new())
+    ///     .open()?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Ignored for file captures. [`open`](Self::open) returns an error if the
+    /// kernel is older than 3.2 (no `TPACKET_V3`) or cannot allocate a ring of
+    /// the requested geometry; fall back to the default path by retrying
+    /// without this call.
+    #[cfg(target_os = "linux")]
+    pub fn ring(mut self, cfg: impl Into<Option<RingConfig>>) -> Self {
+        self.ring = cfg.into();
+        self
+    }
+
     /// Open the capture source.
     pub fn open(self) -> Result<Capture> {
         match self.source {
@@ -149,6 +191,25 @@ impl CaptureBuilder {
                 // so that field offsets in the BPF program match the captured frames.
                 let link_type = live::query_link_type(&iface)?;
                 let prog = compile_filter(self.filter, link_type)?;
+                #[cfg(target_os = "linux")]
+                let live = match &self.ring {
+                    Some(cfg) => Live::open_ring(
+                        &iface,
+                        prog.as_ref(),
+                        self.snaplen,
+                        self.promiscuous,
+                        self.timestamp_mode,
+                        cfg,
+                    )?,
+                    None => Live::open(
+                        &iface,
+                        prog.as_ref(),
+                        self.snaplen,
+                        self.promiscuous,
+                        self.timestamp_mode,
+                    )?,
+                };
+                #[cfg(not(target_os = "linux"))]
                 let live = Live::open(
                     &iface,
                     prog.as_ref(),
@@ -196,6 +257,15 @@ impl Capture {
     /// Begin building a live capture on `iface`.
     pub fn live(iface: &str) -> CaptureBuilder {
         CaptureBuilder::new_live(iface)
+    }
+
+    /// Wrap an already-open [`Live`] source, e.g. one member socket of a
+    /// [`crate::FanoutGroup`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_live(live: Live) -> Self {
+        Self {
+            inner: Inner::Live(live),
+        }
     }
 
     /// Begin building a file capture from a pcap or pcapng file.
