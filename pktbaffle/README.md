@@ -38,14 +38,14 @@ A pure-Rust compiler for libpcap-style packet filter expressions. Parse the same
 
 ```toml
 [dependencies]
-pktbaffle = "0.1"
+pktbaffle = "0.2"
 ```
 
 To enable the software BPF interpreter (for userspace packet matching without a kernel):
 
 ```toml
 [dependencies]
-pktbaffle = { version = "0.1", features = ["vm"] }
+pktbaffle = { version = "0.2", features = ["vm"] }
 ```
 
 ---
@@ -524,7 +524,7 @@ Enable the `vm` feature to run a classic BPF program against a byte slice in use
 
 ```toml
 [dependencies]
-pktbaffle = { version = "0.1", features = ["vm"] }
+pktbaffle = { version = "0.2", features = ["vm"] }
 ```
 
 ```rust
@@ -632,7 +632,7 @@ See [`pkttap/README.md`](../pkttap/README.md) for full documentation.
 
 ```toml
 [dependencies]
-pkttap = "0.1"
+pkttap = "0.3"
 ```
 
 ```rust
