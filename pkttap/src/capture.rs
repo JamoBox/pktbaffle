@@ -13,6 +13,7 @@ use crate::packet::PacketRef;
 #[cfg(target_os = "linux")]
 use crate::ring::RingConfig;
 use crate::stats::CaptureStats;
+use crate::timestamp::TimestampMode;
 
 // ── Filter specification ──────────────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ pub struct CaptureBuilder {
     promiscuous: bool,
     buffer_timeout: Duration,
     nonblocking: bool,
+    timestamp_mode: TimestampMode,
     #[cfg(target_os = "linux")]
     ring: Option<RingConfig>,
 }
@@ -51,6 +53,7 @@ impl CaptureBuilder {
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
             nonblocking: false,
+            timestamp_mode: TimestampMode::default(),
             #[cfg(target_os = "linux")]
             ring: None,
         }
@@ -64,6 +67,7 @@ impl CaptureBuilder {
             promiscuous: false,
             buffer_timeout: Duration::from_millis(100),
             nonblocking: false,
+            timestamp_mode: TimestampMode::default(),
             #[cfg(target_os = "linux")]
             ring: None,
         }
@@ -136,6 +140,15 @@ impl CaptureBuilder {
         self
     }
 
+    /// Set the timestamp source for live capture (default: [`TimestampMode::Software`]).
+    ///
+    /// See [`TimestampMode`] for platform support details. Ignored for file
+    /// captures, which always use the timestamp embedded in the pcap/pcapng record.
+    pub fn timestamp_mode(mut self, mode: TimestampMode) -> Self {
+        self.timestamp_mode = mode;
+        self
+    }
+
     /// Capture through a `TPACKET_V3` mmap ring buffer instead of `recvmsg()`
     /// (Linux only).
     ///
@@ -180,13 +193,30 @@ impl CaptureBuilder {
                 let prog = compile_filter(self.filter, link_type)?;
                 #[cfg(target_os = "linux")]
                 let live = match &self.ring {
-                    Some(cfg) => {
-                        Live::open_ring(&iface, prog.as_ref(), self.snaplen, self.promiscuous, cfg)?
-                    }
-                    None => Live::open(&iface, prog.as_ref(), self.snaplen, self.promiscuous)?,
+                    Some(cfg) => Live::open_ring(
+                        &iface,
+                        prog.as_ref(),
+                        self.snaplen,
+                        self.promiscuous,
+                        self.timestamp_mode,
+                        cfg,
+                    )?,
+                    None => Live::open(
+                        &iface,
+                        prog.as_ref(),
+                        self.snaplen,
+                        self.promiscuous,
+                        self.timestamp_mode,
+                    )?,
                 };
                 #[cfg(not(target_os = "linux"))]
-                let live = Live::open(&iface, prog.as_ref(), self.snaplen, self.promiscuous)?;
+                let live = Live::open(
+                    &iface,
+                    prog.as_ref(),
+                    self.snaplen,
+                    self.promiscuous,
+                    self.timestamp_mode,
+                )?;
                 if self.nonblocking {
                     live.set_nonblocking(true)?;
                 }

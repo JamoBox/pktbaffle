@@ -23,6 +23,7 @@ use crate::error::Result;
 use crate::packet::LinkType;
 use crate::packet::PacketRef;
 use crate::stats::CaptureStats;
+use crate::timestamp::TimestampMode;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -53,8 +54,9 @@ impl Live {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        timestamp_mode: TimestampMode,
     ) -> Result<Self> {
-        PlatformLive::open(iface, filter, snaplen, promiscuous).map(Live)
+        PlatformLive::open(iface, filter, snaplen, promiscuous, timestamp_mode).map(Live)
     }
 
     /// Open a live capture reading from a `TPACKET_V3` mmap ring instead of
@@ -65,9 +67,10 @@ impl Live {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        timestamp_mode: TimestampMode,
         ring: &crate::ring::RingConfig,
     ) -> Result<Self> {
-        PlatformLive::open_ring(iface, filter, snaplen, promiscuous, ring).map(Live)
+        PlatformLive::open_ring(iface, filter, snaplen, promiscuous, timestamp_mode, ring).map(Live)
     }
 
     pub fn set_nonblocking(&self, nb: bool) -> Result<()> {

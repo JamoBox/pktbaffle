@@ -50,6 +50,7 @@ mod packet;
 #[cfg(target_os = "linux")]
 mod ring;
 mod stats;
+mod timestamp;
 
 pub use capture::{Capture, CaptureBuilder};
 pub use dump::{Dump, DumpBuilder};
@@ -60,6 +61,7 @@ pub use packet::{LinkType, Packet, PacketRef};
 #[cfg(target_os = "linux")]
 pub use ring::RingConfig;
 pub use stats::CaptureStats;
+pub use timestamp::TimestampMode;
 
 /// List available network interfaces by name.
 pub fn interfaces() -> Result<Vec<String>> {

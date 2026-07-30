@@ -278,6 +278,9 @@ impl WindowsLive {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        // Windows Npcap embeds timestamps in PcapPkthdr; NIC hardware timestamps
+        // are not accessible through the Npcap/WinPcap API.
+        _timestamp_mode: crate::timestamp::TimestampMode,
     ) -> Result<Self> {
         let lib = npcap()?;
 

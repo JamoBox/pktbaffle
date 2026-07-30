@@ -31,6 +31,7 @@ use crate::capture::{compile_filter, Capture, FilterSpec};
 use crate::error::{Error, Result};
 use crate::live::{query_link_type, Live, PlatformLive};
 use crate::ring::RingConfig;
+use crate::timestamp::TimestampMode;
 
 /// Packet distribution strategy for a [`FanoutGroup`].
 ///
@@ -85,6 +86,7 @@ pub struct FanoutGroup {
     promiscuous: bool,
     mode: FanoutMode,
     group_id: u16,
+    timestamp_mode: TimestampMode,
     ring: Option<RingConfig>,
 }
 
@@ -103,6 +105,7 @@ impl FanoutGroup {
             promiscuous: false,
             mode,
             group_id: default_group_id(),
+            timestamp_mode: TimestampMode::default(),
             ring: None,
         }
     }
@@ -163,6 +166,15 @@ impl FanoutGroup {
         self
     }
 
+    /// Set the timestamp source for every member socket (default:
+    /// [`TimestampMode::Software`]) — see [`CaptureBuilder::timestamp_mode`].
+    ///
+    /// [`CaptureBuilder::timestamp_mode`]: crate::CaptureBuilder::timestamp_mode
+    pub fn timestamp_mode(mut self, mode: TimestampMode) -> Self {
+        self.timestamp_mode = mode;
+        self
+    }
+
     /// Open `n` member captures joined to the same fanout group.
     ///
     /// Every member receives a disjoint subset of the interface's traffic,
@@ -185,6 +197,7 @@ impl FanoutGroup {
                 prog.as_ref(),
                 self.snaplen,
                 self.promiscuous,
+                self.timestamp_mode,
                 self.group_id,
                 mode,
                 self.ring.as_ref(),

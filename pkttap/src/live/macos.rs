@@ -94,6 +94,9 @@ impl MacosLive {
         filter: Option<&pktbaffle::bpf::Program>,
         snaplen: u32,
         promiscuous: bool,
+        // macOS BPF embeds kernel timestamps in bpf_hdr; hardware timestamps
+        // are not exposed through the BPF device interface.
+        _timestamp_mode: crate::timestamp::TimestampMode,
     ) -> Result<Self> {
         let fd = open_bpf_device()?;
 
