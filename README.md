@@ -15,7 +15,7 @@ Parses the same filter syntax used by `tcpdump` and Wireshark and produces class
 
 ```toml
 [dependencies]
-pktbaffle = "0.1"
+pktbaffle = "0.2"
 ```
 
 ```rust
