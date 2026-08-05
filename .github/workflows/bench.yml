@@ -59,6 +59,32 @@ jobs:
       - name: Run capture benchmarks
         run: cargo bench -p pkttap --bench capture -- --output-format bencher 2>&1 | tee -a output.txt
 
+      # github-action-benchmark fetches and checks out the gh-pages branch to
+      # append historical data; it does NOT create that branch itself. On a
+      # repo that has never published benchmark results the branch is absent,
+      # so the fetch aborts with "couldn't find remote ref gh-pages" and the
+      # whole job fails. Bootstrap an empty orphan branch on first run. Built in
+      # a throwaway temp repo so the checked-out working tree (and rust-cache
+      # state) is left untouched.
+      - name: Ensure gh-pages branch exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            echo "gh-pages branch already exists"
+          else
+            echo "gh-pages branch missing; creating empty orphan branch"
+            tmp="$(mktemp -d)"
+            git init -q "$tmp"
+            git -C "$tmp" checkout -q --orphan gh-pages
+            git -C "$tmp" \
+              -c user.name='github-actions[bot]' \
+              -c user.email='github-actions[bot]@users.noreply.github.com' \
+              commit -q --allow-empty -m "Initialize gh-pages branch for benchmark results"
+            git -C "$tmp" push -q \
+              "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" gh-pages
+          fi
+
       # Parse Criterion stdout, append to the historical dataset in gh-pages,
       # and rebuild the chart page.  On PRs the action posts a regression comment
       # instead of pushing (auto-push only fires on the default branch).
