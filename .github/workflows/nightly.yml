@@ -49,6 +49,7 @@ jobs:
   cross-compile:
     name: cross-compile (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -271,7 +272,11 @@ jobs:
   report:
     name: report
     runs-on: ubuntu-latest
-    if: ${{ failure() }}
+    # failure() alone misses hung jobs: a job killed by the default 6h
+    # runner timeout reports its result as `cancelled`, not `failure`, so
+    # failure() stays false and this job — along with the issue it's meant
+    # to file — gets silently skipped. Catch that case too.
+    if: ${{ failure() || contains(needs.*.result, 'cancelled') }}
     # semver is intentionally `continue-on-error` (breaking changes are
     # expected during 0.x pre-release), so it is deliberately excluded here —
     # a non-blocking check must never spawn a failure ticket.
