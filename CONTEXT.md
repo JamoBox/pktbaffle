@@ -31,6 +31,10 @@ _Avoid_: handle, session, reader, socket
 The write-side counterpart to Capture. Accepts packets and writes them to a pcap or pcapng file on disk. Supports both pcap and pcapng format, selected by file extension (`.pcap` → pcap, `.pcapng` → pcapng). Named after `tcpdump -w` and `pcap_dump()`.
 _Avoid_: writer, recorder, sink, exporter
 
+**Injector**:
+The transmit counterpart to a live Capture. Sends complete link-layer frames onto one network interface exactly as given — no header added, no address rewritten — and never receives. Named after `pcap_inject()`. See ADR 0006.
+_Avoid_: sender, writer (that is Dump's job), transmitter, socket
+
 **PacketRef**:
 A borrowed view of a single captured packet, valid only for the current iteration step. Carries raw bytes, timestamp, original length, and LinkType. Call `.to_owned()` to extend its lifetime.
 _Avoid_: frame, buffer, packet (use PacketRef when referring to the borrowed iterator item specifically)
@@ -63,6 +67,7 @@ _Avoid_: capture length, truncation length
 - A **Capture** yields **PacketRef**s; each **PacketRef** borrows from the source's **Capture buffer** — or, on Linux with a **Ring** configured, from the ring mapping — and must be consumed before the next iteration step
 - The **VM** evaluates a **Program** against **PacketRef** bytes when the **Capture** source is a file (not a live interface)
 - **Snaplen** applies at the **Capture** level and affects all **PacketRef**s from that source
+- An **Injector** is opened on one interface and reports that interface's **LinkType**; every frame it sends must already use that framing. Replaying a file means feeding a **Capture**'s **PacketRef** bytes to an **Injector** whose **LinkType** matches
 
 ## Example dialogue
 

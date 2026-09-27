@@ -8,6 +8,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Injector`** — sends raw link-layer frames onto a network interface, the
+  transmit counterpart to `Capture` and pkttap's equivalent of libpcap's
+  `pcap_inject()` ([#93]). Use it for traffic replay, fuzzing, and test tooling.
+
+  ```rust
+  use pkttap::{Capture, Injector};
+
+  // Replay a capture file onto an interface
+  let inj = Injector::on_interface("eth0")?;
+  let mut cap = Capture::from_file("traffic.pcap").open()?;
+  while let Some(pkt) = cap.next()? {
+      inj.send(pkt.data())?;
+  }
+  ```
+
+  - Frames are sent **unmodified**: no header is added and no address is
+    rewritten. `Injector::link_type()` reports the framing frames must use.
+  - Transmit-only: an idle injector queues no inbound traffic in the kernel.
+  - `send()` takes `&self` and `Injector` is `Send + Sync` on every platform,
+    so one injector can be shared across threads behind an `Arc`.
+  - Platform implementations:
+    - **Linux**: `send()` on an `AF_PACKET` / `SOCK_RAW` socket bound to the
+      interface. The socket uses protocol `0`, so it never receives.
+    - **macOS**: `write()` on a `/dev/bpf*` device, with `BIOCSHDRCMPLT` set so
+      the kernel keeps the frame's source MAC, and a reject-all read filter.
+    - **Windows**: `pcap_sendpacket()` via Npcap (added to the dynamically
+      loaded function table), with a reject-all read filter. Each frame is
+      copied into an internal buffer first, because Windows can write into the
+      send buffer: on the loopback adapter it rewrites the IP ID and checksum.
+
+  Needs the same privileges as live capture. See
+  [ADR 0006](../pktbaffle/docs/adr/0006-packet-injection.md) for the design
+  rationale.
+
+- **`replay` example** (`examples/replay.rs`) — replays a pcap/pcapng file
+  out of an interface, with an optional filter, a packet count, and
+  `--realtime` pacing that keeps the original spacing between packets:
+  ```
+  sudo cargo run --example replay -p pkttap -- traffic.pcap eth0 --realtime
+  ```
+
 - **`TimestampMode` enum** — controls the kernel timestamp source for live
   captures ([#94]). Two variants:
   - `Software` (default): `SO_TIMESTAMPNS` — kernel assigns a nanosecond
@@ -154,6 +195,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [#88]: https://github.com/JamoBox/pktbaffle/issues/88
 [#90]: https://github.com/JamoBox/pktbaffle/issues/90
 [#91]: https://github.com/JamoBox/pktbaffle/issues/91
+[#93]: https://github.com/JamoBox/pktbaffle/issues/93
 [#94]: https://github.com/JamoBox/pktbaffle/issues/94
 
 
