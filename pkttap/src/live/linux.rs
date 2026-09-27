@@ -32,6 +32,11 @@
 //!
 //! The ring path carries its own per-frame timestamp in the frame header at
 //! nanosecond resolution and does not consult [`TimestampMode`].
+//!
+//! # Injection
+//!
+//! [`LinuxInjector`] is the transmit side: a separate, receive-nothing
+//! `AF_PACKET` socket that `send()`s frames out of the interface it is bound to.
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -593,6 +598,76 @@ fn extract_timestamp(mhdr: &libc::msghdr, mode: TimestampMode) -> (u64, u32) {
 /// Convert a `libc::timespec` to `(seconds, nanoseconds)`.
 fn timespec_to_pair(ts: libc::timespec) -> (u64, u32) {
     (ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// Transmit-only `AF_PACKET` socket backing [`crate::Injector`].
+///
+/// The socket is created with protocol `0`, which tells the kernel to deliver
+/// it no packets at all: it is bound to the interface only so that `send()`
+/// knows where to transmit. Unlike a capture socket (bound to `ETH_P_ALL`), an
+/// idle injector therefore never fills a receive queue.
+pub struct LinuxInjector {
+    fd: OwnedFd,
+    link_type: LinkType,
+}
+
+impl LinuxInjector {
+    pub fn open(iface: &str) -> Result<Self> {
+        let raw_fd = unsafe { libc::socket(AF_PACKET, libc::SOCK_RAW, 0) };
+        if raw_fd < 0 {
+            return Err(super::io_err());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        let ifindex = iface_index(fd.as_raw_fd(), iface)?;
+
+        // Binding with sll_protocol 0 keeps the socket's protocol (also 0, so
+        // still receive-nothing) while fixing the egress interface, letting
+        // `send` omit a destination address.
+        let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        addr.sll_family = AF_PACKET as u16;
+        addr.sll_ifindex = ifindex;
+        let rc = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                &addr as *const libc::sockaddr_ll as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            )
+        };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+
+        let link_type = query_link_type(iface).unwrap_or(LinkType::Ethernet);
+        Ok(Self { fd, link_type })
+    }
+
+    pub fn link_type(&self) -> LinkType {
+        self.link_type
+    }
+
+    /// Transmit `frame` unmodified. A `SOCK_RAW` packet socket sends the whole
+    /// frame or fails, so a successful return is always `frame.len()`.
+    pub fn send(&self, frame: &[u8]) -> Result<usize> {
+        loop {
+            let n = unsafe {
+                libc::send(
+                    self.fd.as_raw_fd(),
+                    frame.as_ptr() as *const libc::c_void,
+                    frame.len(),
+                    0,
+                )
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e.into());
+            }
+            return Ok(n as usize);
+        }
+    }
 }
 
 fn iface_index(fd: libc::c_int, name: &str) -> Result<libc::c_int> {

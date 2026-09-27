@@ -5,7 +5,7 @@ A pure-Rust ecosystem for packet filtering and capture.
 | Crate | Description |
 |-------|-------------|
 | [pktbaffle](pktbaffle/) | Compile libpcap-style filter expressions to cBPF / eBPF bytecode |
-| [pkttap](pkttap/) | Cross-platform packet capture (live + pcap/pcapng file) |
+| [pkttap](pkttap/) | Cross-platform packet capture (live + pcap/pcapng file) and injection |
 
 ---
 
@@ -30,7 +30,7 @@ See [pktbaffle/README.md](pktbaffle/README.md) for the full filter expression re
 
 ## pkttap
 
-Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows Npcap) and pcap/pcapng file I/O behind a unified API, using pktbaffle to compile filter expressions. Packets are yielded as borrowed views with no per-packet allocation; on Linux, `.ring(RingConfig::new())` opts into a `TPACKET_V3` mmap ring that drops the per-packet syscall and kernel copy as well.
+Wraps platform-specific live capture (Linux AF_PACKET, macOS /dev/bpf, Windows Npcap) and pcap/pcapng file I/O behind a unified API, using pktbaffle to compile filter expressions. Packets are yielded as borrowed views with no per-packet allocation; on Linux, `.ring(RingConfig::new())` opts into a `TPACKET_V3` mmap ring that drops the per-packet syscall and kernel copy as well. `Injector` sends raw frames the other way, for replay and test tooling.
 
 ```toml
 [dependencies]

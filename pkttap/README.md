@@ -27,6 +27,11 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Streaming writes](#streaming-writes)
   - [One-shot convenience function](#one-shot-convenience-function)
   - [pcapng output](#pcapng-output)
+- [Sending packets](#sending-packets)
+  - [Injecting a frame](#injecting-a-frame)
+  - [Replaying a capture file](#replaying-a-capture-file)
+  - [Sharing across threads](#sharing-across-threads)
+  - [How each platform sends](#how-each-platform-sends)
 - [The PacketRef and Packet types](#the-packetref-and-packet-types)
 - [Error handling](#error-handling)
 - [Platform notes](#platform-notes)
@@ -35,6 +40,7 @@ Cross-platform packet capture with [pktbaffle](../) filter expressions. Capture 
   - [Windows](#windows)
 - [The stats example](#the-stats-example)
 - [The inspect example](#the-inspect-example)
+- [The replay example](#the-replay-example)
 - [Filter expression language](#filter-expression-language)
 
 ---
@@ -66,6 +72,7 @@ pkttap = "0.3"
 | Snaplen | ✓ | ✓ | ✓ |
 | Capture statistics | ✓ PACKET_STATISTICS | ✓ BIOCGSTATS | ✓ pcap_stats |
 | Zero-copy kernel ring | ✓ TPACKET_V3 (opt-in) | — | — |
+| Packet injection | ✓ AF_PACKET `send()` | ✓ /dev/bpf `write()` | ✓ pcap_sendpacket |
 | pcap file read | ✓ | ✓ | ✓ |
 | pcapng file read | ✓ | ✓ | ✓ |
 | pcap file write | ✓ | ✓ | ✓ |
@@ -492,6 +499,78 @@ for pkt in &packets {
 
 ---
 
+## Sending packets
+
+`Capture` only receives. To put frames on the wire, open an **`Injector`**, pkttap's equivalent of libpcap's `pcap_inject()` / `pcap_sendpacket()`. It's useful for traffic replay, fuzzing and test tooling.
+
+### Injecting a frame
+
+```rust
+use pkttap::Injector;
+
+let inj = Injector::on_interface("eth0")?;
+
+// A complete Ethernet frame: destination MAC, source MAC, EtherType, payload.
+let frame: Vec<u8> = build_frame();
+let sent = inj.send(&frame)?;
+assert_eq!(sent, frame.len());
+```
+
+`send()` transmits the frame **exactly as given**. pkttap adds no link-layer header, fills in no addresses and computes no checksums, and the frame check sequence is left to the NIC. So the frame must already be in the interface's link-layer format, which `inj.link_type()` reports.
+
+`send()` returns an error without sending anything if the frame is empty. It also returns an error when the OS refuses the frame: typically when the frame is shorter than the link-layer header, larger than the MTU plus that header, or the interface is down.
+
+An `Injector` only transmits: it never receives, so an idle one queues no inbound traffic in the kernel. To watch what it sends, open a `Capture` on the same interface.
+
+### Replaying a capture file
+
+```rust
+use pkttap::{Capture, Injector};
+
+let inj = Injector::on_interface("eth0")?;
+let mut cap = Capture::from_file("traffic.pcap")
+    .filter("udp port 53")     // optional: only replay DNS
+    .open()?;
+assert_eq!(cap.link_type(), inj.link_type());
+
+while let Some(pkt) = cap.next()? {
+    if !pkt.is_truncated() {   // a snaplen-truncated frame isn't what was on the wire
+        inj.send(pkt.data())?;
+    }
+}
+```
+
+The [`replay` example](#the-replay-example) builds on this with a packet count and real-time pacing.
+
+### Sharing across threads
+
+`send()` takes `&self` and `Injector` is `Send + Sync`, so one injector can be shared between threads behind an `Arc`:
+
+```rust
+use std::sync::Arc;
+use pkttap::Injector;
+
+let inj = Arc::new(Injector::on_interface("eth0")?);
+for _ in 0..4 {
+    let inj = Arc::clone(&inj);
+    std::thread::spawn(move || {
+        let _ = inj.send(&frame);
+    });
+}
+```
+
+### How each platform sends
+
+| Platform | Mechanism | Notes |
+|----------|-----------|-------|
+| Linux | `send()` on an `AF_PACKET` / `SOCK_RAW` socket bound to the interface | The socket uses protocol `0`, so it receives nothing |
+| macOS | `write()` on a `/dev/bpf*` device | `BIOCSHDRCMPLT` is set so the kernel keeps the frame's source MAC; a reject-all read filter stops inbound traffic from buffering |
+| Windows | `pcap_sendpacket()` via Npcap | Each frame is copied first, because Windows may rewrite IP header fields in the send buffer on the loopback adapter; a reject-all read filter stops inbound traffic from buffering |
+
+Injection needs the same privileges as live capture (see [Platform notes](#platform-notes)).
+
+---
+
 ## The PacketRef and Packet types
 
 `Capture::next()` yields a **`PacketRef<'_>`** — a *borrowed* view into the capture's internal buffer. Capturing a packet performs no per-packet heap allocation; the bytes are read straight from the kernel/driver buffer. A `PacketRef` is only valid until the next `next()` call, so it cannot be stored across iterations — the borrow checker enforces this. Call `.to_owned()` to get an owned **`Packet`** you can move, store, or send to another thread.
@@ -659,6 +738,8 @@ for name in pkttap::interfaces()? {
 }
 ```
 
+**Loopback injection:** Npcap's "Adapter for loopback traffic capture" accepts injected frames, but it uses BSD loopback (`DLT_NULL`) framing, not Ethernet. Each frame starts with a 4-byte address family in host byte order (`2` for IPv4), followed by the IP packet. pkttap has no `LinkType` for that framing, so `link_type()` reports `Ethernet` for this adapter.
+
 **DLL search order:** pkttap looks for `wpcap.dll` in:
 1. `%SystemRoot%\System32\Npcap\` (Npcap's default install path)
 2. `%SystemRoot%\System32\` (WinPcap legacy / manually placed)
@@ -766,6 +847,30 @@ Each packet shows:
 - **Packet number** and **timestamp** (seconds.microseconds since epoch)
 - **Link type** and **on-wire length** (with `[truncated to N]` if snaplen applies)
 - **Hex dump:** 16 bytes per row — offset, two groups of 8 hex bytes, then a `|printable ASCII|` column
+
+---
+
+## The replay example
+
+The `replay` example sends the packets in a pcap/pcapng file out of an interface, tcpreplay-style. It demonstrates the `Injector` API. Like live capture, it needs elevated privileges.
+
+```bash
+# Replay every packet as fast as possible
+sudo cargo run --example replay -p pkttap -- traffic.pcap eth0
+
+# Replay only DNS traffic, keeping the original spacing between packets
+sudo cargo run --example replay -p pkttap -- traffic.pcap eth0 --filter "udp port 53" --realtime
+
+# Replay the first 10 packets onto loopback for a local test
+sudo cargo run --example replay -p pkttap -- traffic.pcap lo --count 10
+```
+
+```
+replaying traffic.pcap onto lo  link-type: Ethernet  filter: <none>  timing: original
+6 packets (324 bytes) sent in 0.404s
+```
+
+The file's link type must match the interface's, since frames are sent unmodified. Packets that were truncated by the original capture's snaplen are skipped, because they are not the frames that were on the wire.
 
 ---
 

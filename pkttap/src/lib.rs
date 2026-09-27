@@ -28,6 +28,20 @@
 //! # Ok::<(), pkttap::Error>(())
 //! ```
 //!
+//! # Sending packets
+//!
+//! [`Injector`] is the transmit side: it writes complete link-layer frames
+//! onto an interface, the equivalent of libpcap's `pcap_inject()`.
+//!
+//! ```no_run
+//! use pkttap::Injector;
+//!
+//! let inj = Injector::on_interface("eth0")?;
+//! # let frame: Vec<u8> = Vec::new();
+//! inj.send(&frame)?; // `frame` includes its Ethernet header
+//! # Ok::<(), pkttap::Error>(())
+//! ```
+//!
 //! # Linux extras
 //!
 //! Two capture features exist only on Linux, and so are compiled in only
@@ -45,6 +59,7 @@ mod error;
 #[cfg(target_os = "linux")]
 mod fanout;
 mod file;
+mod inject;
 mod live;
 mod packet;
 #[cfg(target_os = "linux")]
@@ -57,6 +72,7 @@ pub use dump::{Dump, DumpBuilder};
 pub use error::{Error, Result};
 #[cfg(target_os = "linux")]
 pub use fanout::{FanoutGroup, FanoutMode};
+pub use inject::Injector;
 pub use packet::{LinkType, Packet, PacketRef};
 #[cfg(target_os = "linux")]
 pub use ring::RingConfig;

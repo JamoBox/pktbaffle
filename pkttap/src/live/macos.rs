@@ -3,6 +3,9 @@
 //! The kernel applies the cBPF filter via BIOCSETF before returning data,
 //! so only matching packets reach userspace. Each read() returns one or more
 //! BPF-framed packets; we parse the bpf_hdr prefix from each.
+//!
+//! Injection ([`MacosInjector`]) uses the same device type in the other
+//! direction: each write() transmits one complete link-layer frame.
 
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -20,6 +23,10 @@ const BIOCGBLEN: libc::c_ulong = 0x40044266;
 const BIOCGDLT: libc::c_ulong = 0x4004426a;
 // _IOR('B', 111, struct bpf_stat) — 8-byte struct, group 'B'=0x42, num=0x6f
 const BIOCGSTATS: libc::c_ulong = 0x4008_426f;
+// _IOW('B', 117, u_int) — "header complete": when set, write() leaves the
+// frame's link-layer source address alone instead of overwriting it with the
+// interface's own MAC.
+const BIOCSHDRCMPLT: libc::c_ulong = 0x8004_4275;
 
 /// bpf_stat as returned by BIOCGSTATS on macOS. Counters are cumulative
 /// since the BPF device was opened; unlike Linux PACKET_STATISTICS, reading
@@ -107,27 +114,8 @@ impl MacosLive {
             return Err(super::io_err());
         }
 
-        // Bind to interface
-        let iface_c =
-            CString::new(iface).map_err(|_| Error::Platform("invalid interface name".into()))?;
-        let mut ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
-        let bytes = iface_c.as_bytes_with_nul();
-        for (i, &b) in bytes.iter().enumerate().take(libc::IFNAMSIZ) {
-            ifreq.ifr_name[i] = b as libc::c_char;
-        }
-        let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETIF, &ifreq) };
-        if rc < 0 {
-            return Err(super::io_err());
-        }
-
-        // Query the actual data link type from the kernel (authoritative)
-        let mut dlt: libc::c_uint = 0;
-        let dlt_rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCGDLT, &mut dlt) };
-        let link_type = if dlt_rc >= 0 {
-            super::dlt_to_link_type(dlt)
-        } else {
-            LinkType::Ethernet
-        };
+        bind_interface(&fd, iface)?;
+        let link_type = device_link_type(&fd);
 
         // Enable promiscuous mode
         if promiscuous {
@@ -139,15 +127,7 @@ impl MacosLive {
 
         // Attach BPF filter
         if let Some(prog) = filter {
-            let insns = prog.instructions();
-            let bpf_prog = BpfProgram {
-                bf_len: insns.len() as u32,
-                bf_insns: insns.as_ptr(),
-            };
-            let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETF, &bpf_prog) };
-            if rc < 0 {
-                return Err(super::io_err());
-            }
+            set_filter(&fd, prog.instructions())?;
         }
 
         // Query kernel buffer size
@@ -319,6 +299,106 @@ fn parse_bpf_frame(
     ))
 }
 
+/// Transmit-only BPF device backing [`crate::Injector`].
+///
+/// A BPF device bound to an interface buffers every packet the interface
+/// sees until it is read. An injector never reads, so it installs a filter
+/// that rejects everything: nothing accumulates in the kernel buffer, and the
+/// write path — which the read filter does not touch — is unaffected.
+pub struct MacosInjector {
+    fd: OwnedFd,
+    link_type: LinkType,
+}
+
+impl MacosInjector {
+    pub fn open(iface: &str) -> Result<Self> {
+        let fd = open_bpf_device()?;
+        bind_interface(&fd, iface)?;
+
+        // Send frames exactly as given. Without this the kernel rewrites the
+        // Ethernet source address to the interface's own MAC.
+        let one: libc::c_uint = 1;
+        let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSHDRCMPLT, &one) };
+        if rc < 0 {
+            return Err(super::io_err());
+        }
+
+        set_filter(
+            &fd,
+            &[pktbaffle::bpf::Insn::ret_k(pktbaffle::bpf::BPF_DROP)],
+        )?;
+
+        let link_type = device_link_type(&fd);
+        Ok(Self { fd, link_type })
+    }
+
+    pub fn link_type(&self) -> LinkType {
+        self.link_type
+    }
+
+    /// Transmit `frame` unmodified with one `write()` on the BPF device.
+    pub fn send(&self, frame: &[u8]) -> Result<usize> {
+        loop {
+            let n = unsafe {
+                libc::write(
+                    self.fd.as_raw_fd(),
+                    frame.as_ptr() as *const libc::c_void,
+                    frame.len(),
+                )
+            };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e.into());
+            }
+            return Ok(n as usize);
+        }
+    }
+}
+
+/// Attach a BPF device to `iface` (BIOCSETIF).
+fn bind_interface(fd: &OwnedFd, iface: &str) -> Result<()> {
+    let iface_c =
+        CString::new(iface).map_err(|_| Error::Platform("invalid interface name".into()))?;
+    let mut ifreq: libc::ifreq = unsafe { std::mem::zeroed() };
+    let bytes = iface_c.as_bytes_with_nul();
+    for (i, &b) in bytes.iter().enumerate().take(libc::IFNAMSIZ) {
+        ifreq.ifr_name[i] = b as libc::c_char;
+    }
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETIF, &ifreq) };
+    if rc < 0 {
+        return Err(super::io_err());
+    }
+    Ok(())
+}
+
+/// Query the attached interface's data link type from the kernel (BIOCGDLT).
+/// This is authoritative, unlike the pre-open estimate in `query_link_type`.
+fn device_link_type(fd: &OwnedFd) -> LinkType {
+    let mut dlt: libc::c_uint = 0;
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCGDLT, &mut dlt) };
+    if rc >= 0 {
+        super::dlt_to_link_type(dlt)
+    } else {
+        LinkType::Ethernet
+    }
+}
+
+/// Install a cBPF read filter on a BPF device (BIOCSETF).
+fn set_filter(fd: &OwnedFd, insns: &[pktbaffle::bpf::Insn]) -> Result<()> {
+    let bpf_prog = BpfProgram {
+        bf_len: insns.len() as u32,
+        bf_insns: insns.as_ptr(),
+    };
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), BIOCSETF, &bpf_prog) };
+    if rc < 0 {
+        return Err(super::io_err());
+    }
+    Ok(())
+}
+
 /// Open the first available /dev/bpfN device.
 fn open_bpf_device() -> Result<OwnedFd> {
     for n in 0..256 {
@@ -400,6 +480,26 @@ mod tests {
         out.extend_from_slice(payload);
         out.resize(word_align(hdr_size + payload.len()), 0); // trailing alignment padding
         out
+    }
+
+    /// `_IOW('B', num, T)` as `<sys/ioccom.h>` encodes it.
+    fn iow_b(num: u8, size: usize) -> libc::c_ulong {
+        0x8000_0000
+            | (((size as libc::c_ulong) & 0x1fff) << 16)
+            | (0x42 << 8)
+            | num as libc::c_ulong
+    }
+
+    /// The write-direction BPF ioctls are hand-encoded; check them against the
+    /// macro so a typo cannot silently issue the wrong request.
+    #[test]
+    fn write_ioctl_codes_match_iow_encoding() {
+        assert_eq!(BIOCSETIF, iow_b(108, std::mem::size_of::<libc::ifreq>()));
+        assert_eq!(BIOCSETF, iow_b(103, std::mem::size_of::<BpfProgram>()));
+        assert_eq!(
+            BIOCSHDRCMPLT,
+            iow_b(117, std::mem::size_of::<libc::c_uint>())
+        );
     }
 
     #[test]

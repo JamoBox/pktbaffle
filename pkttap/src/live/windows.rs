@@ -5,6 +5,9 @@
 //! The binary compiles and starts without Npcap present; open() and
 //! list_interfaces() return a clear error if the DLL cannot be found.
 //!
+//! Injection ([`WindowsInjector`]) opens its own handle and transmits with
+//! pcap_sendpacket.
+//!
 //! See ADR 0003.
 
 use std::ffi::{CStr, CString};
@@ -81,6 +84,7 @@ struct NpcapLib {
     pcap_freealldevs: unsafe extern "C" fn(*mut PcapIf),
     pcap_geterr: unsafe extern "C" fn(*mut PcapT) -> *const i8,
     pcap_stats: unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> i32,
+    pcap_sendpacket: unsafe extern "C" fn(*mut PcapT, *const u8, i32) -> i32,
 }
 
 // SAFETY: Library and raw fn pointers are both Send+Sync on Windows.
@@ -124,6 +128,10 @@ impl NpcapLib {
                 b"pcap_stats\0",
                 unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> i32
             );
+            let pcap_sendpacket = sym!(
+                b"pcap_sendpacket\0",
+                unsafe extern "C" fn(*mut PcapT, *const u8, i32) -> i32
+            );
 
             Ok(NpcapLib {
                 _lib: lib,
@@ -136,6 +144,7 @@ impl NpcapLib {
                 pcap_freealldevs,
                 pcap_geterr,
                 pcap_stats,
+                pcap_sendpacket,
             })
         }
     }
@@ -261,6 +270,61 @@ fn alldevs_to_vec(lib: &NpcapLib) -> Result<(*mut PcapIf, Vec<String>)> {
     Ok((alldevs, names))
 }
 
+/// Resolve `iface` to an Npcap device and open a live handle on it.
+fn open_device(lib: &NpcapLib, iface: &str, snaplen: u32, promiscuous: bool) -> Result<*mut PcapT> {
+    let (alldevs, _) = alldevs_to_vec(lib)?;
+    let device_name = unsafe { resolve_device_name(alldevs, iface) };
+    unsafe { (lib.pcap_freealldevs)(alldevs) };
+
+    let device_name =
+        device_name.ok_or_else(|| Error::Platform(format!("interface not found: {iface}")))?;
+    let device_c =
+        CString::new(device_name).map_err(|_| Error::Platform("invalid interface name".into()))?;
+
+    let mut errbuf = [0i8; PCAP_ERRBUF_SIZE];
+    let handle = unsafe {
+        (lib.pcap_open_live)(
+            device_c.as_ptr(),
+            snaplen as i32,
+            if promiscuous { 1 } else { 0 },
+            100, // 100 ms read timeout; next_packet loops on timeout
+            errbuf.as_mut_ptr(),
+        )
+    };
+    if handle.is_null() {
+        let msg = unsafe { CStr::from_ptr(errbuf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        return Err(Error::Platform(format!("pcap_open_live failed: {msg}")));
+    }
+    Ok(handle)
+}
+
+/// Install a cBPF filter on an open handle. Leaves the handle open on failure;
+/// the caller decides whether to close it.
+unsafe fn set_filter(
+    lib: &NpcapLib,
+    handle: *mut PcapT,
+    insns: &[pktbaffle::bpf::Insn],
+) -> Result<()> {
+    let mut bpf_prog = BpfProgram {
+        bf_len: insns.len() as u32,
+        bf_insns: insns.as_ptr(),
+    };
+    if (lib.pcap_setfilter)(handle, &mut bpf_prog) < 0 {
+        return Err(last_error(lib, handle, "pcap_setfilter"));
+    }
+    Ok(())
+}
+
+/// Build an error from the handle's last error message (`pcap_geterr`).
+unsafe fn last_error(lib: &NpcapLib, handle: *mut PcapT, call: &str) -> Error {
+    let msg = CStr::from_ptr((lib.pcap_geterr)(handle))
+        .to_string_lossy()
+        .into_owned();
+    Error::Platform(format!("{call} failed: {msg}"))
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub struct WindowsLive {
@@ -283,51 +347,15 @@ impl WindowsLive {
         _timestamp_mode: crate::timestamp::TimestampMode,
     ) -> Result<Self> {
         let lib = npcap()?;
-
-        let (alldevs, _) = alldevs_to_vec(lib)?;
-        let device_name = unsafe { resolve_device_name(alldevs, iface) };
-        unsafe { (lib.pcap_freealldevs)(alldevs) };
-
-        let device_name =
-            device_name.ok_or_else(|| Error::Platform(format!("interface not found: {iface}")))?;
-        let device_c = CString::new(device_name)
-            .map_err(|_| Error::Platform("invalid interface name".into()))?;
-
-        let mut errbuf = [0i8; PCAP_ERRBUF_SIZE];
-        let handle = unsafe {
-            (lib.pcap_open_live)(
-                device_c.as_ptr(),
-                snaplen as i32,
-                if promiscuous { 1 } else { 0 },
-                100, // 100 ms read timeout; next_packet loops on timeout
-                errbuf.as_mut_ptr(),
-            )
-        };
-        if handle.is_null() {
-            let msg = unsafe { CStr::from_ptr(errbuf.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
-            return Err(Error::Platform(format!("pcap_open_live failed: {msg}")));
-        }
+        let handle = open_device(lib, iface, snaplen, promiscuous)?;
 
         let dlt = unsafe { (lib.pcap_datalink)(handle) };
         let link_type = super::dlt_to_link_type(dlt as u32);
 
         if let Some(prog) = filter {
-            let insns = prog.instructions();
-            let mut bpf_prog = BpfProgram {
-                bf_len: insns.len() as u32,
-                bf_insns: insns.as_ptr(),
-            };
-            let rc = unsafe { (lib.pcap_setfilter)(handle, &mut bpf_prog) };
-            if rc < 0 {
-                let msg = unsafe {
-                    CStr::from_ptr((lib.pcap_geterr)(handle))
-                        .to_string_lossy()
-                        .into_owned()
-                };
+            if let Err(e) = unsafe { set_filter(lib, handle, prog.instructions()) } {
                 unsafe { (lib.pcap_close)(handle) };
-                return Err(Error::Platform(format!("pcap_setfilter failed: {msg}")));
+                return Err(e);
             }
         }
 
@@ -414,6 +442,94 @@ impl Drop for WindowsLive {
     fn drop(&mut self) {
         if let Ok(lib) = npcap() {
             unsafe { (lib.pcap_close)(self.handle) };
+        }
+    }
+}
+
+/// Transmit state owned by exactly one [`WindowsInjector`]: the open `pcap_t`
+/// handle, plus a buffer each frame is copied into before it is sent.
+///
+/// The copy is required for soundness, not speed. `pcap_sendpacket` takes a
+/// `const u_char *`, but Npcap hands the caller's memory to the driver and the
+/// Windows network stack may write to it in place — on the loopback adapter,
+/// sending an IPv4 frame rewrites its IP identification and header checksum
+/// in the buffer passed in. Passing `Injector::send`'s `&[u8]` straight
+/// through would mutate memory behind a shared reference, which is undefined
+/// behaviour; the stack scribbles on this private copy instead.
+struct Tx {
+    handle: *mut PcapT,
+    buf: Vec<u8>,
+}
+
+// SAFETY: `Tx` is only ever used through the injector's Mutex, so the handle is
+// never touched by two threads at once; moving it between threads is fine.
+unsafe impl Send for Tx {}
+
+/// Transmit-only Npcap handle backing [`crate::Injector`].
+///
+/// An open handle buffers everything the adapter receives until it is read.
+/// An injector never reads, so it installs a filter that rejects every
+/// packet; `pcap_sendpacket` is unaffected by the read filter.
+///
+/// libpcap handles are not thread-safe, and a failed send reports its reason
+/// through per-handle state (`pcap_geterr`), so sends are serialised with a
+/// Mutex. That keeps `Injector` `Sync` on every platform at the cost of an
+/// uncontended lock per frame.
+pub struct WindowsInjector {
+    tx: std::sync::Mutex<Tx>,
+    link_type: LinkType,
+}
+
+impl WindowsInjector {
+    pub fn open(iface: &str) -> Result<Self> {
+        let lib = npcap()?;
+        let handle = open_device(lib, iface, 65535, false)?;
+
+        let reject_all = [pktbaffle::bpf::Insn::ret_k(pktbaffle::bpf::BPF_DROP)];
+        if let Err(e) = unsafe { set_filter(lib, handle, &reject_all) } {
+            unsafe { (lib.pcap_close)(handle) };
+            return Err(e);
+        }
+
+        let dlt = unsafe { (lib.pcap_datalink)(handle) };
+        Ok(Self {
+            tx: std::sync::Mutex::new(Tx {
+                handle,
+                buf: Vec::new(),
+            }),
+            link_type: super::dlt_to_link_type(dlt as u32),
+        })
+    }
+
+    pub fn link_type(&self) -> LinkType {
+        self.link_type
+    }
+
+    /// Transmit `frame` with `pcap_sendpacket`, which sends the whole frame or
+    /// fails. The frame is copied first (see [`Tx`]); the copy buffer is
+    /// reused, so steady-state sends do not allocate.
+    pub fn send(&self, frame: &[u8]) -> Result<usize> {
+        let len = i32::try_from(frame.len())
+            .map_err(|_| Error::Platform(format!("frame too large: {} bytes", frame.len())))?;
+        let lib = npcap()?;
+        // A panic while holding the lock cannot leave `Tx` in a state a later
+        // send would trip over, so recover from poisoning.
+        let mut tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        let Tx { handle, buf } = &mut *tx;
+        buf.clear();
+        buf.extend_from_slice(frame);
+        if unsafe { (lib.pcap_sendpacket)(*handle, buf.as_ptr(), len) } != 0 {
+            return Err(unsafe { last_error(lib, *handle, "pcap_sendpacket") });
+        }
+        Ok(frame.len())
+    }
+}
+
+impl Drop for WindowsInjector {
+    fn drop(&mut self) {
+        if let Ok(lib) = npcap() {
+            let tx = self.tx.get_mut().unwrap_or_else(|e| e.into_inner());
+            unsafe { (lib.pcap_close)(tx.handle) };
         }
     }
 }
