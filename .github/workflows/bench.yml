@@ -48,6 +48,14 @@ jobs:
         with:
           key: bench
 
+      # rust-cache can restore target/criterion with `base/` baseline dirs but
+      # without their sample.json. Criterion then attempts a comparison, fails,
+      # and prints "Criterion.rs ERROR: ..." to stdout in the middle of each
+      # `test ... bench:` line, so the store step finds no results. History
+      # lives in gh-pages, not in local baselines, so start from a clean slate.
+      - name: Clear stale Criterion baselines
+        run: rm -rf target/criterion
+
       # Run all three benchmark targets in sequence, capturing combined output.
       # `tee -a` appends so a single file feeds the store step below.
       - name: Run compiler benchmarks
