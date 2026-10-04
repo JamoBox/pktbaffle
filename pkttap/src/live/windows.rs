@@ -10,6 +10,7 @@
 //!
 //! See ADR 0003.
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::slice;
 use std::sync::OnceLock;
@@ -85,6 +86,7 @@ struct NpcapLib {
     pcap_geterr: unsafe extern "C" fn(*mut PcapT) -> *const i8,
     pcap_stats: unsafe extern "C" fn(*mut PcapT, *mut PcapStat) -> i32,
     pcap_sendpacket: unsafe extern "C" fn(*mut PcapT, *const u8, i32) -> i32,
+    pcap_setnonblock: unsafe extern "C" fn(*mut PcapT, i32, *mut i8) -> i32,
 }
 
 // SAFETY: Library and raw fn pointers are both Send+Sync on Windows.
@@ -132,6 +134,10 @@ impl NpcapLib {
                 b"pcap_sendpacket\0",
                 unsafe extern "C" fn(*mut PcapT, *const u8, i32) -> i32
             );
+            let pcap_setnonblock = sym!(
+                b"pcap_setnonblock\0",
+                unsafe extern "C" fn(*mut PcapT, i32, *mut i8) -> i32
+            );
 
             Ok(NpcapLib {
                 _lib: lib,
@@ -145,6 +151,7 @@ impl NpcapLib {
                 pcap_geterr,
                 pcap_stats,
                 pcap_sendpacket,
+                pcap_setnonblock,
             })
         }
     }
@@ -332,6 +339,10 @@ pub struct WindowsLive {
     handle: *mut PcapT,
     snaplen: usize,
     link_type: LinkType,
+    // Mirrors the handle's pcap_setnonblock state so next_packet can tell
+    // "nothing ready" apart from a blocking-mode read timeout: pcap_next_ex
+    // returns 0 for both. A Cell because set_nonblocking takes &self.
+    nonblocking: Cell<bool>,
 }
 
 unsafe impl Send for WindowsLive {}
@@ -363,6 +374,7 @@ impl WindowsLive {
             handle,
             snaplen: snaplen as usize,
             link_type,
+            nonblocking: Cell::new(false),
         })
     }
 
@@ -390,16 +402,29 @@ impl WindowsLive {
         })
     }
 
-    /// Non-blocking mode is not yet implemented on Windows via the Npcap backend.
+    /// Set or clear non-blocking mode on the Npcap handle via `pcap_setnonblock`.
     ///
-    /// Returns `Err(Error::Platform(...))`. Use a short `buffer_timeout` and
-    /// poll in a dedicated thread as a workaround.
-    pub fn set_nonblocking(&self, _nb: bool) -> Result<()> {
-        Err(Error::Platform(
-            "non-blocking capture is not yet supported on Windows".into(),
-        ))
+    /// When non-blocking mode is active, [`Self::next_packet`] returns
+    /// `Ok(None)` immediately if no packet is ready, rather than blocking.
+    pub fn set_nonblocking(&self, nb: bool) -> Result<()> {
+        let lib = npcap()?;
+        let mut errbuf = [0i8; PCAP_ERRBUF_SIZE];
+        let rc = unsafe { (lib.pcap_setnonblock)(self.handle, i32::from(nb), errbuf.as_mut_ptr()) };
+        if rc < 0 {
+            let msg = unsafe { CStr::from_ptr(errbuf.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            return Err(Error::Platform(format!("pcap_setnonblock failed: {msg}")));
+        }
+        self.nonblocking.set(nb);
+        Ok(())
     }
 
+    /// Return the next packet, blocking unless non-blocking mode was set via
+    /// [`Self::set_nonblocking`].
+    ///
+    /// Returns `Ok(None)` when non-blocking mode is active and no packet is
+    /// ready.
     pub fn next_packet(&mut self) -> Result<Option<PacketRef<'_>>> {
         let lib = npcap()?;
         loop {
@@ -424,7 +449,10 @@ impl WindowsLive {
                         self.link_type,
                     )));
                 }
-                0 => continue, // read timeout, no packet — retry
+                // No packet: "nothing ready" in non-blocking mode, otherwise
+                // the 100 ms read timeout expired — retry.
+                0 if self.nonblocking.get() => return Ok(None),
+                0 => continue,
                 _ => {
                     let msg = unsafe {
                         CStr::from_ptr((lib.pcap_geterr)(self.handle))

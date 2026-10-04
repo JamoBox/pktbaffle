@@ -6,6 +6,8 @@
 //!   - Opening a live capture on a non-existent interface fails regardless of
 //!     the nonblocking flag (exercises the builder/open path)
 //!   - File captures are unaffected by the nonblocking flag
+//!   - On Windows, an idle non-blocking capture on the Npcap loopback adapter
+//!     returns `Ok(None)` (skipped when Npcap is not installed)
 
 mod common;
 
@@ -56,4 +58,50 @@ fn nonblocking_flag_ignored_for_file_capture() {
     let got = cap.next().unwrap().expect("should return the packet");
     assert_eq!(got.data(), pkt.as_slice());
     assert!(cap.next().unwrap().is_none());
+}
+
+// ── Live non-blocking over the Npcap loopback adapter (Windows) ───────────────
+
+/// A non-blocking capture on a quiet filter returns `Ok(None)` instead of
+/// blocking. Skips when Npcap or its loopback adapter is unavailable.
+#[cfg(windows)]
+#[test]
+fn nonblocking_windows_loopback_returns_none_when_idle() {
+    use std::time::{Duration, Instant};
+
+    let lo = pkttap::interfaces().ok().and_then(|names| {
+        names
+            .into_iter()
+            .find(|n| n.to_lowercase().contains("loopback"))
+    });
+    let Some(lo) = lo else {
+        eprintln!("skipping: no Npcap loopback adapter");
+        return;
+    };
+    let mut cap = match Capture::live(&lo)
+        .filter("udp port 9")
+        .nonblocking(true)
+        .open()
+    {
+        Ok(cap) => cap,
+        Err(e) => {
+            eprintln!("skipping: cannot capture on {lo} ({e})");
+            return;
+        }
+    };
+
+    // Background loopback traffic could still slip through, so drain until the
+    // first `Ok(None)`. The blocking path never returns `None` — it loops on
+    // 100 ms read timeouts — so reaching one within the deadline shows the
+    // handle really is non-blocking.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match cap.next().expect("next on a non-blocking capture") {
+            None => break,
+            Some(_) => assert!(
+                Instant::now() < deadline,
+                "non-blocking capture never reported an empty queue"
+            ),
+        }
+    }
 }

@@ -312,8 +312,7 @@ mod live_windows {
         let marker = b"pkttap-inject-windows-loopback";
         let frame = null_udp_frame(marker);
 
-        // Windows captures cannot be non-blocking, so read on a thread and
-        // wait on a channel with a timeout.
+        // Read on a thread and wait on a channel with a timeout.
         let (tx, rx) = mpsc::channel();
         let cap_iface = lo.clone();
         std::thread::spawn(move || {
