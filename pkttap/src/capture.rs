@@ -129,8 +129,7 @@ impl CaptureBuilder {
     /// when integrating with an event loop or polling multiple sources.
     ///
     /// On Linux and macOS this sets `O_NONBLOCK` on the capture socket/fd via
-    /// `fcntl`. On Windows this option is not yet supported and
-    /// [`CaptureBuilder::open`] will return an error.
+    /// `fcntl`. On Windows it calls Npcap's `pcap_setnonblock`.
     ///
     /// Ignored for file-based captures (they never block).
     ///

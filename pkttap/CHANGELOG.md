@@ -4,6 +4,16 @@ All notable changes to **pkttap** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Non-blocking live capture on Windows.** `CaptureBuilder::nonblocking(true)`
+  now calls Npcap's `pcap_setnonblock` (added to the dynamically loaded
+  function table), and `Capture::next` returns `Ok(None)` when no packet is
+  ready, matching Linux and macOS. Previously `open()` returned an error on
+  Windows when non-blocking mode was requested.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added
