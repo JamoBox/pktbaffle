@@ -4,6 +4,20 @@ All notable changes to **pktbaffle** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`and` / `or` precedence now matches libpcap** (#128). The parser gave `and`
+  higher precedence than `or`; libpcap (`%left OR AND`, pcap-filter(7)) gives
+  `and`, `or` and juxtaposition *equal* precedence, left-associative. This is a
+  **behaviour change** for unparenthesised filters where an `or` is followed
+  later by an `and`: `port 22 or port 80 and host 10.0.0.1` is now
+  `(port 22 or port 80) and host 10.0.0.1` (previously
+  `port 22 or (port 80 and host 10.0.0.1)`), in both the cBPF and eBPF
+  backends. `a and b or c` and `not` binding are unchanged. Add parentheses
+  to keep the old grouping.
+
 ## [0.2.0] - 2026-07-30
 
 ### Changed (breaking)

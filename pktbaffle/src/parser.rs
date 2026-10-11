@@ -1,11 +1,11 @@
 //! Recursive-descent parser for libpcap-style filter expressions.
 //!
-//! Grammar (lowest to highest precedence):
+//! Grammar (lowest to highest precedence). As in libpcap, `and`, `or` and
+//! juxtaposition (implicit AND) have *equal* precedence and associate left to
+//! right: `a or b and c` is `(a or b) and c`.
 //!
 //! ```text
-//! expr      ::= or_expr
-//! or_expr   ::= and_expr ('or' and_expr)*
-//! and_expr  ::= not_expr ('and' not_expr | not_expr)*   // juxtaposition = AND
+//! expr      ::= not_expr (('and' | 'or')? not_expr)*   // juxtaposition = AND
 //! not_expr  ::= ('not' | '!') not_expr | atom
 //! atom      ::= '(' expr ')' | primitive
 //! ```
@@ -107,39 +107,31 @@ impl Parser<'_> {
                 "expression nested too deeply (max {MAX_DEPTH} levels)"
             )));
         }
-        let result = self.parse_or();
+        let result = self.parse_logical();
         self.depth -= 1;
         result
     }
 
-    fn parse_or(&mut self) -> Result<Expr> {
-        let mut left = self.parse_and()?;
-        while self.eat(&Token::Or) {
-            let right = self.parse_and()?;
-            left = Expr::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> Result<Expr> {
+    /// `and`, `or` and juxtaposition share one precedence level and fold left
+    /// to right, matching libpcap (`%left OR AND`); only `not` binds tighter.
+    fn parse_logical(&mut self) -> Result<Expr> {
         let mut left = self.parse_not()?;
         loop {
-            let explicit = self.eat(&Token::And);
-            if !explicit {
-                // Implicit AND: next token can start a primitive, and it's not
-                // an `or` or `)` or end of input.
-                match self.cur_tok() {
-                    None | Some(Token::Or) | Some(Token::RParen) => break,
-                    _ => {}
-                }
-                // But only if the current position actually looks like the
-                // start of a primitive (not some dangling token).
+            let is_or = self.eat(&Token::Or);
+            if !is_or && !self.eat(&Token::And) {
+                // Implicit AND: only if the current position actually looks
+                // like the start of a primitive (so `)` and end of input stop
+                // the loop, as does any dangling token).
                 if !self.looks_like_primitive_start() {
                     break;
                 }
             }
             let right = self.parse_not()?;
-            left = Expr::And(Box::new(left), Box::new(right));
+            left = if is_or {
+                Expr::Or(Box::new(left), Box::new(right))
+            } else {
+                Expr::And(Box::new(left), Box::new(right))
+            };
         }
         Ok(left)
     }
