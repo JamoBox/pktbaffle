@@ -560,6 +560,23 @@ fn byte_access_alu_expression() {
     eth("ip[8]-1 < 64");
 }
 
+#[test]
+fn byte_access_offset_arithmetic_accepted() {
+    // libpcap 1.10.3 accepts constant arithmetic inside `[...]`.
+    eth("ip[1<<3] = 0");
+    eth("ip[8/2] = 0");
+    eth("ip[-4/-2+2] = 0");
+}
+
+#[test]
+fn byte_access_offset_shift_overflow_rejected() {
+    // libpcap 1.10.3 rejects both at pcap_compile() time with
+    // "shift by more than 31 bits" (#134).  pktbaffle must return Err, not
+    // panic or silently compile `ip[1<<63]` as `ip[0]`.
+    assert!(try_eth("ip[1<<63] = 0").is_err());
+    assert!(try_eth("ip[(1<<63)/-1] = 0").is_err());
+}
+
 // ── Syntax parity: logical operators ─────────────────────────────────────────
 
 #[test]

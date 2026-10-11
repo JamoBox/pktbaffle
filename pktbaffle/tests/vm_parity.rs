@@ -476,6 +476,20 @@ fn ip_ttl_byte_access() {
     assert!(!run_filter("ip[8] = 128", &pkt));
 }
 
+#[test]
+fn ip_ttl_via_folded_offset_expressions() {
+    // Constant-folded offsets that stay in range are unchanged by the
+    // overflow checks (#134): each of these is ip[8], the TTL (64).
+    let pkt = tcp(IP_A, IP_B, 1234, 80);
+    for offset in ["1<<3", "16/2", "-4/-2+6", "(1<<30)/(1<<27)"] {
+        assert!(run_filter(&format!("ip[{offset}] = 64"), &pkt), "{offset}");
+        assert!(
+            !run_filter(&format!("ip[{offset}] = 128"), &pkt),
+            "{offset}"
+        );
+    }
+}
+
 // ── Ethernet MAC address filters ──────────────────────────────────────────────
 // eth_ipv4_tcp(dst_mac, src_mac, ...): bytes 0–5 = dst, bytes 6–11 = src.
 

@@ -1082,3 +1082,78 @@ fn fuzz_crash_repro_deeply_nested_with_trailing_garbage() {
         let _ = compile(crash_input, link, Target::Extended);
     }
 }
+
+// ── Regression: byte-access offset arithmetic must not overflow (#134) ────────
+// `X[(1<<63)/-1]` made the offset folder compute `i64::MIN / -1`, which panics
+// ("attempt to divide with overflow") in debug and release.  `1<<63` itself was
+// silently accepted as `ip[0]`.  libpcap 1.10.3 rejects both at compile time
+// ("shift by more than 31 bits"); pktbaffle must return `Err(ParseError)`.
+
+/// Run `f` on a thread with a `kib` KiB stack.  A panic inside `f` fails the
+/// calling test with the panic reported, rather than unwinding through it.
+fn on_small_stack<T: Send + 'static>(kib: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(kib * 1024)
+        .spawn(f)
+        .expect("spawn thread")
+        .join()
+        .unwrap_or_else(|_| panic!("thread panicked (see message above)"))
+}
+
+const OFFSET_OVERFLOW_FILTERS: &[&str] = &[
+    "ip[(1<<63)/-1] = 0",
+    "tcp[(1<<63)/-1:2] = 0",
+    "ether[(1<<63)/-1] = 0",
+    "ip6[(1<<63)/-1] = 0",
+    "ip[(1<<63)/(0-1)] = 0",
+    "ip[(1<<62<<1)/-1] = 0",
+    // `<<` that loses range without any division.
+    "ip[1<<63] = 0",
+    "ip[1<<62<<1] = 0",
+    // RHS byte-load goes through the same folder.
+    "ip[0] = ip[(1<<63)/-1]",
+    // Out of i32 range and negative: `v as i32` used to truncate this to 0.
+    "ip[0-(1<<40)] = 0",
+    "ip[-(1<<40)] = 0",
+];
+
+#[test]
+fn offset_expr_overflow_returns_parse_error_not_panic() {
+    use pktbaffle::{parse, Error};
+
+    on_small_stack(512, || {
+        for filter in OFFSET_OVERFLOW_FILTERS {
+            assert!(
+                matches!(parse(filter), Err(Error::ParseError { .. })),
+                "parse({filter:?}) must be a ParseError"
+            );
+            for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                for &target in &[Target::Classic, Target::Extended] {
+                    let r = compile(filter, link, target);
+                    assert!(
+                        matches!(r, Err(Error::ParseError { .. })),
+                        "compile({filter:?}, {link:?}, {target:?}) must be a ParseError, got {r:?}"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn offset_expr_valid_forms_unchanged_by_overflow_checks() {
+    // Checked arithmetic must not change results that are in range.
+    for (expr, plain) in [
+        ("ip[1<<3] = 0", "ip[8] = 0"),
+        ("ip[8/2] = 0", "ip[4] = 0"),
+        ("ip[-4/-2+2] = 0", "ip[4] = 0"),
+        ("ip[(1<<30)/(1<<29)] = 0", "ip[2] = 0"),
+        ("ip[-(1<<62)/-(1<<61)] = 0", "ip[2] = 0"),
+    ] {
+        assert_eq!(
+            eth_prog(expr).instructions(),
+            eth_prog(plain).instructions(),
+            "{expr} must compile like {plain}"
+        );
+    }
+}

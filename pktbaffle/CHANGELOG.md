@@ -24,6 +24,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   packet load is now followed by `BPF_END` (`be16` / `be32`), which makes the
   program correct on both endiannesses and keeps ordered comparisons and
   arithmetic working. (#129)
+- **Parser no longer panics on overflowing byte-access offsets** (#134).
+  `ip[(1<<63)/-1]` (`i64::MIN / -1`) aborted `compile()` / `parse()` with
+  "attempt to divide with overflow", and `ip[1<<63]` was silently compiled as
+  `ip[0]`. Division and `<<` inside `[...]` are now overflow-checked, and an
+  offset outside `i32` is rejected instead of truncated; all of these return
+  `Err(ParseError)`. In-range offset expressions are unchanged.
 
 ### Added
 

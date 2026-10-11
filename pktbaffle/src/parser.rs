@@ -978,10 +978,7 @@ impl Parser<'_> {
     // ── Constant offset expressions inside `[...]` — precedence: | ^ & shr+shl +- */
     fn parse_offset_expr(&mut self) -> Result<i32> {
         let v = self.parse_offset_or()?;
-        if v > i32::MAX as i64 {
-            return Err(self.err(format!("offset expression out of range: {v}")));
-        }
-        Ok(v as i32)
+        i32::try_from(v).map_err(|_| self.err(format!("offset expression out of range: {v}")))
     }
 
     fn parse_offset_or(&mut self) -> Result<i64> {
@@ -1021,7 +1018,12 @@ impl Parser<'_> {
                     if !(0..64).contains(&rhs) {
                         return Err(self.err("shift amount out of range in offset expression"));
                     }
-                    lhs <<= rhs;
+                    // Reject shifts that lose bits or reach the sign bit.
+                    let shifted = lhs << rhs;
+                    if shifted >> rhs != lhs {
+                        return Err(self.err("offset expression overflow"));
+                    }
+                    lhs = shifted;
                 }
                 Some(Token::Shr) => {
                     self.advance();
@@ -1075,7 +1077,10 @@ impl Parser<'_> {
                     if rhs == 0 {
                         return Err(self.err("division by zero in offset expression"));
                     }
-                    lhs /= rhs;
+                    // `i64::MIN / -1` overflows.
+                    lhs = lhs
+                        .checked_div(rhs)
+                        .ok_or_else(|| self.err("offset expression overflow"))?;
                 }
                 _ => break,
             }
