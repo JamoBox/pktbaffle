@@ -506,6 +506,74 @@ fn juxtaposition_acts_as_and() {
     assert!(!run_filter("tcp port 80", &wrong));
 }
 
+/// `and`/`or` have equal precedence and associate left to right (#128).
+///
+/// Expected verdicts are libpcap 1.10.3 `pcap_compile` + `pcap_offline_filter`
+/// results recorded in issue #128, not derived from pktbaffle: libpcap parses
+/// `X or Y and Z` as `(X or Y) and Z`. The two MATCH entries on the `tcp or udp`
+/// filter are not in the issue; they follow from that same documented parse.
+#[test]
+fn or_then_and_has_equal_precedence_like_libpcap() {
+    const NOMATCH: bool = false;
+    const MATCH: bool = true;
+    const OTHER: [u8; 4] = [9, 9, 9, 9];
+    const TARGET: [u8; 4] = [10, 0, 0, 1];
+    const DST: [u8; 4] = [8, 8, 8, 8];
+
+    let cases: [(&str, Vec<u8>, bool); 6] = [
+        // The issue's headline case: host guards BOTH port tests.
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 22),
+            NOMATCH,
+        ),
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(TARGET, DST, 1234, 80),
+            MATCH,
+        ),
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 80),
+            NOMATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 80),
+            NOMATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            tcp(TARGET, DST, 1234, 80),
+            MATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            udp(TARGET, DST, 1234, 53),
+            MATCH,
+        ),
+    ];
+
+    // The tree shape is link-independent, but codegen is not: run each packet
+    // on Ethernet, RawIp (Ethernet header stripped) and LinuxSll (cooked header).
+    for (filter, eth_pkt, expected) in &cases {
+        let mut sll = vec![0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00];
+        sll.extend_from_slice(&eth_pkt[14..]);
+        for (link, pkt) in [
+            (LinkType::Ethernet, &eth_pkt[..]),
+            (LinkType::RawIp, &eth_pkt[14..]),
+            (LinkType::LinuxSll, &sll[..]),
+        ] {
+            let prog = compile(filter, link, Target::Classic).unwrap();
+            assert_eq!(
+                pktbaffle::vm::run(prog.instructions(), pkt),
+                *expected,
+                "{filter:?} on {link:?}"
+            );
+        }
+    }
+}
+
 // ── Packet length filters ─────────────────────────────────────────────────────
 // Base TCP packet (no payload): 14 + 20 + 20 = 54 bytes.
 

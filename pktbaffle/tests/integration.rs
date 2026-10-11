@@ -493,6 +493,74 @@ fn outbound_is_codegen_error() {
     assert!(r.is_err());
 }
 
+// ── and/or precedence (#128) ──────────────────────────────────────────────────
+// libpcap 1.10.3 (`%left OR AND`, pcap-filter(7)): `and`, `or` and juxtaposition
+// have EQUAL precedence and associate left to right; only `not` binds tighter.
+
+fn ast(filter: &str) -> pktbaffle::ast::Expr {
+    pktbaffle::parse(filter).unwrap_or_else(|e| panic!("parse({filter:?}): {e}"))
+}
+
+#[test]
+fn and_or_equal_precedence_left_assoc() {
+    // `X or Y and Z` is `(X or Y) and Z` — the shape the old parser got wrong.
+    for (flat, grouped) in [
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            "(port 22 or port 80) and host 10.0.0.1",
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            "(tcp or udp) and host 10.0.0.1",
+        ),
+        // `X and Y or Z` is unchanged.
+        ("tcp and udp or icmp", "(tcp and udp) or icmp"),
+        (
+            "host 1.1.1.1 and tcp or udp",
+            "(host 1.1.1.1 and tcp) or udp",
+        ),
+        // Same-operator chains are left-associative.
+        ("tcp or udp or icmp", "(tcp or udp) or icmp"),
+        ("tcp and udp and icmp", "(tcp and udp) and icmp"),
+        // Longer mixed chains fold strictly left to right.
+        (
+            "arp or tcp and udp or icmp",
+            "((arp or tcp) and udp) or icmp",
+        ),
+        // Juxtaposition is AND at the same level.
+        ("tcp or udp host 10.0.0.1", "(tcp or udp) and host 10.0.0.1"),
+        ("tcp or udp icmp or arp", "((tcp or udp) and icmp) or arp"),
+        // `not` still binds tighter than both.
+        ("not tcp or udp and icmp", "((not tcp) or udp) and icmp"),
+        ("tcp or not udp and icmp", "(tcp or (not udp)) and icmp"),
+        // Inside parentheses the same rules apply, and `)` ends juxtaposition.
+        (
+            "(tcp or udp and icmp) arp",
+            "((tcp or udp) and icmp) and arp",
+        ),
+    ] {
+        assert_eq!(ast(flat), ast(grouped), "{flat:?} vs {grouped:?}");
+    }
+}
+
+#[test]
+fn or_then_and_is_not_the_old_tree_shape() {
+    use pktbaffle::ast::Expr;
+    let e = ast("port 22 or port 80 and host 10.0.0.1");
+    assert!(
+        matches!(&e, Expr::And(l, _) if matches!(**l, Expr::Or(..))),
+        "expected And(Or(..), ..), got {e:?}"
+    );
+    assert_ne!(e, ast("port 22 or (port 80 and host 10.0.0.1)"));
+}
+
+#[test]
+fn dangling_logical_operators_are_errors() {
+    for f in ["tcp or", "tcp and", "or tcp", "and tcp", "tcp and or udp"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be a parse error");
+    }
+}
+
 // ── Error cases ───────────────────────────────────────────────────────────────
 
 #[test]

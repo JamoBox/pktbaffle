@@ -592,6 +592,14 @@ fn logical_complex() {
     eth("(port 80 or port 443) and tcp and host 1.2.3.4");
 }
 
+/// Unparenthesised `or` followed by `and` is accepted by libpcap 1.10.3 (it
+/// parses as `(a or b) and c`); the verdicts are checked in `vm_parity.rs`.
+#[test]
+fn logical_or_then_and_unparenthesised() {
+    eth("port 22 or port 80 and host 10.0.0.1");
+    eth("tcp or udp and host 10.0.0.1");
+}
+
 // ── Syntax parity: link types ─────────────────────────────────────────────────
 
 #[test]
