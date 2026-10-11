@@ -682,6 +682,9 @@ mod parity {
 
     const ANY: &str = "*";
 
+    /// Mutations per corpus packet in the differential fuzz.
+    const FUZZ_ROUNDS: usize = 200;
+
     /// A divergence between eBPF and cBPF that belongs to another open issue.
     struct Known {
         filter: &'static str,
@@ -705,16 +708,6 @@ mod parity {
     /// delete the row. Where the cBPF oracle (not eBPF) is the buggy side the
     /// issue is noted as such.
     const KNOWN: &[Known] = &[
-        // ── #129: every eBPF 16/32-bit load is in host byte order, so on a
-        // little-endian host essentially every multi-byte comparison is wrong.
-        // A wildcard on purpose: it hides nothing on big-endian hosts (where
-        // the bug does not exist) and is deleted together with the fix.
-        Known {
-            filter: ANY,
-            packet: ANY,
-            host: Some(Little),
-            issue: "#129",
-        },
         // ── #130: the cBPF *oracle* is wrong. tcp/udp/sctp/proto match IPv4
         // only, while eBPF (correctly, like libpcap) is dual-stack.
         known("tcp", "ipv6_tcp_80", "#130"),
@@ -827,12 +820,21 @@ mod parity {
             .collect();
         assert!(
             unexpected.is_empty(),
-            "{host:?} host: eBPF disagrees with cBPF ({}) - fix the backend or, if \n             another open issue causes it, add a KNOWN entry:
-{}",
+            "{host:?} host: eBPF disagrees with cBPF ({}). Fix the backend or, if \
+             another open issue causes it, add a KNOWN entry:\n{}",
             unexpected.len(),
-            unexpected.join("
-"),
+            unexpected.join("\n"),
         );
+    }
+
+    #[test]
+    fn ebpf_matches_cbpf_on_little_endian_host() {
+        assert_parity(Little);
+    }
+
+    #[test]
+    fn ebpf_matches_cbpf_on_big_endian_host() {
+        assert_parity(Big);
     }
 
     /// Every KNOWN entry must still diverge on some host. (Not per host: a bug
@@ -850,23 +852,9 @@ mod parity {
             .collect();
         assert!(
             stale.is_empty(),
-            "these KNOWN entries no longer diverge - delete them:
-{}",
-            stale.join(
-                "
-"
-            ),
+            "these KNOWN entries no longer diverge - delete them:\n{}",
+            stale.join("\n"),
         );
-    }
-
-    #[test]
-    fn ebpf_matches_cbpf_on_little_endian_host() {
-        assert_parity(Little);
-    }
-
-    #[test]
-    fn ebpf_matches_cbpf_on_big_endian_host() {
-        assert_parity(Big);
     }
 
     /// Guards against a vacuous table: under the oracle every filter must
@@ -890,12 +878,101 @@ mod parity {
         }
         assert!(
             vacuous.is_empty(),
-            "add corpus packets for:
-{}",
-            vacuous.join(
-                "
-"
-            )
+            "add corpus packets for:\n{}",
+            vacuous.join("\n")
+        );
+    }
+
+    /// Deterministic xorshift64* (this crate has no `rand` dependency).
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// IPv4 over Ethernet with a non-zero fragment offset.
+    fn is_ipv4_fragment(pkt: &[u8]) -> bool {
+        pkt.len() >= 22 && pkt[12..14] == [0x08, 0x00] && (pkt[20] & 0x1f != 0 || pkt[21] != 0)
+    }
+
+    /// Differential fuzz: mutate corpus packets (random bytes, sometimes
+    /// truncated) and require eBPF == cBPF on both hosts. Filters with a KNOWN
+    /// entry sit out, since KNOWN is keyed by corpus packet; the two other
+    /// known divergences a mutation can reach are skipped below.
+    #[test]
+    fn mutated_packets_agree_with_cbpf() {
+        let progs: Vec<_> = FILTERS
+            .iter()
+            .filter(|f| !KNOWN.iter().any(|k| k.filter == **f))
+            .map(|&f| {
+                let c = compile(f, LinkType::Ethernet, Target::Classic).unwrap();
+                let e = compile(f, LinkType::Ethernet, Target::Extended).unwrap();
+                (f, c, e)
+            })
+            .collect();
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut bad: std::collections::BTreeMap<&str, (usize, String)> = Default::default();
+        for (name, base) in corpus() {
+            for _ in 0..FUZZ_ROUNDS {
+                let mut pkt = base.clone();
+                for _ in 0..1 + rng.below(3) {
+                    let i = rng.below(pkt.len());
+                    pkt[i] = match rng.below(4) {
+                        0 => 0x00,
+                        1 => 0xff,
+                        _ => rng.next() as u8,
+                    };
+                }
+                if rng.below(10) == 0 {
+                    pkt.truncate(rng.below(pkt.len() + 1));
+                }
+                for (f, c, e) in &progs {
+                    if (f.contains("port") && is_ipv4_fragment(&pkt)) // #148
+                        || f.starts_with("mpls ")
+                    // #147: cBPF ignores the label
+                    {
+                        continue;
+                    }
+                    let want = pktbaffle::vm::run(c.instructions(), &pkt);
+                    let want_v = if want {
+                        Verdict::Match
+                    } else {
+                        Verdict::NoMatch
+                    };
+                    for host in [Little, Big] {
+                        let got = run_ebpf(e.as_extended().unwrap().instructions(), &pkt, host);
+                        if got != Ok(want_v) {
+                            let slot = bad.entry(f).or_insert_with(|| {
+                                (
+                                    0,
+                                    format!(
+                                        "{host:?} cBPF={want} eBPF={got:?} on {name}: {pkt:02x?}"
+                                    ),
+                                )
+                            });
+                            slot.0 += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let report: Vec<String> = bad
+            .iter()
+            .map(|(f, (n, first))| format!("  {f:?} x{n}, first: {first}"))
+            .collect();
+        assert!(
+            report.is_empty(),
+            "eBPF disagrees with cBPF on mutated packets:\n{}",
+            report.join("\n")
         );
     }
 }
@@ -917,15 +994,141 @@ mod explicit {
 
     // #129 acceptance: `tcp` on Ether()/IP()/TCP() matches on either host.
     #[test]
+    fn tcp_matches_ether_ip_tcp_on_little_endian_host() {
+        let pkt = tcp(IP_A, IP_B, 1234, 80);
+        assert_eq!(verdict("tcp", &pkt, Little), Ok(Verdict::Match));
+    }
+
+    #[test]
     fn tcp_matches_ether_ip_tcp_on_big_endian_host() {
         let pkt = tcp(IP_A, IP_B, 1234, 80);
         assert_eq!(verdict("tcp", &pkt, Big), Ok(Verdict::Match));
     }
 
+    fn named(name: &str) -> Vec<u8> {
+        match name {
+            "tcp80" => tcp(IP_A, IP_B, 1234, 80),
+            "tcp_other" => tcp(IP_C, IP_A, 5555, 443),
+            "tcp_other_macs" => eth_ipv4_tcp([2; 6], [4; 6], IP_A, IP_B, 1234, 80, 0x02, 0),
+            "udp53" => udp(IP_A, IP_B, 4000, 53),
+            "icmp" => eth_ipv4_icmp(IP_A, IP_B, 8, 0),
+            "arp" => eth_arp(IP_A, IP_B),
+            "ip6tcp" => eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02),
+            "vlan100" => eth_vlan_ipv4_tcp(100, IP_A, IP_B, 1234, 80, 0x02),
+            "vlan200" => eth_vlan_ipv4_tcp(200, IP_A, IP_B, 1234, 80, 0x02),
+            _ => panic!("unknown packet {name:?}"),
+        }
+    }
+
+    /// `(filter, packets that match, packets that do not)`.
+    ///
+    /// Verdicts are hand-derived from libpcap 1.10.3 semantics (the issue's
+    /// cross-check covers tcp, ip, arp, icmp, `tcp dst port 80`,
+    /// `ether proto 0x0800`, `ip[2:2] = 40` and `ether[12:2] = 0x0800`); they
+    /// do not depend on the cBPF oracle. Packets a filter would match only
+    /// because of another open issue (e.g. `host` on ARP, #140) are left out
+    /// of both lists, as are constants with bit 31 set (#132).
+    #[allow(clippy::type_complexity)]
+    const MATRIX: &[(&str, &[&str], &[&str])] = &[
+        (
+            "tcp",
+            &["tcp80", "tcp_other", "ip6tcp"],
+            &["udp53", "icmp", "arp", "vlan100"],
+        ),
+        (
+            "udp",
+            &["udp53"],
+            &["tcp80", "icmp", "arp", "ip6tcp", "vlan100"],
+        ),
+        (
+            "ip",
+            &["tcp80", "udp53", "icmp"],
+            &["arp", "ip6tcp", "vlan100"],
+        ),
+        ("ip6", &["ip6tcp"], &["tcp80", "udp53", "arp"]),
+        ("arp", &["arp"], &["tcp80", "icmp", "ip6tcp"]),
+        ("icmp", &["icmp"], &["tcp80", "udp53", "arp", "ip6tcp"]),
+        (
+            "port 80",
+            &["tcp80", "ip6tcp"],
+            &["udp53", "tcp_other", "icmp", "arp"],
+        ),
+        (
+            "tcp dst port 80",
+            &["tcp80", "ip6tcp"],
+            &["tcp_other", "udp53"],
+        ),
+        (
+            "src port 1234",
+            &["tcp80", "ip6tcp"],
+            &["tcp_other", "udp53"],
+        ),
+        (
+            "portrange 50-100",
+            &["tcp80", "udp53", "ip6tcp"],
+            &["tcp_other"],
+        ),
+        ("host 10.0.0.1", &["tcp80", "udp53", "icmp"], &["tcp_other"]),
+        ("dst host 10.0.0.1", &["tcp80", "icmp"], &["tcp_other"]),
+        (
+            "net 10.0.0.0/8",
+            &["tcp80", "udp53", "icmp"],
+            &["tcp_other"],
+        ),
+        ("host 2001:db8::1", &["ip6tcp"], &["tcp80"]),
+        (
+            "ether host 11:22:33:44:55:66",
+            &["tcp80", "udp53", "arp"],
+            &["tcp_other_macs"],
+        ),
+        ("vlan", &["vlan100", "vlan200"], &["tcp80", "arp"]),
+        ("vlan 100", &["vlan100"], &["vlan200", "tcp80"]),
+        (
+            "ether proto 0x0800",
+            &["tcp80", "udp53", "icmp"],
+            &["arp", "ip6tcp", "vlan100"],
+        ),
+        ("ip[2:2] = 40", &["tcp80", "tcp_other"], &["udp53", "icmp"]),
+        // Ordered compares are why the fix byte-swaps the loaded value rather
+        // than swapping the constant.
+        ("ip[2:2] > 30", &["tcp80", "tcp_other"], &["udp53", "icmp"]),
+        ("ip[2:2] < 30", &["udp53", "icmp"], &["tcp80", "tcp_other"]),
+        (
+            "ip[16:4] = 0x0a000001",
+            &["tcp80", "udp53", "icmp"],
+            &["tcp_other"],
+        ),
+        (
+            "ether[12:2] = 0x0800",
+            &["tcp80", "udp53", "icmp"],
+            &["arp", "ip6tcp", "vlan100"],
+        ),
+        ("tcp[0:2] = 1234", &["tcp80"], &["tcp_other"]),
+        ("ip6 and tcp port 80", &["ip6tcp"], &["tcp80", "udp53"]),
+    ];
+
     #[test]
-    #[ignore = "#129: eBPF packet loads are not byte-swapped; fixed by the next commit"]
-    fn tcp_matches_ether_ip_tcp_on_little_endian_host() {
-        let pkt = tcp(IP_A, IP_B, 1234, 80);
-        assert_eq!(verdict("tcp", &pkt, Little), Ok(Verdict::Match));
+    fn explicit_verdicts_agree_on_both_hosts() {
+        let mut bad = Vec::new();
+        for host in [Little, Big] {
+            for &(filter, yes, no) in MATRIX {
+                for (names, want) in [(yes, Verdict::Match), (no, Verdict::NoMatch)] {
+                    for name in names {
+                        let got = verdict(filter, &named(name), host);
+                        if got != Ok(want) {
+                            bad.push(format!(
+                                "  {host:?} {filter:?} on {name}: want {want:?}, got {got:?}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} wrong verdicts:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
     }
 }
