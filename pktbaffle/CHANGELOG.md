@@ -30,6 +30,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ip[0]`. Division and `<<` inside `[...]` are now overflow-checked, and an
   offset outside `i32` is rejected instead of truncated; all of these return
   `Err(ParseError)`. In-range offset expressions are unchanged.
+- **Parser no longer overflows the stack on deeply nested byte-access
+  offsets** (#135). `(` and unary `-` inside `[...]` (`ip[((((...1))))]`,
+  `ip[-----...1]`) recursed without a limit, so a few KB of filter text
+  aborted the process with an uncatchable stack overflow. Offset nesting now
+  draws on the same depth budget as parenthesised expressions and returns
+  `Err(ParseError)` past 31 nested `(` (or 127 chained unary `-`); libpcap
+  accepts thousands (#199 tracks raising limits). Shallower nesting is
+  unchanged. Chains of `not` / `!` are not covered by this fix.
 
 ### Added
 

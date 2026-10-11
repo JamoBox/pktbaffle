@@ -1157,3 +1157,104 @@ fn offset_expr_valid_forms_unchanged_by_overflow_checks() {
         );
     }
 }
+
+// ── Regression: nested offset expressions must not stack-overflow (#135) ──────
+// `parse_offset_atom` recursed once per `(` and once per unary `-` with no depth
+// limit, so a few KB of `ip[(((...1...)))]` aborted the process (an uncatchable
+// stack overflow).  libpcap 1.10.3 compiles moderate nesting and fails cleanly
+// ("memory exhausted") on extreme nesting; pktbaffle must return
+// `Err(ParseError)` and never abort.
+
+/// Offset-expression bodies that nest `n` deep and evaluate to `1` for even `n`:
+/// parens, bare unary minus, and minus-then-paren.
+fn nested_offset_bodies(n: usize) -> [String; 3] {
+    [
+        format!("{}1{}", "(".repeat(n), ")".repeat(n)),
+        format!("{}1", "-".repeat(n)),
+        format!("{}1{}", "-(".repeat(n), ")".repeat(n)),
+    ]
+}
+
+#[test]
+fn deeply_nested_offset_expr_returns_error_not_stack_overflow() {
+    use pktbaffle::{parse, Error};
+
+    // 100_000 levels on a 256 KiB stack: must be a clean ParseError for the
+    // primary offset and for the RHS `op ip[..]` load, on every link type and
+    // both targets.
+    on_small_stack(256, || {
+        for body in nested_offset_bodies(100_000) {
+            for filter in [
+                format!("ip[{body}] = 0"),
+                format!("tcp[{body}:2] = 0"),
+                format!("ip[0] = ip[{body}]"),
+            ] {
+                assert!(
+                    matches!(parse(&filter), Err(Error::ParseError { .. })),
+                    "parse of a {}-byte nested offset must be a ParseError",
+                    filter.len()
+                );
+                for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                    for &target in &[Target::Classic, Target::Extended] {
+                        let r = compile(&filter, link, target);
+                        assert!(
+                            matches!(r, Err(Error::ParseError { .. })),
+                            "compile of a {}-byte nested offset ({link:?}, {target:?}) \
+                             must be a ParseError, got {r:?}",
+                            filter.len()
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn moderately_nested_offset_expr_still_compiles() {
+    // N = 20 is far below the depth limit and evaluates to offset 1.
+    let plain = eth_prog("ip[1] = 0");
+    for body in nested_offset_bodies(20) {
+        let f = format!("ip[{body}] = 0");
+        assert_eq!(
+            eth_prog(&f).instructions(),
+            plain.instructions(),
+            "a 20-deep nested offset must compile like ip[1]"
+        );
+        assert!(pktbaffle::parse(&f).is_ok());
+        assert!(compile(&f, LinkType::Ethernet, Target::Extended).is_ok());
+    }
+
+    // Sibling groups must give their depth back: 200 of them in a row is far
+    // more levels than the limit allows if they leaked.
+    let siblings = format!("ip[{}] = 0", vec!["(1)"; 200].join("+"));
+    assert_eq!(
+        eth_prog(&siblings).instructions(),
+        eth_prog("ip[200] = 0").instructions()
+    );
+}
+
+#[test]
+fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
+    use pktbaffle::Error;
+
+    // Parenthesised expressions and offset expressions draw on one depth budget,
+    // so deep nesting of both cannot add up to a stack overflow.  1 MiB is the
+    // Windows main-thread stack.
+    on_small_stack(1024, || {
+        for outer in [0, 50, 100, 126] {
+            let filter = format!(
+                "{}ip[{}1{}] = 0{}",
+                "(".repeat(outer),
+                "(".repeat(100_000),
+                ")".repeat(100_000),
+                ")".repeat(outer)
+            );
+            let r = compile(&filter, LinkType::Ethernet, Target::Classic);
+            assert!(
+                matches!(r, Err(Error::ParseError { .. })),
+                "{outer} outer parens: expected ParseError, got {r:?}"
+            );
+        }
+    });
+}
