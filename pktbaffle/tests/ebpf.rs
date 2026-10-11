@@ -7,8 +7,8 @@
 //! 4. Logical combinators (AND, OR, NOT) produce non-empty programs.
 
 use pktbaffle::ebpf::{
-    Insn, BPF_ALU64, BPF_EXIT, BPF_JGT, BPF_JMP, BPF_JNE, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV, BPF_W,
-    BPF_X, R1, R2, R3, XDP_DROP, XDP_PASS,
+    Insn, BPF_ALU, BPF_ALU64, BPF_END, BPF_EXIT, BPF_H, BPF_JGT, BPF_JMP, BPF_JNE, BPF_K, BPF_LDX,
+    BPF_MEM, BPF_MOV, BPF_TO_BE, BPF_W, BPF_X, R1, R2, R3, R4, XDP_DROP, XDP_PASS,
 };
 use pktbaffle::{compile, LinkType, Target};
 
@@ -416,4 +416,89 @@ fn ip6_and_port_no_proto_compiles() {
 fn ip6_and_portrange_compiles() {
     let prog = ebpf_eth("ip6 and portrange 1024-65535");
     assert!(prog.len() > 8, "ip6 and portrange: program too short");
+}
+
+// ── Byte order of multi-byte loads (issue #129) ───────────────────────────────
+
+// `LDX MEM` reads in host byte order, but every packet field is compared with a
+// network-order constant, so each 16/32-bit load of packet data must be followed
+// directly by a `BPF_END` to-BE of the same width. (Execution-based coverage
+// lives in `ebpf_exec.rs`; this guards every codegen path, incl. link types the
+// corpus there does not run.) The prologue's ctx loads (base R1) are host-order
+// pointers and must NOT be swapped.
+#[test]
+fn multibyte_packet_loads_are_followed_by_byte_swap() {
+    let filters = [
+        "tcp",
+        "udp",
+        "ip",
+        "ip6",
+        "arp",
+        "port 80",
+        "src portrange 1000-2000",
+        "tcp dst port 443",
+        "ip6 and tcp port 80",
+        "host 10.0.0.1",
+        "src or dst host 10.0.0.1",
+        "net 10.0.0.0/8",
+        "host 2001:db8::1",
+        "net 2001:db8::/33",
+        "ether host 11:22:33:44:55:66",
+        "ip broadcast",
+        "ip multicast",
+        "vlan 100",
+        "mpls 100",
+        "pppoes 7",
+        "ip[2:2] = 40",
+        "ip[12:4] = 5",
+        "ether[12:2] = 0x0800",
+        "tcp[0:2] = 1234",
+        "tcp[4:4] = 1",
+        "udp[2:2] = 53",
+    ];
+    let mut checked = 0;
+    for link in [LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        for filter in filters {
+            // Some filters are rejected on some link types (e.g. ether host on RawIp).
+            let Ok(prog) = compile(filter, link, Target::Extended) else {
+                continue;
+            };
+            let prog = prog.as_extended().unwrap().instructions();
+            for (i, insn) in prog.iter().enumerate() {
+                let size = insn.code & 0x18;
+                let is_wide_ldx = insn.code & 0x07 == BPF_LDX && (size == BPF_H || size == BPF_W);
+                if !is_wide_ldx || insn.src() == R1 {
+                    continue;
+                }
+                let want = if size == BPF_H { 16 } else { 32 };
+                let next = prog[i + 1];
+                assert_eq!(
+                    (next.code, next.dst(), next.imm),
+                    (BPF_ALU | BPF_END | BPF_TO_BE, insn.dst(), want),
+                    "{filter:?} on {link:?}: insn {i} is a {want}-bit packet load not followed by be{want}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100, "only {checked} wide loads inspected");
+}
+
+#[test]
+fn prologue_ctx_loads_are_not_byte_swapped() {
+    let prog = ebpf_eth("tcp");
+    assert_ne!(prog[2].code, BPF_ALU | BPF_END | BPF_TO_BE);
+}
+
+#[test]
+fn byte_swap_encoding() {
+    // BPF_ALU | BPF_END | BPF_TO_BE == 0xdc; imm is the width in bits.
+    assert_eq!(
+        Insn::be16(R4).to_le_bytes(),
+        [0xdc, 0x04, 0, 0, 16, 0, 0, 0]
+    );
+    assert_eq!(
+        Insn::be32(R4).to_le_bytes(),
+        [0xdc, 0x04, 0, 0, 32, 0, 0, 0]
+    );
 }

@@ -107,6 +107,23 @@ impl Codegen {
 
     // ── Bounds check + packet load ────────────────────────────────────────────
 
+    // `LDX MEM` reads in host byte order, but every multi-byte packet field this
+    // backend compares is big-endian and is compared with a network-order
+    // constant. So every multi-byte packet load is `ldx` + `BPF_END` via these
+    // two helpers. (The prologue's ctx loads are host-order pointers: no swap.)
+
+    /// `dst = ntohs(*(u16 *)(src + off))`.
+    fn push_ldx_h_be(&mut self, dst: u8, src: u8, off: i16) {
+        self.push(Insn::ldx_h(dst, src, off));
+        self.push(Insn::be16(dst));
+    }
+
+    /// `dst = ntohl(*(u32 *)(src + off))`.
+    fn push_ldx_w_be(&mut self, dst: u8, src: u8, off: i16) {
+        self.push(Insn::ldx_w(dst, src, off));
+        self.push(Insn::be32(dst));
+    }
+
     /// Emit a bounds check for `size` bytes at `offset`, then load into R4.
     /// Returns a failure patch for the bounds-check jump.
     fn emit_load_byte(&mut self, offset: u32) -> Patch {
@@ -121,7 +138,7 @@ impl Codegen {
         self.push(Insn::mov64_reg(R5, R2));
         self.push(Insn::add64_imm(R5, (offset + 2) as i32));
         let bc = self.push(Insn::jgt_reg(R5, R3, 0));
-        self.push(Insn::ldx_h(R4, R2, offset as i16));
+        self.push_ldx_h_be(R4, R2, offset as i16);
         Patch(bc)
     }
 
@@ -129,7 +146,7 @@ impl Codegen {
         self.push(Insn::mov64_reg(R5, R2));
         self.push(Insn::add64_imm(R5, (offset + 4) as i32));
         let bc = self.push(Insn::jgt_reg(R5, R3, 0));
-        self.push(Insn::ldx_w(R4, R2, offset as i16));
+        self.push_ldx_w_be(R4, R2, offset as i16);
         Patch(bc)
     }
 
@@ -682,26 +699,26 @@ impl Codegen {
         // src port at R6+0, dst port at R6+2.
         match dir {
             Dir::Src => {
-                self.push(Insn::ldx_h(R4, R6, 0));
+                self.push_ldx_h_be(R4, R6, 0);
                 let cmp = self.push(Insn::jne_imm(R4, k, 0));
                 p.failure.push(Patch(cmp));
             }
             Dir::Dst => {
-                self.push(Insn::ldx_h(R4, R6, 2));
+                self.push_ldx_h_be(R4, R6, 2);
                 let cmp = self.push(Insn::jne_imm(R4, k, 0));
                 p.failure.push(Patch(cmp));
             }
             Dir::SrcAndDst => {
-                self.push(Insn::ldx_h(R4, R6, 0));
+                self.push_ldx_h_be(R4, R6, 0);
                 let cmp1 = self.push(Insn::jne_imm(R4, k, 0));
-                self.push(Insn::ldx_h(R4, R6, 2));
+                self.push_ldx_h_be(R4, R6, 2);
                 let cmp2 = self.push(Insn::jne_imm(R4, k, 0));
                 p.failure.extend([Patch(cmp1), Patch(cmp2)]);
             }
             Dir::SrcOrDst => {
-                self.push(Insn::ldx_h(R4, R6, 0));
+                self.push_ldx_h_be(R4, R6, 0);
                 let eq_src = self.push(Insn::jeq_imm(R4, k, 0));
-                self.push(Insn::ldx_h(R4, R6, 2));
+                self.push_ldx_h_be(R4, R6, 2);
                 let cmp_dst = self.push(Insn::jne_imm(R4, k, 0));
                 p.success.push(Patch(eq_src));
                 p.failure.push(Patch(cmp_dst));
@@ -722,7 +739,7 @@ impl Codegen {
         let hi = hi as i32;
 
         let check_range = |cg: &mut Codegen, src_reg: u8, off: i16, fail: &mut Vec<Patch>| {
-            cg.push(Insn::ldx_h(R4, src_reg, off));
+            cg.push_ldx_h_be(R4, src_reg, off);
             // A < lo → drop
             let i_lo = cg.push(Insn::jlt_imm(R4, lo, 0));
             fail.push(Patch(i_lo));
@@ -974,12 +991,13 @@ impl Codegen {
         self.push(Insn::add64_imm(R5, end_off));
         let bc_trans = Patch(self.push(Insn::jgt_reg(R5, R3, 0)));
 
-        let insn = match ba.size {
-            AccessSize::Byte => Insn::ldx_b(R4, R6, ba.offset as i16),
-            AccessSize::Half => Insn::ldx_h(R4, R6, ba.offset as i16),
-            AccessSize::Word => Insn::ldx_w(R4, R6, ba.offset as i16),
-        };
-        self.push(insn);
+        match ba.size {
+            AccessSize::Byte => {
+                self.push(Insn::ldx_b(R4, R6, ba.offset as i16));
+            }
+            AccessSize::Half => self.push_ldx_h_be(R4, R6, ba.offset as i16),
+            AccessSize::Word => self.push_ldx_w_be(R4, R6, ba.offset as i16),
+        }
         for &(aop, operand) in &ba.alu_ops {
             self.push(ebpf_alu32(aop, R4, operand as i32)?);
         }

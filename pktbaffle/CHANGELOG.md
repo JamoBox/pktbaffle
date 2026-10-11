@@ -17,6 +17,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `port 22 or (port 80 and host 10.0.0.1)`), in both the cBPF and eBPF
   backends. `a and b or c` and `not` binding are unchanged. Add parentheses
   to keep the old grouping.
+- **eBPF backend**: 16- and 32-bit packet fields were loaded with a plain
+  `LDX MEM` and compared in host byte order against network-order constants, so
+  on little-endian hosts (x86_64, arm64) nearly every filter (`tcp`, `ip`,
+  `host`, `port`, `vlan`, `ip[2:2] = 40`, ...) never matched. Every multi-byte
+  packet load is now followed by `BPF_END` (`be16` / `be32`), which makes the
+  program correct on both endiannesses and keeps ordered comparisons and
+  arithmetic working. (#129)
+
+### Added
+
+- `ebpf::Insn::be16` / `Insn::be32` constructors and the `BPF_END`, `BPF_TO_LE`
+  and `BPF_TO_BE` opcode constants.
+- Execution-based tests for the eBPF backend: a test-only reference interpreter
+  (selectable host endianness) and a parity table checking eBPF verdicts
+  against the cBPF VM. No change to the crate's dependencies. (#219)
 
 ## [0.2.0] - 2026-07-30
 

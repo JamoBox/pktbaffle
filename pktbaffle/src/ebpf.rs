@@ -37,6 +37,13 @@ pub const BPF_LSH: u8 = 0x60;
 pub const BPF_RSH: u8 = 0x70;
 pub const BPF_XOR: u8 = 0xa0;
 pub const BPF_MOV: u8 = 0xb0;
+/// Byte swap (ALU class only). Bit 3 of the opcode selects [`BPF_TO_LE`] or
+/// [`BPF_TO_BE`]; `imm` is the width in bits (16, 32 or 64).
+pub const BPF_END: u8 = 0xd0;
+/// [`BPF_END`] direction: convert from host order to little-endian.
+pub const BPF_TO_LE: u8 = 0x00;
+/// [`BPF_END`] direction: convert from host order to big-endian (network order).
+pub const BPF_TO_BE: u8 = 0x08;
 
 // ── Jump operations (high nibble of opcode) ──────────────────────────────────
 pub const BPF_JA: u8 = 0x00;
@@ -182,6 +189,22 @@ impl Insn {
         Self::new(BPF_ALU | BPF_LSH | BPF_K, dst, 0, 0, imm)
     }
 
+    // ── Byte swap (BPF_END) ──────────────────────────────────────────────────
+
+    /// `dst = htobe16(dst)`: convert the low 16 bits from host to big-endian
+    /// order, zero-extended to 64 bits. On a big-endian host this only
+    /// truncates.
+    pub fn be16(dst: u8) -> Self {
+        Self::new(BPF_ALU | BPF_END | BPF_TO_BE, dst, 0, 0, 16)
+    }
+
+    /// `dst = htobe32(dst)`: convert the low 32 bits from host to big-endian
+    /// order, zero-extended to 64 bits. On a big-endian host this only
+    /// truncates.
+    pub fn be32(dst: u8) -> Self {
+        Self::new(BPF_ALU | BPF_END | BPF_TO_BE, dst, 0, 0, 32)
+    }
+
     // ── Memory loads (LDX MEM) ───────────────────────────────────────────────
 
     /// `dst = *(u8 *)(src + off)`.
@@ -189,12 +212,19 @@ impl Insn {
         Self::new(BPF_LDX | BPF_MEM | BPF_B, dst, src, off, 0)
     }
 
-    /// `dst = *(u16 *)(src + off)` (big-endian network byte order in packet).
+    /// `dst = *(u16 *)(src + off)`, zero-extended.
+    ///
+    /// The load is in **host** byte order, not network order: follow it with
+    /// [`Insn::be16`] before comparing a big-endian packet field with a
+    /// network-order constant.
     pub fn ldx_h(dst: u8, src: u8, off: i16) -> Self {
         Self::new(BPF_LDX | BPF_MEM | BPF_H, dst, src, off, 0)
     }
 
-    /// `dst = *(u32 *)(src + off)`.
+    /// `dst = *(u32 *)(src + off)`, zero-extended.
+    ///
+    /// Host byte order, like [`Insn::ldx_h`]: follow with [`Insn::be32`] for a
+    /// big-endian packet field.
     pub fn ldx_w(dst: u8, src: u8, off: i16) -> Self {
         Self::new(BPF_LDX | BPF_MEM | BPF_W, dst, src, off, 0)
     }
