@@ -188,16 +188,19 @@ Both word and symbol forms are accepted:
 | `or`  | `\|\|` | Either side must match |
 | `not` | `!`    | Negation |
 
-**Precedence** (highest to lowest): `not` > `and` > `or`.
+**Precedence:** `not` binds tightest. `and`, `or` and juxtaposition (`tcp port 80`
+style implicit AND) have *equal* precedence and associate left to right, exactly
+as in libpcap/tcpdump (see pcap-filter(7)). So `a or b and c` is `(a or b) and c`,
+not `a or (b and c)`.
 
 Use parentheses to override precedence:
 
 ```
-# Without parens: parsed as (port 22) or (port 80 and host 10.0.0.1)
+# Without parens: parsed left to right as (port 22 or port 80) and host 10.0.0.1
 port 22 or port 80 and host 10.0.0.1
 
-# With parens: (port 22 or port 80) and host 10.0.0.1
-(port 22 or port 80) and host 10.0.0.1
+# With parens: port 22 or (port 80 and host 10.0.0.1)
+port 22 or (port 80 and host 10.0.0.1)
 ```
 
 ### Ethernet and link layer
