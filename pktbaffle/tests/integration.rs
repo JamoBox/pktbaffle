@@ -1082,3 +1082,179 @@ fn fuzz_crash_repro_deeply_nested_with_trailing_garbage() {
         let _ = compile(crash_input, link, Target::Extended);
     }
 }
+
+// ── Regression: byte-access offset arithmetic must not overflow (#134) ────────
+// `X[(1<<63)/-1]` made the offset folder compute `i64::MIN / -1`, which panics
+// ("attempt to divide with overflow") in debug and release.  `1<<63` itself was
+// silently accepted as `ip[0]`.  libpcap 1.10.3 rejects both at compile time
+// ("shift by more than 31 bits"); pktbaffle must return `Err(ParseError)`.
+
+/// Run `f` on a thread with a `kib` KiB stack.  A panic inside `f` fails the
+/// calling test with the panic reported, rather than unwinding through it.
+fn on_small_stack<T: Send + 'static>(kib: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(kib * 1024)
+        .spawn(f)
+        .expect("spawn thread")
+        .join()
+        .unwrap_or_else(|_| panic!("thread panicked (see message above)"))
+}
+
+const OFFSET_OVERFLOW_FILTERS: &[&str] = &[
+    "ip[(1<<63)/-1] = 0",
+    "tcp[(1<<63)/-1:2] = 0",
+    "ether[(1<<63)/-1] = 0",
+    "ip6[(1<<63)/-1] = 0",
+    "ip[(1<<63)/(0-1)] = 0",
+    "ip[(1<<62<<1)/-1] = 0",
+    // `<<` that loses range without any division.
+    "ip[1<<63] = 0",
+    "ip[1<<62<<1] = 0",
+    // RHS byte-load goes through the same folder.
+    "ip[0] = ip[(1<<63)/-1]",
+    // Out of i32 range and negative: `v as i32` used to truncate this to 0.
+    "ip[0-(1<<40)] = 0",
+    "ip[-(1<<40)] = 0",
+];
+
+#[test]
+fn offset_expr_overflow_returns_parse_error_not_panic() {
+    use pktbaffle::{parse, Error};
+
+    on_small_stack(512, || {
+        for filter in OFFSET_OVERFLOW_FILTERS {
+            assert!(
+                matches!(parse(filter), Err(Error::ParseError { .. })),
+                "parse({filter:?}) must be a ParseError"
+            );
+            for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                for &target in &[Target::Classic, Target::Extended] {
+                    let r = compile(filter, link, target);
+                    assert!(
+                        matches!(r, Err(Error::ParseError { .. })),
+                        "compile({filter:?}, {link:?}, {target:?}) must be a ParseError, got {r:?}"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn offset_expr_valid_forms_unchanged_by_overflow_checks() {
+    // Checked arithmetic must not change results that are in range.
+    for (expr, plain) in [
+        ("ip[1<<3] = 0", "ip[8] = 0"),
+        ("ip[8/2] = 0", "ip[4] = 0"),
+        ("ip[-4/-2+2] = 0", "ip[4] = 0"),
+        ("ip[(1<<30)/(1<<29)] = 0", "ip[2] = 0"),
+        ("ip[-(1<<62)/-(1<<61)] = 0", "ip[2] = 0"),
+    ] {
+        assert_eq!(
+            eth_prog(expr).instructions(),
+            eth_prog(plain).instructions(),
+            "{expr} must compile like {plain}"
+        );
+    }
+}
+
+// ── Regression: nested offset expressions must not stack-overflow (#135) ──────
+// `parse_offset_atom` recursed once per `(` and once per unary `-` with no depth
+// limit, so a few KB of `ip[(((...1...)))]` aborted the process (an uncatchable
+// stack overflow).  libpcap 1.10.3 compiles moderate nesting and fails cleanly
+// ("memory exhausted") on extreme nesting; pktbaffle must return
+// `Err(ParseError)` and never abort.
+
+/// Offset-expression bodies that nest `n` deep and evaluate to `1` for even `n`:
+/// parens, bare unary minus, and minus-then-paren.
+fn nested_offset_bodies(n: usize) -> [String; 3] {
+    [
+        format!("{}1{}", "(".repeat(n), ")".repeat(n)),
+        format!("{}1", "-".repeat(n)),
+        format!("{}1{}", "-(".repeat(n), ")".repeat(n)),
+    ]
+}
+
+#[test]
+fn deeply_nested_offset_expr_returns_error_not_stack_overflow() {
+    use pktbaffle::{parse, Error};
+
+    // 100_000 levels on a 256 KiB stack: must be a clean ParseError for the
+    // primary offset and for the RHS `op ip[..]` load, on every link type and
+    // both targets.
+    on_small_stack(256, || {
+        for body in nested_offset_bodies(100_000) {
+            for filter in [
+                format!("ip[{body}] = 0"),
+                format!("tcp[{body}:2] = 0"),
+                format!("ip[0] = ip[{body}]"),
+            ] {
+                assert!(
+                    matches!(parse(&filter), Err(Error::ParseError { .. })),
+                    "parse of a {}-byte nested offset must be a ParseError",
+                    filter.len()
+                );
+                for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                    for &target in &[Target::Classic, Target::Extended] {
+                        let r = compile(&filter, link, target);
+                        assert!(
+                            matches!(r, Err(Error::ParseError { .. })),
+                            "compile of a {}-byte nested offset ({link:?}, {target:?}) \
+                             must be a ParseError, got {r:?}",
+                            filter.len()
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn moderately_nested_offset_expr_still_compiles() {
+    // N = 20 is far below the depth limit and evaluates to offset 1.
+    let plain = eth_prog("ip[1] = 0");
+    for body in nested_offset_bodies(20) {
+        let f = format!("ip[{body}] = 0");
+        assert_eq!(
+            eth_prog(&f).instructions(),
+            plain.instructions(),
+            "a 20-deep nested offset must compile like ip[1]"
+        );
+        assert!(pktbaffle::parse(&f).is_ok());
+        assert!(compile(&f, LinkType::Ethernet, Target::Extended).is_ok());
+    }
+
+    // Sibling groups must give their depth back: 200 of them in a row is far
+    // more levels than the limit allows if they leaked.
+    let siblings = format!("ip[{}] = 0", vec!["(1)"; 200].join("+"));
+    assert_eq!(
+        eth_prog(&siblings).instructions(),
+        eth_prog("ip[200] = 0").instructions()
+    );
+}
+
+#[test]
+fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
+    use pktbaffle::Error;
+
+    // Parenthesised expressions and offset expressions draw on one depth budget,
+    // so deep nesting of both cannot add up to a stack overflow.  1 MiB is the
+    // Windows main-thread stack.
+    on_small_stack(1024, || {
+        for outer in [0, 50, 100, 126] {
+            let filter = format!(
+                "{}ip[{}1{}] = 0{}",
+                "(".repeat(outer),
+                "(".repeat(100_000),
+                ")".repeat(100_000),
+                ")".repeat(outer)
+            );
+            let r = compile(&filter, LinkType::Ethernet, Target::Classic);
+            assert!(
+                matches!(r, Err(Error::ParseError { .. })),
+                "{outer} outer parens: expected ParseError, got {r:?}"
+            );
+        }
+    });
+}
