@@ -629,6 +629,17 @@ fn logical_or_then_and_unparenthesised() {
     eth("tcp or udp and host 10.0.0.1");
 }
 
+/// libpcap 1.10.3 accepts 9995 nested parentheses around `tcp` and rejects
+/// 9996 ("memory exhausted"); results recorded in #199.
+#[test]
+fn nested_parens_accepted_up_to_libpcap_limit() {
+    let parens = |n: usize| format!("{}tcp{}", "(".repeat(n), ")".repeat(n));
+    eth(&parens(128));
+    eth(&parens(1000));
+    eth(&parens(9995));
+    assert!(try_eth(&parens(9996)).is_err());
+}
+
 // ── Syntax parity: link types ─────────────────────────────────────────────────
 
 #[test]

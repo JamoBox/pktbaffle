@@ -989,3 +989,20 @@ fn long_not_chain_matches_by_parity() {
     assert!(!run_filter(&odd, &tcp_pkt));
     assert!(run_filter(&odd, &udp_pkt));
 }
+
+// ── Deeply nested parentheses (#199) ────────────────────────────────────────
+// libpcap 1.10.3 accepts up to 9995 nested parentheses (per the issue);
+// parentheses do not change the meaning, so these match like `tcp` and
+// `not tcp` (hand-derived).
+
+#[test]
+fn thousand_nested_parens_match_like_tcp() {
+    let tcp_pkt = tcp(IP_A, IP_B, 1234, 80);
+    let udp_pkt = udp(IP_A, IP_B, 1234, 53);
+    let f = format!("{}tcp{}", "(".repeat(1000), ")".repeat(1000));
+    assert!(run_filter(&f, &tcp_pkt));
+    assert!(!run_filter(&f, &udp_pkt));
+    let not_f = format!("not {f}");
+    assert!(!run_filter(&not_f, &tcp_pkt));
+    assert!(run_filter(&not_f, &udp_pkt));
+}
