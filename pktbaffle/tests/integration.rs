@@ -1837,3 +1837,93 @@ fn malformed_dotted_addresses_are_still_errors() {
         assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── `/` before a prefix length is an ordinary token (#194, #173) ──────────────
+// libpcap 1.10.3 grammar: `HID '/' NUM`, `HID6 '/' NUM`, `HID NETMASK HID`; a bare
+// number after an address is a syntax error. Expected trees hand-derived from
+// that and issues #194 and #173.
+
+#[test]
+fn whitespace_and_hex_around_the_prefix_slash() {
+    for (spaced, glued) in [
+        ("net 10.0.0.0 / 8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0 /8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/ 8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/0x8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/010", "net 10.0.0.0/8"),
+        ("net 2001:db8:: /32", "net 2001:db8::/32"),
+        ("net 2001:db8::/ 32", "net 2001:db8::/32"),
+        ("net 2001:db8::/0x20", "net 2001:db8::/32"),
+        (
+            "src net fe80:: /10 and port 80",
+            "src net fe80::/10 and port 80",
+        ),
+    ] {
+        assert_eq!(ast(spaced), ast(glued), "{spaced:?} vs {glued:?}");
+    }
+}
+
+#[test]
+fn bare_number_after_a_network_is_a_syntax_error() {
+    for f in [
+        "net 10.0.0.0 8",
+        "net 10 8",
+        "net 2001:db8:: 32",
+        "src net 192.168.1.0 24 and port 80",
+        "net 10 mask 255.0.0.0",
+        "net 10.0.0.0/",
+        "net 10.0.0.0/abc",
+        "net 2001:db8::/",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+#[test]
+fn slash_prefix_regressions() {
+    // Behaviour-preservation guards: a prefix still combines with `and`, and a
+    // `/` in a byte-access expression is still division.
+    assert!(pktbaffle::parse("net 10.0.0.0/8 and tcp").is_ok());
+    assert!(pktbaffle::parse("ip[2] / 2 = 1").is_ok());
+    assert!(pktbaffle::parse("net 10.0.0.0/33").is_err());
+    assert!(pktbaffle::parse("net 2001:db8::/129").is_err());
+}
+
+#[test]
+fn ipv6_net_starting_with_double_colon_takes_a_prefix() {
+    for f in [
+        "net ::/0",
+        "net ::1/128",
+        "net ::ffff:0:0/96",
+        "net ::ffff:1.2.3.4/128",
+        "ip6 net ::/32",
+        "src net ::1/128",
+        "dst net ::/0",
+        "not net ::/0",
+        "net ::/0 and tcp",
+        "net ::1 /128",
+        "net :: / 0",
+    ] {
+        assert!(pktbaffle::parse(f).is_ok(), "{f:?} must compile");
+    }
+    // The same network spelled with a leading digit is the same tree.
+    for n in 0..=128 {
+        assert_eq!(
+            ast(&format!("net ::/{n}")),
+            ast(&format!("net 0::/{n}")),
+            "/{n}"
+        );
+    }
+    assert!(pktbaffle::parse("net ::/129").is_err());
+}
+
+#[test]
+fn host_ipv6_accepts_only_a_slash_128() {
+    // libpcap: `host ::1/128` is a /128 net; any other length is "Mask syntax
+    // for networks only".
+    assert_eq!(ast("host ::1/128"), ast("host ::1"));
+    assert_eq!(ast("src ::1/128"), ast("src host ::1"));
+    for f in ["host ::1/64", "host ::1/129", "host 10.0.0.1/32"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}

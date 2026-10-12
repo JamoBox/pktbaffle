@@ -504,13 +504,7 @@ impl Parser<'_> {
                 self.parse_portrange(Dir::SrcOrDst, None)
             }
 
-            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => {
-                let addr = self.parse_ip()?;
-                Ok(Primitive::Host {
-                    addr,
-                    dir: Dir::SrcOrDst,
-                })
-            }
+            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => self.parse_host(Dir::SrcOrDst),
 
             // ── raw link-layer byte access: [offset:size] op value ───────────
             Some(Token::LBracket) => self.parse_byte_access(Layer::Raw),
@@ -638,10 +632,7 @@ impl Parser<'_> {
                     )))
                 }
             }
-            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => {
-                let addr = self.parse_ip()?;
-                Ok(Primitive::Host { addr, dir })
-            }
+            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => self.parse_host(dir),
             tok => Err(self.err(format!(
                 "expected 'host', 'net', 'port', 'portrange', or an IP address after direction qualifier, got {:?}",
                 tok
@@ -652,10 +643,27 @@ impl Parser<'_> {
     // ── concrete primitive parsers ────────────────────────────────────────────
 
     fn parse_host(&mut self, dir: Dir) -> Result<Primitive> {
-        Ok(Primitive::Host {
-            addr: self.parse_ip()?,
-            dir,
-        })
+        let addr = self.parse_ip()?;
+        // libpcap reads `host <ipv6>/128` as a /128 net and rejects any other
+        // length ("Mask syntax for networks only").
+        if matches!(addr, IpAddr::V6(_))
+            && self.eat(&Token::Slash)
+            && self.parse_prefix_len("IPv6", 128)? != 128
+        {
+            return Err(self.err("mask syntax for networks only"));
+        }
+        Ok(Primitive::Host { addr, dir })
+    }
+
+    /// The length after the `/` of `addr/len`; `max` is 32 or 128.
+    fn parse_prefix_len(&mut self, family: &str, max: u64) -> Result<u8> {
+        match self.advance() {
+            Some(&Token::Num(n)) if n <= max => Ok(n as u8),
+            Some(&Token::Num(n)) => Err(self.err(format!(
+                "{family} prefix length {n} out of range (0\u{2013}{max})"
+            ))),
+            _ => Err(self.err("expected a prefix length after '/'")),
+        }
     }
 
     fn parse_net(&mut self, dir: Dir) -> Result<Primitive> {
@@ -663,6 +671,7 @@ impl Parser<'_> {
         let octs = match self.advance() {
             Some(Token::Ipv4(octs)) => *octs,
             // Single-octet classful shorthand: `net 10` → `net 10.0.0.0/8`.
+            // Takes no `/len` or `mask`, as in libpcap's grammar.
             Some(Token::Num(n)) => {
                 let n = *n;
                 if n > 0xff {
@@ -671,27 +680,19 @@ impl Parser<'_> {
                         tok_desc
                     )));
                 }
-                [n as u8, 0, 0, 0]
+                return Ok(Primitive::Net {
+                    net: IpNet::from_prefix(std::net::Ipv4Addr::new(n as u8, 0, 0, 0), 8),
+                    dir,
+                });
             }
             Some(Token::Ipv6(addr)) => {
                 let addr = *addr;
-                let prefix_len = match self.cur_tok() {
-                    Some(Token::Num(n)) => {
-                        let n = *n;
-                        self.advance();
-                        if n > 128 {
-                            return Err(self.err(format!(
-                                "IPv6 prefix length {n} out of range (0\u{2013}128)"
-                            )));
-                        }
-                        n as u8
-                    }
-                    _ => {
-                        return Err(self.err(
-                            "IPv6 net requires a CIDR prefix length (e.g. net 2001:db8::/32)",
-                        ))
-                    }
-                };
+                if !self.eat(&Token::Slash) {
+                    return Err(
+                        self.err("IPv6 net requires a CIDR prefix length (e.g. net 2001:db8::/32)")
+                    );
+                }
+                let prefix_len = self.parse_prefix_len("IPv6", 128)?;
                 return Ok(Primitive::Net6 {
                     net: Ipv6Net { addr, prefix_len },
                     dir,
@@ -708,13 +709,8 @@ impl Parser<'_> {
         if self.eat(&Token::Minus) {
             return Err(self.err("net range syntax not supported; use CIDR or mask notation"));
         }
-        // CIDR prefix length immediately after the address (lexer splits on '/').
-        let mask = if let Some(&Token::Num(raw_n)) = self.cur_tok() {
-            self.advance();
-            if raw_n > 32 {
-                return Err(self.err(format!("IPv4 prefix length {raw_n} out of range (0–32)")));
-            }
-            let n = raw_n as u8;
+        let mask = if self.eat(&Token::Slash) {
+            let n = self.parse_prefix_len("IPv4", 32)?;
             if n == 0 {
                 0u32
             } else {

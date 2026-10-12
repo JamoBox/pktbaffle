@@ -396,18 +396,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                             offset: start,
                         });
                         pos = tmp;
-                        if pos < len && bytes[pos] == b'/' {
-                            pos += 1;
-                            let pl_start = pos;
-                            while pos < len && bytes[pos].is_ascii_alphanumeric() {
-                                pos += 1;
-                            }
-                            let n = parse_int(&src[pl_start..pos], pl_start)?;
-                            tokens.push(Spanned {
-                                token: Token::Num(n),
-                                offset: pl_start,
-                            });
-                        }
                         continue;
                     }
                 }
@@ -418,23 +406,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 token: tok,
                 offset: start,
             });
-            // If this was an IPv4 address and the next char is '/', consume
-            // the prefix length as a separate Num token (CIDR notation).
-            if matches!(tokens.last(), Some(s) if matches!(s.token, Token::Ipv4(_)))
-                && pos < len
-                && bytes[pos] == b'/'
-            {
-                pos += 1; // consume '/'
-                let pl_start = pos;
-                while pos < len && bytes[pos].is_ascii_alphanumeric() {
-                    pos += 1;
-                }
-                let n = parse_int(&src[pl_start..pos], pl_start)?;
-                tokens.push(Spanned {
-                    token: Token::Num(n),
-                    offset: pl_start,
-                });
-            }
             continue;
         }
 
@@ -462,18 +433,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                         token: Token::Ipv6(addr),
                         offset: start,
                     });
-                    if pos < len && bytes[pos] == b'/' {
-                        pos += 1;
-                        let pl_start = pos;
-                        while pos < len && bytes[pos].is_ascii_alphanumeric() {
-                            pos += 1;
-                        }
-                        let n = parse_int(&src[pl_start..pos], pl_start)?;
-                        tokens.push(Spanned {
-                            token: Token::Num(n),
-                            offset: pl_start,
-                        });
-                    }
                     continue;
                 }
             }
@@ -983,7 +942,7 @@ mod tests {
             ("2001:db8::/0x20", 32),
         ] {
             let tokens = lex(src).unwrap();
-            assert_eq!(tokens[1].token, Token::Num(want), "{src}");
+            assert_eq!(tokens[2].token, Token::Num(want), "{src}");
         }
         for src in ["10.0.0.0/08", "2001:db8::/09", "fe80::/08"] {
             assert!(lex(src).is_err(), "{src} must be rejected");
@@ -1032,5 +991,48 @@ mod tests {
         // Hex octets are not accepted: `0x0a` lexes as a number, then `.` is
         // not a token.
         assert!(lex("0x0a.0.0.1").is_err());
+    }
+
+    // ── `/` is always its own token (#194, #173) ─────────────────────────────
+    // libpcap's grammar is `HID '/' NUM` / `HID6 '/' NUM`: the scanner emits `/`
+    // as an ordinary token, so spacing around it is free and every address
+    // spelling (including a leading `::`) takes a prefix the same way.
+
+    #[test]
+    fn slash_after_an_address_is_a_separate_token() {
+        for (src, addr) in [
+            ("10.0.0.0/8", Token::Ipv4([10, 0, 0, 0])),
+            ("10.0.0.0 / 8", Token::Ipv4([10, 0, 0, 0])),
+            ("10.0.0.0 /8", Token::Ipv4([10, 0, 0, 0])),
+            ("10.0.0.0/ 8", Token::Ipv4([10, 0, 0, 0])),
+            ("2001:db8::/32", Token::Ipv6("2001:db8::".parse().unwrap())),
+            (
+                "2001:db8:: / 32",
+                Token::Ipv6("2001:db8::".parse().unwrap()),
+            ),
+            ("fe80::/32", Token::Ipv6("fe80::".parse().unwrap())),
+            ("::/32", Token::Ipv6("::".parse().unwrap())),
+            ("::1/32", Token::Ipv6("::1".parse().unwrap())),
+            ("::ffff:0:0/32", Token::Ipv6("::ffff:0:0".parse().unwrap())),
+            (
+                "::ffff:1.2.3.4 / 32",
+                Token::Ipv6("::ffff:1.2.3.4".parse().unwrap()),
+            ),
+        ] {
+            let toks: Vec<_> = lex(src).unwrap().into_iter().map(|s| s.token).collect();
+            let prefix = if src.contains("10.") { 8 } else { 32 };
+            assert_eq!(toks, [addr, Token::Slash, Token::Num(prefix)], "{src}");
+        }
+    }
+
+    #[test]
+    fn slash_with_nothing_after_it_lexes() {
+        // The parser, not the lexer, reports a missing prefix length (#210).
+        let toks: Vec<_> = lex("10.0.0.0/")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.token)
+            .collect();
+        assert_eq!(toks, [Token::Ipv4([10, 0, 0, 0]), Token::Slash]);
     }
 }

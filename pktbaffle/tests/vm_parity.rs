@@ -1127,3 +1127,51 @@ fn zero_padded_netmask_is_a_slash_24() {
     assert!(run_filter(f, &tcp([192, 168, 1, 77], IP_B, 1234, 80)));
     assert!(!run_filter(f, &tcp([192, 168, 2, 77], IP_B, 1234, 80)));
 }
+
+// ── IPv6 nets starting with `::` and spaced prefixes (#173, #194) ────────────
+// Verdicts hand-derived from issues #173 and #194 (no live libpcap was
+// available): `net ::ffff:0:0/96` matches IPv4-mapped addresses.
+
+fn v6_mapped(a: u8, b: u8, c: u8, d: u8) -> [u8; 16] {
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d]
+}
+
+const V6_LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+#[test]
+fn net_double_colon_zero_matches_any_ipv6_not_ipv4() {
+    let v6 = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("net ::/0", &v6));
+    assert!(!run_filter("net ::/0", &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(!run_filter("not net ::/0", &v6));
+}
+
+#[test]
+fn net_loopback_slash_128_matches_src_or_dst() {
+    let to_lo = eth_ipv6_tcp(IPV6_A, V6_LOOPBACK, 1234, 80, 0x02);
+    let from_lo = eth_ipv6_tcp(V6_LOOPBACK, IPV6_A, 1234, 80, 0x02);
+    let other = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    for f in ["net ::1/128", "host ::1/128", "net ::1 / 128"] {
+        assert!(run_filter(f, &to_lo), "{f} dst");
+        assert!(run_filter(f, &from_lo), "{f} src");
+        assert!(!run_filter(f, &other), "{f} other");
+    }
+    assert!(run_filter("src net ::1/128", &from_lo));
+    assert!(!run_filter("src net ::1/128", &to_lo));
+}
+
+#[test]
+fn net_ipv4_mapped_slash_96() {
+    let mapped = eth_ipv6_tcp(IPV6_A, v6_mapped(1, 2, 3, 4), 1234, 80, 0x02);
+    let plain = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("net ::ffff:0:0/96", &mapped));
+    assert!(!run_filter("net ::ffff:0:0/96", &plain));
+}
+
+#[test]
+fn spaced_and_hex_ipv4_prefix_match_like_glued() {
+    for f in ["net 10.0.0.0 / 8", "net 10.0.0.0/ 8", "net 10.0.0.0/0x8"] {
+        assert!(run_filter(f, &tcp([10, 128, 0, 1], IP_C, 1234, 80)), "{f}");
+        assert!(!run_filter(f, &tcp([11, 0, 0, 1], IP_C, 1234, 80)), "{f}");
+    }
+}
