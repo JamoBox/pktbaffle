@@ -90,6 +90,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   returned `false`). A target that overflows `usize`, or lies past the end of
   the program, now makes the VM return `false` on every pointer width.
   Programs from `compile()` are unaffected.
+- **The VM returns `false` for malformed cBPF opcodes instead of running them
+  as valid ones** (#201). `vm::run` / `Program::matches` documented `false`
+  for an invalid instruction but decoded opcodes by masking bit fields, so
+  `RET|X` (`0x0e`) returned `k`, MISC `0xff` ran as `txa`, `LD|H|LEN`,
+  `LD|B|IMM`, `ST` with stray bits, `NEG|X` and `LDX|H|IMM` all executed, and
+  `matches` returned `true`. Only exact cBPF opcodes now run, as in libpcap's
+  `bpf_filter()` (which `abort()`s on the others) and the kernel's
+  `bpf_check_classic()` (`EINVAL`). `Display` for `Insn` / `Program` prints an
+  unknown opcode as `.word    0x000e  ; invalid opcode` instead of an ordinary
+  mnemonic. Programs from `compile()` are unaffected.
 
 ### Added
 

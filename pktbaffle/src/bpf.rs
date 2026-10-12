@@ -436,12 +436,49 @@ impl std::fmt::Display for Insn {
     }
 }
 
+/// Returns `true` if `code` is one of the exact cBPF opcodes that libpcap's
+/// `bpf_filter()` and the Linux kernel's `bpf_check_classic()` execute and
+/// that [`crate::vm`] implements. Stray bits (`RET|X`, `LD|B|IMM`, `NEG|X`,
+/// `ST` with size bits, MISC codes other than TAX/TXA, ...) are not valid.
+pub(crate) fn is_valid_opcode(code: u16) -> bool {
+    let (size, mode, op) = (code & 0x18, code & 0xe0, code & 0xf0);
+    let src = code & 0x08;
+    code <= 0xff
+        && match code & 0x07 {
+            BPF_LD => matches!(
+                (size, mode),
+                (BPF_W | BPF_H | BPF_B, BPF_ABS | BPF_IND) | (BPF_W, BPF_IMM | BPF_MEM | BPF_LEN)
+            ),
+            BPF_LDX => matches!(
+                (size, mode),
+                (BPF_W, BPF_IMM | BPF_MEM | BPF_LEN) | (BPF_B, BPF_MSH)
+            ),
+            BPF_ST | BPF_STX => code & 0xf8 == 0,
+            BPF_ALU => match op {
+                BPF_NEG => src == BPF_K,
+                BPF_ADD | BPF_SUB | BPF_MUL | BPF_DIV | BPF_OR | BPF_AND | BPF_LSH | BPF_RSH
+                | BPF_XOR => true,
+                _ => false,
+            },
+            BPF_JMP => match op {
+                BPF_JA => src == BPF_K,
+                BPF_JEQ | BPF_JGT | BPF_JGE | BPF_JSET => true,
+                _ => false,
+            },
+            BPF_RET => code == BPF_RET | BPF_K || code == BPF_RET | BPF_A,
+            _ => code == BPF_MISC | BPF_TAX || code == BPF_MISC | BPF_TXA,
+        }
+}
+
 /// Format a single instruction, optionally with its program counter so that
 /// conditional-jump targets can be printed as absolute instruction indices
 /// (matching libpcap's `bpf_dump` output).
 fn fmt_insn(f: &mut std::fmt::Formatter<'_>, insn: &Insn, pc: Option<usize>) -> std::fmt::Result {
     let code = insn.code;
     let k = insn.k;
+    if !is_valid_opcode(code) {
+        return write!(f, "{:<8} 0x{:04x}  ; invalid opcode", ".word", code);
+    }
     let class = code & 0x07;
     let size = code & 0x18;
     let mode = code & 0xe0;
@@ -670,6 +707,23 @@ mod tests {
         };
         assert_eq!(tax.to_string(), "tax");
         assert_eq!(txa.to_string(), "txa");
+    }
+
+    #[test]
+    fn display_marks_invalid_opcode() {
+        // RET|X is not a cBPF opcode (#201): it must not print as `ret #0x1`.
+        let insn = Insn {
+            code: 0x0e,
+            jt: 0,
+            jf: 0,
+            k: 1,
+        };
+        assert_eq!(insn.to_string(), ".word    0x000e  ; invalid opcode");
+        let prog = Program::new(vec![insn]);
+        assert_eq!(
+            prog.to_string(),
+            "(000) .word    0x000e  ; invalid opcode\n"
+        );
     }
 
     #[test]
