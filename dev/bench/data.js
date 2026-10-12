@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791198493594,
+  "lastUpdate": 1791804984099,
   "repoUrl": "https://github.com/JamoBox/pktbaffle",
   "entries": {
     "Benchmark": [
@@ -483,6 +483,166 @@ window.BENCHMARK_DATA = {
             "name": "dump_write/throughput",
             "value": 5383316,
             "range": "± 76587",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Pete Wicken",
+            "username": "JamoBox",
+            "email": "2273100+JamoBox@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "33874fee333392b46e14cb46a2d06bd875b8bfd0",
+          "message": "Merge pull request #127 from JamoBox/ccr-91014308-llf3hn\n\nfeat(pkttap): support non-blocking live capture on Windows",
+          "timestamp": "2026-10-04T23:09:16Z",
+          "url": "https://github.com/JamoBox/pktbaffle/commit/33874fee333392b46e14cb46a2d06bd875b8bfd0"
+        },
+        "date": 1791804983415,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "parse/simple",
+            "value": 101,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/medium",
+            "value": 268,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/complex",
+            "value": 1161,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/boolean_chain",
+            "value": 1235,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/simple",
+            "value": 450,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/medium",
+            "value": 1042,
+            "range": "± 5",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/complex",
+            "value": 3006,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/boolean_chain",
+            "value": 2676,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/simple",
+            "value": 381,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/complex",
+            "value": 2072,
+            "range": "± 7",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/boolean_chain",
+            "value": 2420,
+            "range": "± 9",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/simple/accept",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/simple/reject",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/complex/accept",
+            "value": 50,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/complex/reject",
+            "value": 24,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "throughput/mixed_1000",
+            "value": 19624,
+            "range": "± 33",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/construction",
+            "value": 9,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/to_owned",
+            "value": 19,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/as_ref_fields",
+            "value": 8,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/unfiltered",
+            "value": 182695,
+            "range": "± 1502",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/filter_match_all",
+            "value": 197194,
+            "range": "± 1005",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/filter_reject_all",
+            "value": 192586,
+            "range": "± 1231",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dump_write/throughput",
+            "value": 5308757,
+            "range": "± 32596",
             "unit": "ns/iter"
           }
         ]
