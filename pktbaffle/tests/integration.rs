@@ -1927,3 +1927,107 @@ fn host_ipv6_accepts_only_a_slash_128() {
         assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── Diagnostics for malformed numbers and prefix lengths (#210) ───────────────
+// Every input below is rejected by libpcap 1.10.3 too; only the diagnostic was
+// wrong. Most of the fix landed with #157 (numbers), #191 (dotted octets) and
+// #194 (the lexer no longer reads prefix lengths), so those tests are guards
+// that fail on `main`; the offset of a missing prefix length is new here.
+
+/// Rejected filters, with non-ASCII input, that cover every lexer error path.
+const REJECTED: &[&str] = &[
+    "net 10.0.0.0/",
+    "net 10.0.0.0/abc",
+    "net 10.0.0.0/99999999999999999999999",
+    "host 2001:db8::1/",
+    "ip6 net fe80::/\u{e9}",
+    "host 10.0.0.256",
+    "host 1.2.3.4.5",
+    "port 12abc",
+    "ip[0x]=1",
+    "ip[0x1g]=1",
+    "port 99999999999999999999",
+    "greater 4294967296",
+    "port 08",
+    "tcp port ???",
+    "\u{e9}",
+    "host 10.0.0.1 \u{1f980}",
+    "port 80 \u{e9}\u{e9}",
+    ".1.2.3",
+];
+
+#[test]
+fn lex_error_offset_and_char_agree() {
+    for f in REJECTED {
+        if let Err(pktbaffle::Error::LexError { offset, ch }) = pktbaffle::parse(f) {
+            assert!(
+                f.is_char_boundary(offset) && f[offset..].starts_with(ch),
+                "{f:?}: LexError {{ offset: {offset}, ch: {ch:?} }} does not point at {ch:?}"
+            );
+        }
+    }
+    // The characters the lexer really does not know keep their exact position.
+    assert_eq!(
+        pktbaffle::parse("tcp port ???").unwrap_err(),
+        pktbaffle::Error::LexError { offset: 9, ch: '?' }
+    );
+    assert_eq!(
+        pktbaffle::parse("port 80 \u{e9}\u{e9}").unwrap_err(),
+        pktbaffle::Error::LexError {
+            offset: 8,
+            ch: '\u{e9}'
+        }
+    );
+}
+
+#[test]
+fn malformed_number_error_names_the_literal() {
+    for (f, literal) in [
+        ("port 99999999999999999999", "99999999999999999999"),
+        ("host 10.0.0.256", "10.0.0.256"),
+        ("ip[0x]=1", "0x"),
+        ("port 12abc", "12abc"),
+        ("port 08", "08"),
+    ] {
+        match pktbaffle::parse(f) {
+            Err(pktbaffle::Error::ParseError { message }) => {
+                assert!(
+                    message.contains(&format!("'{literal}'")),
+                    "{f:?}: {message}"
+                )
+            }
+            other => panic!("{f:?}: expected a ParseError naming {literal:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn over_32_bit_literals_are_one_kind_of_error() {
+    // `greater 4294967296` used to fail in the parser and a larger literal in
+    // the lexer, with two different error kinds.
+    let kind = |f| std::mem::discriminant(&pktbaffle::parse(f).unwrap_err());
+    assert_eq!(
+        kind("greater 4294967296"),
+        kind("greater 99999999999999999999")
+    );
+    assert_eq!(kind("greater 4294967296"), kind("greater 0x100000000"));
+}
+
+#[test]
+fn missing_prefix_length_reports_the_slash_offset() {
+    for (f, slash) in [
+        ("net 10.0.0.0/", 12),
+        ("net 10.0.0.0/abc", 12),
+        ("net 10.0.0.0 / and tcp", 13),
+        ("host 2001:db8::1/", 16),
+        ("net 2001:db8::/", 14),
+    ] {
+        match pktbaffle::parse(f) {
+            Err(pktbaffle::Error::ParseError { message }) => assert!(
+                message.contains(&format!("at offset {slash}")) && f.as_bytes()[slash] == b'/',
+                "{f:?}: {message}"
+            ),
+            other => panic!("{f:?}: expected a ParseError, got {other:?}"),
+        }
+    }
+}

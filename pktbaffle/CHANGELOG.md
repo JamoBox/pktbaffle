@@ -114,6 +114,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   port 80`), and `net 10 mask 255.0.0.0`, are now errors (libpcap: syntax
   error). A missing or non-numeric length (`net 10.0.0.0/`) is a
   `ParseError` instead of a `LexError` with a misleading offset.
+- **Errors for malformed numbers and prefix lengths point at the problem**
+  (#210). `net 10.0.0.0/` and `net 10.0.0.0/abc` reported
+  `unexpected character '/' at offset 13` (one past the `/`, and past the end
+  of the input for a trailing `/`); `port 12abc`, `host 10.0.0.256`,
+  `ip[0x]=1` and `port 99999999999999999999` reported their first digit (or a
+  hard-coded `'0'`) as "unexpected". With #157, #191 and #194 these are now a
+  `ParseError` naming the literal and its offset ("invalid number '12abc' at
+  offset 5", "invalid IPv4 address '10.0.0.256' at offset 5", "expected a
+  prefix length after '/' at offset 12"), and every remaining `LexError`
+  satisfies `filter[offset..].starts_with(ch)`. A literal over 32 bits is the
+  same kind of error whether it fits in 64 bits (`greater 4294967296`) or not.
+  Code matching `Error::LexError` for these inputs must also match
+  `Error::ParseError`; the rejected set is unchanged.
 
 ### Added
 
