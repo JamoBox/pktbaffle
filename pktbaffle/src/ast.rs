@@ -51,6 +51,11 @@ pub struct Ipv6Net {
 impl IpNet {
     /// Construct from a CIDR prefix length (0–32).
     ///
+    /// Never panics. A `prefix_len` above 32 is out of range and is clamped
+    /// to 32 (a host mask, `0xffff_ffff`) rather than wrapping. The string
+    /// form is stricter: `net 10.0.0.0/33` is a parse error, as in libpcap
+    /// ("mask length must be <= 32").
+    ///
     /// # Example
     ///
     /// ```rust
@@ -64,11 +69,9 @@ impl IpNet {
     /// assert_eq!(host.mask, 0xffff_ffff);
     /// ```
     pub fn from_prefix(addr: std::net::Ipv4Addr, prefix_len: u8) -> Self {
-        let mask = if prefix_len == 0 {
-            0
-        } else {
-            !0u32 << (32 - prefix_len)
-        };
+        let mask = u32::MAX
+            .checked_shl(32 - u32::from(prefix_len.min(32)))
+            .unwrap_or(0);
         Self { addr, mask }
     }
 }
