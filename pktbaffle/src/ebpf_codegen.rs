@@ -23,6 +23,17 @@
 //! drop:       r0 = XDP_DROP; exit
 //! ```
 //!
+//! # Long programs
+//!
+//! A jump offset is an `i16`, so a forward jump spans at most 32767
+//! instructions, but every pending success/failure edge targets code that does
+//! not exist yet (the epilogues, or the next operand). Roughly every 16K
+//! instructions, between two primitives, the generator therefore emits a
+//! *relay island* (`ja over; ja ?; ja ?; ...; over:`) and re-points every
+//! pending edge at one of its relays (`Codegen::emit_island`), so a program
+//! can be as long as the kernel allows. Only a single primitive spanning more
+//! than 32767 instructions can still fail, with a `CodegenError`.
+//!
 //! # Bounds checking
 //!
 //! Before every packet read of `size` bytes at `offset`, the codegen emits:
@@ -63,16 +74,24 @@ enum Work<'e> {
     AndDone(Vec<Patch>),
     /// Left operand done; emit the right.
     OrRight(&'e Expr),
-    /// Both done; carries the left's success patches and the JA between arms.
-    OrDone(Vec<Patch>, usize),
+    /// Both done; carries the left's success patches, including the JA
+    /// between the arms.
+    OrDone(Vec<Patch>),
     NotDone,
 }
+
+/// Instructions between relay islands (see `Codegen::emit_island`). Half of
+/// `i16::MAX`, so a pending jump is still in range when an island is reached
+/// and re-pointed, however large the primitive that crossed the threshold.
+const ISLAND_SPACING: usize = 16 * 1024;
 
 // ── Compiler state ────────────────────────────────────────────────────────────
 
 struct Codegen {
     insns: Vec<Insn>,
     link: LinkType,
+    /// Index just past the most recent relay island (0 before the first).
+    last_island: usize,
 }
 
 impl Codegen {
@@ -80,6 +99,7 @@ impl Codegen {
         Self {
             insns: Vec::new(),
             link,
+            last_island: 0,
         }
     }
 
@@ -107,6 +127,37 @@ impl Codegen {
         for p in patches {
             self.resolve(p, target_idx)?;
         }
+        Ok(())
+    }
+
+    /// Keep pending forward jumps within the 16-bit offset range (#200).
+    ///
+    /// Jumps are patched only once their target exists, so in a long program
+    /// the early ones would be more than `i16::MAX` instructions from it.
+    /// Between two primitives, once `ISLAND_SPACING` instructions have been
+    /// emitted since the last island, this emits `ja <over>` followed by one
+    /// `ja` relay per non-empty pending list, and re-points every patch in the
+    /// list at its relay. The list then holds just the relay (itself still
+    /// unresolved), so a pending jump is never more than about one spacing
+    /// from the next island whatever the program length. The fall-through
+    /// path pays one extra `ja`.
+    ///
+    /// `lists` are every pending patch list: all share one target each, so a
+    /// single relay per list is enough.
+    fn emit_island(&mut self, lists: Vec<&mut Vec<Patch>>) -> Result<()> {
+        if lists.is_empty() {
+            self.last_island = self.insns.len();
+            return Ok(());
+        }
+        let over = self.push(Insn::ja(0));
+        for list in lists {
+            let relay = self.push(Insn::ja(0));
+            let aged = std::mem::replace(list, vec![Patch(relay)]);
+            self.resolve_all(aged, relay)?;
+        }
+        let after = self.insns.len();
+        self.resolve(Patch(over), after)?;
+        self.last_island = after;
         Ok(())
     }
 
@@ -284,7 +335,24 @@ impl Codegen {
         let mut done: Vec<Patches> = Vec::new();
         while let Some(step) = work.pop() {
             match step {
-                Work::Emit(Expr::Primitive(p)) => done.push(self.emit_primitive(p)?),
+                Work::Emit(Expr::Primitive(p)) => {
+                    done.push(self.emit_primitive(p)?);
+                    // Between primitives is the only place for an island: an
+                    // operator step records a start index that the very next
+                    // primitive must begin at.
+                    if self.insns.len() - self.last_island >= ISLAND_SPACING {
+                        let pending = done
+                            .iter_mut()
+                            .flat_map(|p| [&mut p.success, &mut p.failure])
+                            .chain(work.iter_mut().filter_map(|w| match w {
+                                Work::AndDone(v) | Work::OrDone(v) => Some(v),
+                                _ => None,
+                            }))
+                            .filter(|v| !v.is_empty())
+                            .collect();
+                        self.emit_island(pending)?;
+                    }
+                }
                 Work::Emit(Expr::And(left, right)) => {
                     work.push(Work::AndRight(right));
                     work.push(Work::Emit(left));
@@ -319,15 +387,15 @@ impl Codegen {
                     let ja_idx = self.push(Insn::ja(0));
                     let right_start = self.insns.len();
                     self.resolve_all(left_p.failure, right_start)?;
-                    work.push(Work::OrDone(left_p.success, ja_idx));
+                    let mut left_success = left_p.success;
+                    left_success.push(Patch(ja_idx));
+                    work.push(Work::OrDone(left_success));
                     work.push(Work::Emit(right));
                 }
-                Work::OrDone(left_success, ja_idx) => {
+                Work::OrDone(left_success) => {
                     let right_p = done.pop().expect("OR right operand");
-                    let mut success = left_success;
-                    success.push(Patch(ja_idx));
                     done.push(Patches {
-                        success: concat(success, right_p.success),
+                        success: concat(left_success, right_p.success),
                         failure: right_p.failure,
                     });
                 }
