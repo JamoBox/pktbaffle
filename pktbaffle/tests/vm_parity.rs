@@ -1023,3 +1023,336 @@ fn very_long_and_and_not_chains_match_like_tcp() {
         assert!(!run_filter(&f, &udp_pkt));
     }
 }
+
+// ── IpNet::from_prefix above /32 clamps instead of wrapping (#187) ──────────
+// Before the fix a release build returned mask 0x80000000 for /33, so the
+// program tested only the top address bit: 1.1.1.1 -> 200.9.9.9 matched
+// (src top bit clear).  Hand-derived: /33 is documented to clamp to /32, i.e.
+// it matches exactly like `net 10.1.2.3/32`.  libpcap rejects the string form.
+
+#[test]
+fn from_prefix_above_32_matches_like_a_host_mask() {
+    use pktbaffle::ast::{Dir, Expr, IpNet, Primitive};
+    use pktbaffle::codegen;
+    use std::net::Ipv4Addr;
+
+    let host = tcp([10, 1, 2, 3], [1, 1, 1, 1], 1234, 80);
+    let other = tcp([1, 1, 1, 1], [200, 9, 9, 9], 1234, 80);
+    let neighbour = tcp([10, 1, 2, 4], [1, 1, 1, 1], 1234, 80);
+    for len in [33u8, 64, 255] {
+        let net = IpNet::from_prefix(Ipv4Addr::new(10, 1, 2, 3), len);
+        let e = Expr::Primitive(Primitive::Net {
+            net,
+            dir: Dir::SrcOrDst,
+        });
+        let prog = codegen::compile(&e, LinkType::Ethernet).unwrap();
+        assert!(pktbaffle::vm::run(prog.instructions(), &host), "/{len}");
+        assert!(!pktbaffle::vm::run(prog.instructions(), &other), "/{len}");
+        assert!(
+            !pktbaffle::vm::run(prog.instructions(), &neighbour),
+            "/{len}"
+        );
+    }
+    assert!(run_filter("net 10.1.2.3/32", &host));
+    assert!(!run_filter("net 10.1.2.3/32", &other));
+    assert!(!run_filter("net 10.1.2.3/32", &neighbour));
+}
+
+// ── vm::run: JA with a huge `k` must fault, not wrap pc backwards (#188) ────
+// `pc.wrapping_add(k as usize)` wrapped on 32-bit targets, so `ja 0xFFFFFFFF`
+// jumped to itself and `vm::run` never returned (on 64-bit it walked off the
+// end and returned false).  The verdicts below are the issue's observations
+// on x86_64 (hang on i686): libpcap 1.10.3 `bpf_validate()` rejects `ja 5`
+// and `ja 0xFFFFFFFE` on a 2-insn program; `ja 0xFFFFFFFF` is not a clean
+// oracle (libpcap has its own u_int wrap quirk), so those are hand-derived.
+// Only a 32-bit run can fail before the fix; the loop is bounded by a
+// timeout so a regression fails instead of hanging the suite.
+
+/// Run `vm::run` on a small-stack thread, failing (not hanging) after 10 s.
+fn run_bounded(insns: Vec<pktbaffle::bpf::Insn>, pkt: &'static [u8]) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(|| pktbaffle::vm::run(&insns, pkt));
+            let _ = tx.send(r);
+        })
+        .expect("spawn thread");
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(verdict)) => verdict,
+        Ok(Err(_)) => panic!("vm::run panicked"),
+        Err(_) => panic!("vm::run did not return within 10 s (hang)"),
+    }
+}
+
+#[test]
+fn ja_with_huge_k_is_a_fault_not_a_wrapped_jump() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    // Self-loop on 32-bit before the fix.
+    assert!(!run_bounded(
+        vec![Insn::ja(u32::MAX), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+    // Backward loop to pc 0 on 32-bit before the fix.
+    assert!(!run_bounded(
+        vec![
+            Insn::ld_imm(1),
+            Insn::ja(0xFFFF_FFFE),
+            Insn::ret_k(BPF_ACCEPT)
+        ],
+        b"x"
+    ));
+    // Nearby huge and merely out-of-range targets fault as well.
+    for k in [0x8000_0000, 0xFFFF_FFFD, 5] {
+        assert!(
+            !run_bounded(vec![Insn::ja(k), Insn::ret_k(BPF_ACCEPT)], b"x"),
+            "ja {k:#x}"
+        );
+    }
+}
+
+#[test]
+fn ja_forward_within_program_still_works() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    // [ja 1, ret 0, ret ACCEPT]: the control from the issue.
+    assert!(run_bounded(
+        vec![Insn::ja(1), Insn::ret_k(0), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+    // Jumping to exactly the last instruction is in range.
+    assert!(run_bounded(
+        vec![Insn::ja(0), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+}
+
+// ── Malformed cBPF opcodes make the VM return false (#201) ──────────────────
+// `vm::run` used to mask individual bit fields, so malformed opcodes ran as if
+// they were valid ones (RET|X returned k, MISC 0xff ran as TXA, ...).  libpcap
+// 1.10.3's `bpf_validate()` accepts them (it checks class and mode only), but
+// `bpf_filter()` switches on the exact opcode and hits `abort()` for each
+// code below (the issue ran `pcap_offline_filter`: SIGABRT), and the kernel's
+// `bpf_check_classic()` rejects them with EINVAL; the documented pktbaffle
+// contract is `false`.  The verdicts for the issue's seven programs are the
+// issue's observations of the old behaviour inverted; the valid siblings are
+// hand-derived.
+
+fn raw(code: u16, k: u32) -> pktbaffle::bpf::Insn {
+    pktbaffle::bpf::Insn {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn vm(insns: &[pktbaffle::bpf::Insn], pkt: &[u8]) -> bool {
+    pktbaffle::vm::run(insns, pkt)
+}
+
+#[test]
+fn malformed_opcodes_from_the_issue_return_false() {
+    use pktbaffle::bpf::Insn;
+
+    let jeq3 = Insn {
+        code: 0x15,
+        jt: 0,
+        jf: 1,
+        k: 3,
+    };
+    // RET|X (0x0e) is not an opcode; it used to return k.
+    assert!(!vm(&[raw(0x0e, 1)], &[]));
+    // MISC 0xff used to run as TXA: ldx #5 ; ld #0 ; <0xff> ; ret a.
+    assert!(!vm(
+        &[raw(0x01, 5), raw(0x00, 0), raw(0xff, 0), raw(0x16, 0)],
+        &[]
+    ));
+    // LD|H|LEN (0x88) used to run as LD LEN: ld len ; jeq #3 ; ret 1 ; ret 0.
+    assert!(!vm(
+        &[raw(0x88, 0), jeq3, raw(0x06, 1), raw(0x06, 0)],
+        &[1, 2, 3]
+    ));
+    // LD|B|IMM (0x10) used to run as LD IMM.
+    assert!(!vm(&[raw(0x10, 7), raw(0x16, 0)], &[]));
+    // ST with stray bits (0x62) used to store to M[0].
+    assert!(!vm(
+        &[
+            raw(0x00, 9),
+            raw(0x62, 0),
+            raw(0x00, 0),
+            raw(0x60, 0),
+            raw(0x16, 0)
+        ],
+        &[]
+    ));
+    // ALU NEG|X (0x8c) used to negate.
+    assert!(!vm(&[raw(0x00, 5), raw(0x8c, 0), raw(0x16, 0)], &[]));
+    // LDX|H|IMM (0x09) used to load the immediate.
+    assert!(!vm(&[raw(0x09, 3), raw(0x87, 0), raw(0x16, 0)], &[]));
+}
+
+#[test]
+fn valid_siblings_of_the_malformed_opcodes_still_run() {
+    use pktbaffle::bpf::Insn;
+
+    let jeq3 = Insn {
+        code: 0x15,
+        jt: 0,
+        jf: 1,
+        k: 3,
+    };
+    assert!(vm(&[raw(0x06, 1)], &[])); // RET|K
+    assert!(vm(
+        &[raw(0x01, 5), raw(0x00, 0), raw(0x87, 0), raw(0x16, 0)],
+        &[]
+    )); // TXA
+    assert!(vm(
+        &[raw(0x80, 0), jeq3, raw(0x06, 1), raw(0x06, 0)],
+        &[1, 2, 3]
+    )); // LD|W|LEN
+    assert!(vm(&[raw(0x00, 7), raw(0x16, 0)], &[])); // LD|W|IMM
+    assert!(vm(
+        &[
+            raw(0x00, 9),
+            raw(0x02, 0),
+            raw(0x00, 0),
+            raw(0x60, 0),
+            raw(0x16, 0)
+        ],
+        &[]
+    )); // ST, LD|W|MEM
+    assert!(vm(&[raw(0x00, 5), raw(0x84, 0), raw(0x16, 0)], &[])); // ALU NEG|K
+    assert!(vm(&[raw(0x01, 3), raw(0x87, 0), raw(0x16, 0)], &[])); // LDX|W|IMM
+    assert!(!vm(&[raw(0x16, 0)], &[])); // RET|A with A = 0: the issue's baseline
+}
+
+/// The 47 opcodes `vm::run` implements, written out by hand from libpcap's
+/// `bpf_filter()` switch (plus ALU XOR, which pktbaffle's codegen emits).
+/// ALU MOD (0x94 / 0x9c, kernel-only) is not implemented by the VM, so it is
+/// invalid here.
+const VALID_OPCODES: &[u16] = &[
+    // LD: W/H/B ABS, W/H/B IND, W LEN, W IMM, W MEM
+    0x20, 0x28, 0x30, 0x40, 0x48, 0x50, 0x80, 0x00, 0x60,
+    // LDX: W IMM, W LEN, W MEM, B MSH
+    0x01, 0x81, 0x61, 0xb1, // ST, STX
+    0x02, 0x03, // ALU K/X: add sub mul div or and lsh rsh; NEG (K only); XOR K/X
+    0x04, 0x0c, 0x14, 0x1c, 0x24, 0x2c, 0x34, 0x3c, 0x44, 0x4c, 0x54, 0x5c, 0x64, 0x6c, 0x74, 0x7c,
+    0x84, 0xa4, 0xac, // JMP: JA (K only), JEQ/JGT/JGE/JSET K/X
+    0x05, 0x15, 0x1d, 0x25, 0x2d, 0x35, 0x3d, 0x45, 0x4d, // RET K/A, TAX, TXA
+    0x06, 0x16, 0x07, 0x87,
+];
+
+#[test]
+fn only_exact_cbpf_opcodes_execute_and_disassemble() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    assert_eq!(VALID_OPCODES.len(), 47);
+    let pkt = [0u8; 16];
+    for code in 0..=u16::MAX {
+        let insn = Insn {
+            code,
+            jt: 0,
+            jf: 0,
+            k: 1,
+        };
+        let shown = insn.to_string();
+        if VALID_OPCODES.contains(&code) {
+            assert!(!shown.contains(".word"), "{code:#06x} is valid: {shown}");
+        } else {
+            assert!(
+                shown.contains(".word") && shown.contains("invalid"),
+                "{code:#06x} must be marked invalid: {shown}"
+            );
+            // Were it executed, a non-jump opcode would fall through to the
+            // accepting `ret`.
+            assert!(!vm(&[insn, Insn::ret_k(BPF_ACCEPT)], &pkt), "{code:#06x}");
+        }
+    }
+}
+
+#[test]
+fn compiled_programs_contain_only_valid_opcodes() {
+    // Every opcode `compile()` emits (all link types, byte access, arithmetic,
+    // vlan/mpls, protochain, ...) must stay inside the valid set.
+    let filters = [
+        "tcp",
+        "udp or icmp",
+        "ip6 and tcp port 80",
+        "host 10.0.0.1 and not port 22",
+        "net 10.0.0.0/8",
+        "ether host aa:bb:cc:dd:ee:ff",
+        "ether broadcast",
+        "vlan 100 and tcp",
+        "mpls 5",
+        "pppoes 7",
+        "len > 100 and len <= 1500",
+        "tcp[13] & 2 != 0",
+        "tcp[tcpflags] & tcp-syn != 0",
+        "ip[2:2] + 20 > 40",
+        "ip[0] & 0xf * 4 = 20",
+        "ip[1] - 1 = ip[2]",
+        "ip[0] ^ 1 = 4",
+        "ip[0] << 1 = 4",
+        "ip[0] >> 1 & 3 = 2",
+        "ip[0] - 1 = 2",
+        "ip[8] * 2 / 2 = 64",
+        "icmp[icmptype] = icmp-echo",
+        "ip6 protochain 6",
+        "ip protochain 17",
+        "portrange 1000-2000",
+        "ip multicast or ip6 multicast",
+        "arp or rarp",
+        "greater 100 or less 50",
+    ];
+    for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        for f in filters {
+            let prog = match compile(f, link, Target::Classic) {
+                Ok(p) => p,
+                // Ethernet-only primitives are rejected on the other links.
+                Err(_) if link != LinkType::Ethernet => continue,
+                Err(e) => panic!("compile({f:?}): {e}"),
+            };
+            for insn in prog.instructions() {
+                assert!(
+                    VALID_OPCODES.contains(&insn.code),
+                    "{f:?} on {link:?} emitted opcode {:#06x}",
+                    insn.code
+                );
+            }
+        }
+    }
+}
+
+// ── Classic programs are capped at BPF_MAXINSNS (4096) insns (#203) ─────────
+// A filter that compiles to exactly 4096 insns still runs correctly in the VM.
+// Hand-derived: `ip[0]` of the test frames is 0x45, so `ip[0] + 1 * n` equals
+// `0x45 + n` and (via the 8-bit `ldb`) never wraps.
+
+#[test]
+fn program_of_exactly_4096_insns_runs() {
+    use pktbaffle::bpf::BPF_MAXINSNS;
+
+    let overhead = compile("ip[0]+1 = 0", LinkType::Ethernet, Target::Classic)
+        .unwrap()
+        .len()
+        - 1;
+    let n = BPF_MAXINSNS - overhead;
+    let f = format!("ip[0]{} = {}", "+1".repeat(n), 0x45 + n);
+    let prog = compile(&f, LinkType::Ethernet, Target::Classic).unwrap();
+    assert_eq!(prog.len(), BPF_MAXINSNS);
+    let hit = tcp(IP_A, IP_B, 1234, 80);
+    assert_eq!(hit[14], 0x45);
+    assert!(pktbaffle::vm::run(prog.instructions(), &hit));
+    let mut miss = hit.clone();
+    miss[14] = 0x46;
+    assert!(!pktbaffle::vm::run(prog.instructions(), &miss));
+    assert!(!pktbaffle::vm::run(
+        prog.instructions(),
+        &udp(IP_A, IP_B, 1234, 53)[..14]
+    ));
+}

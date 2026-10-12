@@ -44,7 +44,9 @@ pub const CTX_BASE: u64 = 0x2000_0000;
 /// that code which confuses offsets with addresses cannot pass by accident.
 pub const PKT_BASE: u64 = 0x1000_0002;
 /// Upper bound on executed instructions (guards against backward-jump loops).
-const STEP_LIMIT: usize = 1 << 16;
+/// Programs are forward-only, so this only has to exceed the longest program
+/// under test (the #200 tests run ~200K-instruction ones).
+const STEP_LIMIT: usize = 1 << 20;
 
 /// Byte order of the simulated host; it decides what `LDX MEM` returns and what
 /// `BPF_END` does.

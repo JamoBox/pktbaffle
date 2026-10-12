@@ -1,18 +1,21 @@
 //! Software cBPF interpreter.
 //!
 //! Evaluates a classic BPF program against a packet byte slice.
-//! Out-of-bounds packet loads cause the program to return false (drop).
+//! Out-of-bounds packet loads, out-of-range jumps and scratch slots, and any
+//! malformed opcode (one that is not an exact cBPF opcode, as libpcap's
+//! `bpf_filter` and the kernel require) cause the program to return false.
 
 use crate::bpf::{
-    Insn, BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_B, BPF_DIV, BPF_H, BPF_IMM, BPF_IND, BPF_JA,
-    BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET, BPF_LD, BPF_LDX, BPF_LEN, BPF_LSH, BPF_MEM,
-    BPF_MISC, BPF_MSH, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST, BPF_STX, BPF_SUB, BPF_W,
-    BPF_X, BPF_XOR,
+    is_valid_opcode, Insn, BPF_ABS, BPF_ADD, BPF_ALU, BPF_AND, BPF_B, BPF_DIV, BPF_H, BPF_IMM,
+    BPF_IND, BPF_JA, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET, BPF_LD, BPF_LDX, BPF_LEN,
+    BPF_LSH, BPF_MEM, BPF_MISC, BPF_MSH, BPF_MUL, BPF_NEG, BPF_OR, BPF_RET, BPF_RSH, BPF_ST,
+    BPF_STX, BPF_SUB, BPF_W, BPF_X, BPF_XOR,
 };
 
 const SCRATCH: usize = 16;
 
-/// Returns `true` if `insns` accepts `pkt`, `false` if it drops or errors.
+/// Returns `true` if `insns` accepts `pkt`, `false` if it drops it or faults
+/// (see the module docs: invalid opcode, out-of-range jump, bad load, ...).
 pub fn run(insns: &[Insn], pkt: &[u8]) -> bool {
     inner(insns, pkt).unwrap_or(false)
 }
@@ -27,6 +30,10 @@ fn inner(insns: &[Insn], pkt: &[u8]) -> Option<bool> {
     loop {
         let insn = *insns.get(pc)?;
         pc += 1;
+        // The decoding below masks fields; only exact cBPF opcodes may run.
+        if !is_valid_opcode(insn.code) {
+            return None;
+        }
 
         match insn.code & 0x07 {
             BPF_LD => {
@@ -80,7 +87,9 @@ fn inner(insns: &[Insn], pkt: &[u8]) -> Option<bool> {
             BPF_JMP => {
                 let op = insn.code & 0xf0;
                 if op == BPF_JA {
-                    pc = pc.wrapping_add(insn.k as usize);
+                    // A target past `usize::MAX` (32-bit) must fault, not wrap
+                    // to a backward jump; `insns.get(pc)?` rejects the rest.
+                    pc = pc.checked_add(insn.k as usize)?;
                     continue;
                 }
                 let v = if uses_x(insn) { x } else { insn.k };
