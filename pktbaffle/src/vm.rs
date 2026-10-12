@@ -80,7 +80,9 @@ fn inner(insns: &[Insn], pkt: &[u8]) -> Option<bool> {
             BPF_JMP => {
                 let op = insn.code & 0xf0;
                 if op == BPF_JA {
-                    pc = pc.wrapping_add(insn.k as usize);
+                    // A target past `usize::MAX` (32-bit) must fault, not wrap
+                    // to a backward jump; `insns.get(pc)?` rejects the rest.
+                    pc = pc.checked_add(insn.k as usize)?;
                     continue;
                 }
                 let v = if uses_x(insn) { x } else { insn.k };

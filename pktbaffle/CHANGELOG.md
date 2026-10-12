@@ -83,6 +83,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **clamped to /32** (mask `0xffff_ffff`) and documented as such; 0-32 are
   unchanged. `net 10.0.0.0/33` in a filter string is still a parse error, as
   in libpcap 1.10.3.
+- **`vm::run` no longer hangs on 32-bit targets for a `ja` with a huge `k`**
+  (#188). The jump target was computed with `wrapping_add`, so on i686 /
+  armv7 / wasm32 `ja 0xFFFFFFFF` jumped to itself and `[ld #1, ja 0xFFFFFFFE,
+  ret]` looped back to the start, and the call never returned (64-bit targets
+  returned `false`). A target that overflows `usize`, or lies past the end of
+  the program, now makes the VM return `false` on every pointer width.
+  Programs from `compile()` are unaffected.
 
 ### Added
 
