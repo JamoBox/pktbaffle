@@ -38,6 +38,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Err(ParseError)` past 31 nested `(` (or 127 chained unary `-`); libpcap
   accepts thousands (#199 tracks raising limits). Shallower nesting is
   unchanged. Chains of `not` / `!` are not covered by this fix.
+- **No stack overflow on long `and` / `or` / `not` chains** (#149).
+  `a or b or ...`, `a and b and ...` and `!!!...x` build an AST one level
+  deep per term, and dropping it, emitting cBPF or eBPF, and (for `!`)
+  parsing it recursed per term: a few hundred terms aborted a debug build on
+  a 1 MiB stack, a few thousand a release build. The parser, both code
+  generators and `Drop for ast::Expr` are now iterative, so `compile()` and
+  `parse()` return `Ok` or `Err` at any chain length (a 1000-host
+  `host a or host b ...` list compiles for `Target::Extended`, as in libpcap).
+  Generated code is unchanged. `ast::Expr` now implements `Drop`, so its
+  fields can no longer be moved out by destructuring a value (match on a
+  reference instead).
 
 ### Added
 

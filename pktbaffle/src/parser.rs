@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! expr      ::= not_expr (('and' | 'or')? not_expr)*   // juxtaposition = AND
-//! not_expr  ::= ('not' | '!') not_expr | atom
+//! not_expr  ::= ('not' | '!')* atom
 //! atom      ::= '(' expr ')' | primitive
 //! ```
 
@@ -193,12 +193,18 @@ impl Parser<'_> {
         )
     }
 
+    /// Counts the negations first and wraps afterwards, so a `!!!...x` chain
+    /// costs no stack per `!` (#149).
     fn parse_not(&mut self) -> Result<Expr> {
-        if self.eat(&Token::Not) || self.eat(&Token::Bang) {
-            let inner = self.parse_not()?;
-            return Ok(Expr::Not(Box::new(inner)));
+        let mut nots = 0;
+        while self.eat(&Token::Not) || self.eat(&Token::Bang) {
+            nots += 1;
         }
-        self.parse_atom()
+        let mut expr = self.parse_atom()?;
+        for _ in 0..nots {
+            expr = Expr::Not(Box::new(expr));
+        }
+        Ok(expr)
     }
 
     fn parse_atom(&mut self) -> Result<Expr> {
