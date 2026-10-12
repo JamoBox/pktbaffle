@@ -63,6 +63,12 @@ pub const BPF_ACCEPT: u32 = 0xffff_ffff;
 /// A return value meaning "drop the packet".
 pub const BPF_DROP: u32 = 0;
 
+/// The longest classic BPF program the Linux kernel accepts (`BPF_MAXINSNS`):
+/// `setsockopt(SO_ATTACH_FILTER)` fails with `EINVAL` for a longer one.
+/// [`crate::compile`] with [`crate::Target::Classic`] returns
+/// [`crate::Error::CodegenError`] rather than a program over this length.
+pub const BPF_MAXINSNS: usize = 4096;
+
 /// A single classic BPF instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
