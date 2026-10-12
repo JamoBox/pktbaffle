@@ -1258,3 +1258,132 @@ fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
         }
     });
 }
+
+// ── Regression: long and/or/not chains must not stack-overflow (#149) ────────
+// `a or b or ...`, `a and b and ...` and `!!!...x` build an AST as deep as the
+// chain is long, and dropping it, emitting cBPF or eBPF, or (for `!`) parsing
+// it recursed once per term with no limit: a few hundred terms aborted a debug
+// build on a 1 MiB stack (an uncatchable stack overflow). libpcap 1.10.3
+// compiles a 15000-term `tcp or ...` and a 1000-term host list (per the issue;
+// not re-run here). Every input below must now return `Ok` or `Err`.
+
+/// `term op term op ...` with `n` terms.
+fn chain(term: &str, op: &str, n: usize) -> String {
+    vec![term; n].join(&format!(" {op} "))
+}
+
+/// The long-chain inputs: `or`, `and`, juxtaposition, `!` and `not` chains.
+fn long_chains(n: usize) -> Vec<String> {
+    vec![
+        chain("tcp", "or", n),
+        chain("tcp", "and", n),
+        vec!["tcp"; n].join(" "),
+        format!("{}tcp", "!".repeat(n)),
+        format!("{}tcp", "not ".repeat(n)),
+    ]
+}
+
+#[test]
+fn long_chains_compile_on_small_stack() {
+    on_small_stack(256, || {
+        for filter in long_chains(5000) {
+            for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                for &target in &[Target::Classic, Target::Extended] {
+                    // Ok or Err are both fine; returning at all is the test.
+                    let _ = compile(&filter, link, target);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn million_term_chain_parses_and_drops_on_small_stack() {
+    use pktbaffle::ast::Expr;
+
+    on_small_stack(256, || {
+        for op in ["or", "and"] {
+            let expr = pktbaffle::parse(&chain("tcp", op, 1_000_000)).unwrap();
+            // Left-deep: the left spine holds every operator.
+            let (mut depth, mut e) = (0, &expr);
+            while let Expr::Or(l, _) | Expr::And(l, _) = e {
+                depth += 1;
+                e = l;
+            }
+            assert_eq!(depth, 999_999, "{op} chain");
+            drop(expr);
+        }
+        for neg in ["!", "not "] {
+            let expr = pktbaffle::parse(&format!("{}tcp", neg.repeat(100_000))).unwrap();
+            let (mut depth, mut e) = (0, &expr);
+            while let Expr::Not(inner) = e {
+                depth += 1;
+                e = inner;
+            }
+            assert_eq!(depth, 100_000, "{neg:?} chain");
+        }
+    });
+}
+
+#[test]
+fn deep_hand_built_trees_compile_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+    use pktbaffle::{codegen, ebpf_codegen};
+
+    // The public codegen entry points take any `Expr`, including right-deep
+    // and mixed shapes the parser only produces through parentheses.
+    on_small_stack(256, || {
+        let tcp = || Expr::Primitive(Primitive::Proto(Proto::Tcp));
+        let mut right_or = tcp();
+        let mut right_and = tcp();
+        let mut mixed = tcp();
+        for i in 0..5000 {
+            right_or = Expr::Or(Box::new(tcp()), Box::new(right_or));
+            right_and = Expr::And(Box::new(tcp()), Box::new(right_and));
+            mixed = match i % 3 {
+                0 => Expr::Not(Box::new(mixed)),
+                1 => Expr::And(Box::new(mixed), Box::new(tcp())),
+                _ => Expr::Or(Box::new(tcp()), Box::new(mixed)),
+            };
+        }
+        for expr in [&right_or, &right_and, &mixed] {
+            for &link in &[LinkType::Ethernet, LinkType::RawIp] {
+                let _ = codegen::compile(expr, link);
+                let _ = ebpf_codegen::compile(expr, link);
+            }
+        }
+    });
+}
+
+#[test]
+fn long_and_chain_compiles_like_one_term() {
+    // Every later `tcp` is elided by the facts the first one proves.
+    on_small_stack(1024, || {
+        assert_eq!(
+            eth_prog(&chain("tcp", "and", 5000)).instructions(),
+            eth_prog("tcp").instructions()
+        );
+    });
+}
+
+/// `host 10.0.0.1 or host 10.0.0.2 ... or host 10.0.3.232` (1000 hosts).
+fn thousand_host_list() -> String {
+    (1u32..=1000)
+        .map(|i| format!("host 10.0.{}.{}", i >> 8, i & 0xff))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+#[test]
+fn thousand_host_list_compiles_for_extended_on_1mib_stack() {
+    // #149 acceptance: libpcap 1.10.3 compiles this list (1259 insns, per the
+    // issue). 1 MiB is the Windows main-thread stack; this runs in debug too.
+    on_small_stack(1024, || {
+        let r = compile(&thousand_host_list(), LinkType::Ethernet, Target::Extended);
+        assert!(
+            r.is_ok(),
+            "1000-host list must compile for eBPF: {:?}",
+            r.err()
+        );
+    });
+}

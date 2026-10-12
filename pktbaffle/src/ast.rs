@@ -248,6 +248,15 @@ pub struct ByteAccess {
 }
 
 /// A node in the filter expression tree.
+///
+/// `a or b or c` parses left-deep (`Or(Or(a, b), c)`), so a long chain is a
+/// deep tree. Dropping one and compiling one both run in constant stack, at
+/// any depth. The derived `Clone`, `PartialEq` and `Debug` still recurse
+/// once per level.
+///
+/// `Expr` implements [`Drop`], so its fields cannot be moved out by
+/// destructuring a value; match on a reference instead (and clone what you
+/// keep), or use [`std::mem::replace`].
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Expr {
@@ -259,4 +268,36 @@ pub enum Expr {
     Not(Box<Expr>),
     /// A leaf predicate.
     Primitive(Primitive),
+}
+
+/// Drops the tree with an explicit stack: `a or b or ...` and `!!!...x` nest
+/// one level per term, so the default recursive drop would overflow the
+/// stack on long chains (#149).
+impl Drop for Expr {
+    fn drop(&mut self) {
+        fn take_children(e: &mut Expr, stack: &mut Vec<Expr>) {
+            // A unit-like leaf: replacing a child with it allocates nothing.
+            let mut take = |b: &mut Box<Expr>| {
+                stack.push(std::mem::replace(
+                    &mut **b,
+                    Expr::Primitive(Primitive::IpBroadcast),
+                ))
+            };
+            match e {
+                Expr::And(l, r) | Expr::Or(l, r) => {
+                    take(l);
+                    take(r);
+                }
+                Expr::Not(inner) => take(inner),
+                Expr::Primitive(_) => {}
+            }
+        }
+        let mut stack = Vec::new();
+        take_children(self, &mut stack);
+        // Each popped node's children are detached before it drops, so its
+        // own `drop` sees only leaves and never recurses further.
+        while let Some(mut e) = stack.pop() {
+            take_children(&mut e, &mut stack);
+        }
+    }
 }
