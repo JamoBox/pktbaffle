@@ -849,3 +849,29 @@ fn non_octal_integer_literals_rejected() {
         assert!(try_eth(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ────────────────────────
+// libpcap 1.10.3 reads each octet as decimal. Hand-derived from issue #191.
+
+#[test]
+fn zero_padded_dotted_octets_accepted_on_both_targets() {
+    for f in [
+        "host 010.1.2.3",
+        "host 1.2.3.04",
+        "host 192.168.001.001",
+        "host 00.0.0.1",
+        "net 010.0.0.0/8",
+        "net 10.0.0.0 mask 255.255.255.000",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn bad_dotted_octets_rejected() {
+    for f in ["host 10.256.0.1", "host 0x0a.0.0.1", "host 1.2.3.4.5"] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}

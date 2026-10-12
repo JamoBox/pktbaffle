@@ -89,6 +89,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a malformed number (`0x`, `12abc`) now reports the same way instead of as
   an `unexpected character` `LexError` (#210 tracks the rest of the
   diagnostics).
+- **Dotted IPv4 literals accept zero-padded octets** (#191). `host 010.1.2.3`,
+  `host 1.2.3.04`, `host 192.168.001.001`, `net 010.0.0.0/8` and
+  `net 10.0.0.0 mask 255.255.255.000` failed with `unexpected character` at
+  the start of the token (the 1-3 octet forms already worked). Each octet is
+  decimal with leading zeros allowed, as in libpcap (`010` is 10, not octal),
+  for any number of octets. A bad octet (`10.256.0.1`, `1.2.3.4.5`) is now a
+  `ParseError` naming the literal ("invalid IPv4 address '10.256.0.1' at
+  offset 5") instead of a `LexError` quoting its first digit.
 
 ### Added
 
