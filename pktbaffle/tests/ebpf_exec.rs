@@ -498,6 +498,8 @@ mod parity {
         "src and dst host 192.168.1.1",
         "net 10.0.0.0/8",
         "net 0xa0000", // bare integer shifted into 10.0.0.0/8 (#190)
+        "net 10.0",    // octets written set the mask: /16 (#158)
+        "host 10.0.0", // short host is the /24 net (#158)
         "src net 192.168.0.0/16",
         "dst net 10.0.0.0/8",
         "net 192.168.1.0 mask 255.255.255.0",

@@ -2086,3 +2086,65 @@ fn bare_integer_over_32_bits_is_still_rejected() {
         assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ────────
+// libpcap 1.10.3 `gen_ncode`: `v <<= 32 - vlen; mask <<= 32 - vlen` with vlen = 8
+// per octet written, for both `host` and `net`: `10` is /8, `10.0` /16, `10.0.0`
+// /24, `10.0.0.0` /32. Expected trees hand-derived from that and issue #158.
+
+#[test]
+fn net_mask_comes_from_the_octets_written() {
+    for (short, cidr) in [
+        ("net 10.0.0.0", "net 10.0.0.0/32"),
+        ("net 192.168.1.0", "net 192.168.1.0/32"),
+        ("net 192.168.1.77", "net 192.168.1.77/32"),
+        ("net 10.0", "net 10.0.0.0/16"),
+        ("net 10.0.0", "net 10.0.0.0/24"),
+        ("net 10.1.0", "net 10.1.0.0/24"),
+        ("net 10.1", "net 10.1.0.0/16"),
+        ("src net 10.0", "src net 10.0.0.0/16"),
+        ("dst net 10.0.0", "dst net 10.0.0.0/24"),
+        // Unchanged: one octet, an explicit prefix, an explicit mask.
+        ("net 10", "net 10.0.0.0/8"),
+        ("net 192.168", "net 192.168.0.0/16"),
+        ("net 10.0.1", "net 10.0.1.0/24"),
+        ("net 10.1/24", "net 10.1.0.0/24"),
+        ("net 10.0.0.0 mask 255.255.0.0", "net 10.0.0.0/16"),
+    ] {
+        assert_eq!(ast(short), ast(cidr), "{short:?} vs {cidr:?}");
+    }
+}
+
+#[test]
+fn host_with_fewer_than_four_octets_is_a_network() {
+    for (host, net) in [
+        ("host 10.1", "net 10.1.0.0/16"),
+        ("host 10.1.2", "net 10.1.2.0/24"),
+        ("src host 10.1", "src net 10.1.0.0/16"),
+        ("dst host 10.1.2", "dst net 10.1.2.0/24"),
+        ("src and dst host 10.1", "src and dst net 10.1.0.0/16"),
+        ("src 10.1", "src net 10.1.0.0/16"),
+        ("ip host 10.1", "ip net 10.1.0.0/16"),
+        // Four octets stay an exact host.
+        ("host 10.1.2.3", "net 10.1.2.3/32"),
+    ] {
+        // `host x.y.z.w` is a `Host`, not a /32 `Net`; compare the others only.
+        if host == "host 10.1.2.3" {
+            assert!(matches!(
+                ast(host),
+                pktbaffle::ast::Expr::Primitive(pktbaffle::ast::Primitive::Host { .. })
+            ));
+            continue;
+        }
+        assert_eq!(ast(host), ast(net), "{host:?} vs {net:?}");
+    }
+}
+
+#[test]
+fn short_dotted_address_without_a_qualifier_is_an_error() {
+    // libpcap: a bare id is a syntax error. Reading `10.1` as the host
+    // 10.1.0.0 (the old behaviour) was a silent wrong match.
+    for f in ["10.1", "10.1.2", "tcp and 10.1", "10.1 and tcp"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}

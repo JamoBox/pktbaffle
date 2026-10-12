@@ -105,7 +105,10 @@ pub enum Token {
 
     // ── literals ─────────────────────────────────────────────────────────────
     Num(u64),
-    Ipv4([u8; 4]),
+    /// A dotted address zero-padded to four octets, and how many octets were
+    /// written (2-4): libpcap's mask for an un-prefixed `host`/`net` is 8 bits
+    /// per octet written.
+    Ipv4([u8; 4], u8),
     Ipv6(std::net::Ipv6Addr),
     Mac([u8; 6]),
     Ident(String),
@@ -472,13 +475,17 @@ fn looks_like_mac(s: &str) -> bool {
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
     // IPv4 (contains a dot): up to four decimal octets, leading zeros allowed
-    // (`010` is 10, as in libpcap). Fewer than four are zero-padded for the
-    // classful `net` shorthand.
+    // (`010` is 10, as in libpcap). Fewer than four are zero-padded; the token
+    // keeps how many were written, which sets the mask of a bare `host`/`net`.
     if raw.contains('.') {
         let mut octets = [0u8; 4];
+        let mut parts = 0;
         for (i, p) in raw.split('.').enumerate() {
             match (octets.get_mut(i), p.parse::<u8>()) {
-                (Some(o), Ok(n)) => *o = n,
+                (Some(o), Ok(n)) => {
+                    *o = n;
+                    parts = i as u8 + 1;
+                }
                 _ => {
                     return Err(Error::ParseError {
                         message: format!("invalid IPv4 address '{raw}' at offset {offset}"),
@@ -486,7 +493,7 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
                 }
             }
         }
-        return Ok(Token::Ipv4(octets));
+        return Ok(Token::Ipv4(octets, parts));
     }
     // IPv6 (contains "::" or two or more colons)
     if looks_like_ipv6(raw) {
@@ -930,7 +937,7 @@ mod tests {
     fn dotted_octets_stay_decimal() {
         // Only a lone integer is octal; `010` in a dotted quad is 10.
         let tokens = lex("10.010.0").unwrap();
-        assert_eq!(tokens[0].token, Token::Ipv4([10, 10, 0, 0]));
+        assert_eq!(tokens[0].token, Token::Ipv4([10, 10, 0, 0], 3));
     }
 
     #[test]
@@ -963,7 +970,7 @@ mod tests {
         ] {
             let tokens = lex(src).unwrap();
             assert_eq!(tokens.len(), 1, "{src}");
-            assert_eq!(tokens[0].token, Token::Ipv4(want), "{src}");
+            assert_eq!(tokens[0].token, Token::Ipv4(want, 4), "{src}");
         }
     }
 
@@ -1000,10 +1007,10 @@ mod tests {
     #[test]
     fn slash_after_an_address_is_a_separate_token() {
         for (src, addr) in [
-            ("10.0.0.0/8", Token::Ipv4([10, 0, 0, 0])),
-            ("10.0.0.0 / 8", Token::Ipv4([10, 0, 0, 0])),
-            ("10.0.0.0 /8", Token::Ipv4([10, 0, 0, 0])),
-            ("10.0.0.0/ 8", Token::Ipv4([10, 0, 0, 0])),
+            ("10.0.0.0/8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0 / 8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0 /8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0/ 8", Token::Ipv4([10, 0, 0, 0], 4)),
             ("2001:db8::/32", Token::Ipv6("2001:db8::".parse().unwrap())),
             (
                 "2001:db8:: / 32",
@@ -1032,6 +1039,26 @@ mod tests {
             .into_iter()
             .map(|s| s.token)
             .collect();
-        assert_eq!(toks, [Token::Ipv4([10, 0, 0, 0]), Token::Slash]);
+        assert_eq!(toks, [Token::Ipv4([10, 0, 0, 0], 4), Token::Slash]);
+    }
+
+    // ── Dotted IPv4 tokens remember how many octets were written (#158) ──────
+    // libpcap derives the mask of an un-prefixed `host`/`net` from that count
+    // (8 bits per octet), so `10.0` and `10.0.0.0` differ even though both
+    // zero-pad to a leading `10`.
+
+    #[test]
+    fn dotted_ipv4_keeps_the_octet_count() {
+        for (src, octs, parts) in [
+            ("10.1", [10, 1, 0, 0], 2),
+            ("10.0", [10, 0, 0, 0], 2),
+            ("10.1.2", [10, 1, 2, 0], 3),
+            ("10.0.0", [10, 0, 0, 0], 3),
+            ("10.0.0.0", [10, 0, 0, 0], 4),
+            ("192.168.1.77", [192, 168, 1, 77], 4),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens[0].token, Token::Ipv4(octs, parts), "{src}");
+        }
     }
 }

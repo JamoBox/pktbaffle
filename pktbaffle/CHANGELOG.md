@@ -137,6 +137,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Behaviour change:** `net 0` is now 0.0.0.0/32 (an exact address, as in
   libpcap) instead of 0.0.0.0/8. Values above 32 bits are still rejected.
   (`host`/`net` programs still omit libpcap's ARP/RARP legs, see #140.)
+- **Dotted IPv4 `host` / `net` take their mask from the octets written, as
+  libpcap** (#158). The lexer zero-padded `10.0` and `10.0.0` and forgot how
+  many octets there were, so `net` guessed the prefix from trailing zero
+  octets (`net 10.0.0.0` was /8, `net 192.168.1.0` /24, `net 10.0` /8) and
+  `host 10.1` was the exact host 10.1.0.0. Now the mask is 8 bits per octet
+  written: `net 10.0.0.0` and `net 192.168.1.0` match only that address,
+  `net 10.0` is /16, `net 10.0.0` and `net 10.1.0` are /24, and `host 10.1` /
+  `host 10.1.2` match the /16 / /24 they start. `net 10`, `net 192.168`,
+  `net 10.0.1` and explicit `/len` or `mask` are unchanged. **Behaviour
+  change:** filters that relied on `net a.b.c.0` meaning the whole /24 (or
+  `a.0.0.0` the /8) now match one address; write the prefix. A bare short
+  address with no `host` or `net` (`10.1`) is now an error instead of the
+  host 10.1.0.0. (An unqualified full address such as `10.0.0.1` is still
+  taken as `host`.)
 
 ### Added
 
