@@ -30,6 +30,8 @@
 //! juxtaposition is treated as AND. As in libpcap, `and`, `or` and
 //! juxtaposition have equal precedence and associate left to right (so
 //! `a or b and c` is `(a or b) and c`); only `not` binds tighter.
+//! Parentheses may nest up to 9995 deep, as in libpcap 1.10.3; deeper nesting
+//! is an [`Error::ParseError`].
 //!
 //! | Expression | Matches |
 //! |---|---|

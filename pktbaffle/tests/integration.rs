@@ -1056,9 +1056,10 @@ fn very_complex_filter_does_not_panic() {
 fn deeply_nested_parens_returns_error_not_stack_overflow() {
     use pktbaffle::{compile, Error, LinkType, Target};
 
-    // 200 open parens — well past the parser's depth limit — must return
-    // ParseError, not panic / SIGSEGV.
-    let deeply_nested = format!("{}tcp{}", "(".repeat(200), ")".repeat(200));
+    // 10_000 open parens — past the parser's limit — must return ParseError,
+    // not panic / SIGSEGV. (This used 200 while the limit was 127; libpcap
+    // 1.10.3 accepts 9995 and rejects 9996, per #199, and so does pktbaffle.)
+    let deeply_nested = format!("{}tcp{}", "(".repeat(10_000), ")".repeat(10_000));
     for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
         let r = compile(&deeply_nested, link, Target::Classic);
         assert!(
@@ -1235,14 +1236,14 @@ fn moderately_nested_offset_expr_still_compiles() {
 }
 
 #[test]
-fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
+fn nested_parens_around_nested_offset_expr_return_error() {
     use pktbaffle::Error;
 
-    // Parenthesised expressions and offset expressions draw on one depth budget,
-    // so deep nesting of both cannot add up to a stack overflow.  1 MiB is the
-    // Windows main-thread stack.
-    on_small_stack(1024, || {
-        for outer in [0, 50, 100, 126] {
+    // Deep nesting of both parenthesised expressions and offset expressions
+    // cannot add up to a stack overflow. (Until #199 the two shared one depth
+    // budget; outer parens now cost no stack, so the offset keeps its own.)
+    on_small_stack(256, || {
+        for outer in [0, 50, 100, 126, 9995] {
             let filter = format!(
                 "{}ip[{}1{}] = 0{}",
                 "(".repeat(outer),
@@ -1385,5 +1386,96 @@ fn thousand_host_list_compiles_for_extended_on_1mib_stack() {
             "1000-host list must compile for eBPF: {:?}",
             r.err()
         );
+    });
+}
+
+// ── Nested parentheses up to libpcap's limit (#199) ──────────────────────────
+// The parser rejected 128 or more nested parentheses. libpcap 1.10.3 accepts
+// 9995 around a primitive and fails with "memory exhausted" at 9996 (verified
+// in the issue; not re-run here). pktbaffle now accepts the same 9995.
+
+/// `n` nested parentheses around `body`.
+fn parens(n: usize, body: &str) -> String {
+    format!("{}{body}{}", "(".repeat(n), ")".repeat(n))
+}
+
+#[test]
+fn nested_parens_up_to_9995_compile_on_small_stack() {
+    on_small_stack(256, || {
+        let tcp = pktbaffle::parse("tcp").unwrap();
+        let tcp_classic = compile("tcp", LinkType::Ethernet, Target::Classic).unwrap();
+        let tcp_ebpf = compile("tcp", LinkType::Ethernet, Target::Extended).unwrap();
+        for n in [127, 128, 1000, 9995] {
+            let f = parens(n, "tcp");
+            // Parentheses add no AST nodes.
+            assert_eq!(pktbaffle::parse(&f).unwrap(), tcp, "{n} parens");
+            let c = compile(&f, LinkType::Ethernet, Target::Classic).unwrap();
+            assert_eq!(c.instructions(), tcp_classic.instructions(), "{n} parens");
+            let e = compile(&f, LinkType::Ethernet, Target::Extended).unwrap();
+            assert_eq!(
+                e.as_extended().unwrap().instructions(),
+                tcp_ebpf.as_extended().unwrap().instructions(),
+                "{n} parens"
+            );
+        }
+    });
+}
+
+#[test]
+fn nested_parens_past_9995_return_parse_error() {
+    use pktbaffle::Error;
+
+    on_small_stack(256, || {
+        for n in [9996, 100_000] {
+            let f = parens(n, "tcp");
+            let r = pktbaffle::parse(&f);
+            match &r {
+                Err(Error::ParseError { message }) => {
+                    assert!(message.contains("9995"), "{n} parens: {message}")
+                }
+                _ => panic!("{n} parens: expected ParseError, got {r:?}"),
+            }
+            for &target in &[Target::Classic, Target::Extended] {
+                let r = compile(&f, LinkType::Ethernet, target);
+                assert!(
+                    matches!(r, Err(Error::ParseError { .. })),
+                    "{n} parens, {target:?}: got {r:?}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn deep_parens_mixed_with_operators_compile_on_small_stack() {
+    use pktbaffle::ast::Expr;
+
+    on_small_stack(256, || {
+        // `!(!(...tcp...))`, `tcp and (tcp and (...))`, and the worst case for
+        // the remaining recursion: 9995 parens around the deepest offset
+        // expression accepted (31 nested `(` inside `[...]`).
+        let not_nest = format!("{}tcp{}", "!(".repeat(9995), ")".repeat(9995));
+        let and_nest = format!("{}tcp{}", "tcp and (".repeat(9995), ")".repeat(9995));
+        let offset = parens(9995, &format!("ip[{}] = 0", parens(31, "1")));
+        let expr = pktbaffle::parse(&and_nest).unwrap();
+        // Right-deep: each level is `tcp and (...)`.
+        let (mut depth, mut e) = (0, &expr);
+        while let Expr::And(_, r) = e {
+            depth += 1;
+            e = r;
+        }
+        assert_eq!(depth, 9995);
+        for f in [&not_nest, &and_nest, &offset] {
+            for &target in &[Target::Classic, Target::Extended] {
+                // eBPF runs out of jump range on the 9995-term `and` chain,
+                // exactly as on the flat chain; parsing always succeeds.
+                let r = compile(f, LinkType::Ethernet, target);
+                assert!(
+                    !matches!(r, Err(pktbaffle::Error::ParseError { .. })),
+                    "{target:?}: {}...: {r:?}",
+                    &f[..20]
+                );
+            }
+        }
     });
 }

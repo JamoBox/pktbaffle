@@ -49,6 +49,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Generated code is unchanged. `ast::Expr` now implements `Drop`, so its
   fields can no longer be moved out by destructuring a value (match on a
   reference instead).
+- **Up to 9995 nested parentheses are accepted, as in libpcap** (#199). The
+  parser rejected 128 or more nested parentheses (with a message that said
+  "max 128 levels"), and the old limit itself could overflow a 256 KiB stack
+  in a debug build. Parentheses are now parsed with an explicit stack instead
+  of recursion, and the limit matches libpcap 1.10.3, which accepts 9995
+  around a primitive and rejects 9996; past it, `Err(ParseError)` names the
+  limit. Offset expressions inside `[...]` keep their own unchanged limits
+  (31 nested `(`, 127 unary `-`), now independent of the surrounding
+  parentheses.
 
 ### Added
 
