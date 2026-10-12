@@ -112,6 +112,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Target::Extended` is unaffected. The limit is exported as the new
   `pktbaffle::bpf::BPF_MAXINSNS` constant and documented in the README and the
   `compile` / `Target::Classic` rustdoc.
+- **eBPF programs longer than 32K instructions now compile** (#200). Every
+  success/failure edge jumped straight to an epilogue at the end of the
+  program, and a jump offset is an `i16`, so a `host ... or host ...` list of
+  about 2000 terms failed with "filter expression is too complex: eBPF jump
+  offset overflow" (as did 2000 `tcp port N` or 1000 IPv6 `host` terms, and
+  the same lists inside `and` / `not`). Roughly every 16K instructions the
+  generator now emits a short island of `ja` relays and re-points all pending
+  edges at it, so 3000 `host` terms (57K instructions) or more compile and
+  match like a 50-term list. Programs under 16K instructions are unchanged
+  instruction for instruction; past that, the fall-through path executes one
+  extra `ja` per island. Only a single primitive that is itself over 32767
+  instructions can still return `CodegenError`. (The classic-BPF 255-offset
+  limit is separate, #151.)
 
 ### Added
 
