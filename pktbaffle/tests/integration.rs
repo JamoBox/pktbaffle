@@ -1734,3 +1734,68 @@ fn hundred_thousand_term_chains_compile_on_small_stack() {
         );
     });
 }
+
+// ── Integer literals follow C syntax, as libpcap's scanner (#157) ─────────────
+// libpcap 1.10.3 (scanner.l `stou`): `0x` hex, a leading `0` octal, otherwise
+// decimal; `08` is an error. Expected trees hand-derived from that and issue #157.
+
+#[test]
+fn leading_zero_integers_are_octal_in_every_position() {
+    for (octal, decimal) in [
+        ("tcp port 010", "tcp port 8"),
+        ("portrange 010-020", "portrange 8-16"),
+        ("ip proto 017", "ip proto 15"),
+        ("ether proto 0100", "ether proto 64"),
+        ("vlan 010", "vlan 8"),
+        ("mpls 010", "mpls 8"),
+        ("less 010", "less 8"),
+        ("len = 0100", "len = 64"),
+        ("ip[010] = 1", "ip[8] = 1"),
+        ("ip[8] = 010", "ip[8] = 8"),
+        ("net 10.0.0.0/010", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/0x8", "net 10.0.0.0/8"),
+        ("net 2001:db8::/040", "net 2001:db8::/32"),
+        // Unchanged: 0 and 00 are 0, and decimal literals stay decimal.
+        ("port 00", "port 0"),
+        ("port 0", "port 0"),
+        ("tcp port 80", "tcp port 0x50"),
+    ] {
+        assert_eq!(ast(octal), ast(decimal), "{octal:?} vs {decimal:?}");
+    }
+}
+
+#[test]
+fn octal_literals_differ_from_the_decimal_reading() {
+    assert_ne!(ast("tcp port 010"), ast("tcp port 10"));
+    assert_ne!(ast("net 10.0.0.0/010"), ast("net 10.0.0.0/10"));
+}
+
+#[test]
+fn non_octal_digit_after_a_leading_zero_is_an_error() {
+    for f in [
+        "tcp port 08",
+        "tcp port 09",
+        "port 0800",
+        "vlan 08",
+        "less 08",
+        "ip[08] = 1",
+        "ether proto 0800",
+        "net 10.0.0.0/08",
+        "net 2001:db8::/09",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+#[test]
+fn integer_over_32_bits_is_an_error_in_every_position() {
+    // libpcap: "number ... overflows 32 bits".
+    for f in [
+        "greater 4294967296",
+        "port 0x100000000",
+        "ip[0] = 4294967296",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+    assert!(pktbaffle::parse("greater 4294967295").is_ok());
+}

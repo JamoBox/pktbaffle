@@ -131,7 +131,8 @@ pub struct Spanned {
 /// # Errors
 ///
 /// Returns [`crate::Error::LexError`] if the input contains a character that
-/// is not part of the filter grammar.
+/// is not part of the filter grammar, and [`crate::Error::ParseError`] naming
+/// the literal if a number is malformed (`08`, `0x`, or over 32 bits).
 ///
 /// # Example
 ///
@@ -324,10 +325,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             while pos < len && bytes[pos].is_ascii_hexdigit() {
                 pos += 1;
             }
-            let n = u64::from_str_radix(&src[start + 2..pos], 16).map_err(|_| Error::LexError {
-                offset: start,
-                ch: '0',
-            })?;
+            let n = parse_int(&src[start..pos], start)?;
             tokens.push(Spanned {
                 token: Token::Num(n),
                 offset: start,
@@ -401,14 +399,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                         if pos < len && bytes[pos] == b'/' {
                             pos += 1;
                             let pl_start = pos;
-                            while pos < len && bytes[pos].is_ascii_digit() {
+                            while pos < len && bytes[pos].is_ascii_alphanumeric() {
                                 pos += 1;
                             }
-                            let n: u64 =
-                                src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                                    offset: pl_start,
-                                    ch: '/',
-                                })?;
+                            let n = parse_int(&src[pl_start..pos], pl_start)?;
                             tokens.push(Spanned {
                                 token: Token::Num(n),
                                 offset: pl_start,
@@ -432,13 +426,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             {
                 pos += 1; // consume '/'
                 let pl_start = pos;
-                while pos < len && bytes[pos].is_ascii_digit() {
+                while pos < len && bytes[pos].is_ascii_alphanumeric() {
                     pos += 1;
                 }
-                let n: u64 = src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                    offset: pl_start,
-                    ch: '/',
-                })?;
+                let n = parse_int(&src[pl_start..pos], pl_start)?;
                 tokens.push(Spanned {
                     token: Token::Num(n),
                     offset: pl_start,
@@ -474,13 +465,10 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                     if pos < len && bytes[pos] == b'/' {
                         pos += 1;
                         let pl_start = pos;
-                        while pos < len && bytes[pos].is_ascii_digit() {
+                        while pos < len && bytes[pos].is_ascii_alphanumeric() {
                             pos += 1;
                         }
-                        let n: u64 = src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                            offset: pl_start,
-                            ch: '/',
-                        })?;
+                        let n = parse_int(&src[pl_start..pos], pl_start)?;
                         tokens.push(Spanned {
                             token: Token::Num(n),
                             offset: pl_start,
@@ -561,14 +549,40 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
             return Ok(Token::Mac(mac));
         }
     }
-    // Plain decimal integer
-    if let Ok(n) = raw.parse::<u64>() {
-        return Ok(Token::Num(n));
+    parse_int(raw, offset).map(Token::Num)
+}
+
+/// Parse an integer literal the way libpcap's scanner does: `0x`/`0X` hex, a
+/// leading `0` octal (so `08` is an error), otherwise decimal, at most 32 bits.
+fn parse_int(raw: &str, offset: usize) -> Result<u64> {
+    let (digits, radix) = if let Some(hex) = raw.strip_prefix("0x").or(raw.strip_prefix("0X")) {
+        (hex, 16)
+    } else if let Some(oct) = raw.strip_prefix('0').filter(|o| !o.is_empty()) {
+        (oct, 8)
+    } else {
+        (raw, 10)
+    };
+    let invalid = |why: &str| Error::ParseError {
+        message: format!("invalid number '{raw}' at offset {offset}: {why}"),
+    };
+    if digits.is_empty() {
+        return Err(invalid("expected digits"));
     }
-    Err(Error::LexError {
-        offset,
-        ch: raw.chars().next().unwrap_or('?'),
-    })
+    let mut n = 0u64;
+    for c in digits.chars() {
+        let d = c.to_digit(radix).ok_or_else(|| {
+            invalid(if radix == 8 && c.is_ascii_digit() {
+                "contains non-octal digit"
+            } else {
+                "contains invalid digit"
+            })
+        })?;
+        n = n * u64::from(radix) + u64::from(d);
+        if n > u64::from(u32::MAX) {
+            return Err(invalid("overflows 32 bits"));
+        }
+    }
+    Ok(n)
 }
 
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -896,5 +910,90 @@ mod tests {
         assert!(!looks_like_mac("aa:bb:cc:dd:ee:ff:00")); // 6 colons
         assert!(!looks_like_mac(""));
         assert!(!looks_like_mac("no colons here"));
+    }
+
+    // ── Integer literals follow C syntax, like libpcap's scanner (#157) ──────
+    // libpcap 1.10.3 (scanner.l `stou`): `0x` hex, a leading `0` octal, else
+    // decimal; `08` is "number 08 contains non-octal digit"; over 32 bits is an
+    // error. Expected values hand-derived from that source and issue #157.
+
+    fn lex_num(src: &str) -> Result<u64> {
+        match lex(src)?.as_slice() {
+            [Spanned {
+                token: Token::Num(n),
+                ..
+            }] => Ok(*n),
+            t => panic!("{src:?} lexed to {t:?}, not a single number"),
+        }
+    }
+
+    #[test]
+    fn leading_zero_is_octal() {
+        for (src, want) in [
+            ("010", 8),
+            ("0100", 64),
+            ("017", 15),
+            ("0777", 511),
+            ("00", 0),
+            ("0", 0),
+        ] {
+            assert_eq!(lex_num(src).unwrap(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn decimal_and_hex_unchanged() {
+        for (src, want) in [
+            ("10", 10),
+            ("100", 100),
+            ("4294967295", 0xffff_ffff),
+            ("0x10", 16),
+            ("0X1f", 31),
+            ("0xffffffff", 0xffff_ffff),
+        ] {
+            assert_eq!(lex_num(src).unwrap(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn non_octal_digit_or_overflow_is_rejected_naming_the_literal() {
+        for src in [
+            "08",
+            "09",
+            "0800",
+            "019",
+            "4294967296",
+            "99999999999999999999",
+            "0x100000000",
+            "0x",
+            "12abc",
+        ] {
+            let Err(Error::ParseError { message }) = lex(src) else {
+                panic!("{src:?} must be rejected with a ParseError naming it");
+            };
+            assert!(message.contains(&format!("'{src}'")), "{src}: {message}");
+        }
+    }
+
+    #[test]
+    fn dotted_octets_stay_decimal() {
+        // Only a lone integer is octal; `010` in a dotted quad is 10.
+        let tokens = lex("10.010.0").unwrap();
+        assert_eq!(tokens[0].token, Token::Ipv4([10, 10, 0, 0]));
+    }
+
+    #[test]
+    fn cidr_prefix_length_is_a_c_integer() {
+        for (src, want) in [
+            ("10.0.0.0/010", 8),
+            ("10.0.0.0/0x8", 8),
+            ("2001:db8::/0x20", 32),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens[1].token, Token::Num(want), "{src}");
+        }
+        for src in ["10.0.0.0/08", "2001:db8::/09", "fe80::/08"] {
+            assert!(lex(src).is_err(), "{src} must be rejected");
+        }
     }
 }

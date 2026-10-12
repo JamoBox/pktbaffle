@@ -90,6 +90,8 @@ $ cargo run --example dump_filter -- --ebpf "tcp port 80"
 
 The filter language is identical to the one accepted by `tcpdump` and `pcap_compile(3)`. A filter is a boolean expression over packet fields; packets that evaluate to `true` are accepted, all others are dropped.
 
+Integer literals use C syntax, as in libpcap: decimal (`80`), hexadecimal (`0x50`), or octal with a leading `0` (`010` is 8, so `tcp port 010` matches port 8). `08`, `09` and `0800` are errors, as in libpcap, so write EtherTypes as `0x0800`; so is a literal over 32 bits.
+
 ### IP hosts and networks
 
 Match packets by source or destination IP address:

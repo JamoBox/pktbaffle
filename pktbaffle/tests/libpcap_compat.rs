@@ -813,3 +813,39 @@ mod optimization_budgets {
         assert!(insn_count("tcp or udp") <= 14);
     }
 }
+
+// ── Integer literals: C syntax (#157) ────────────────────────────────────────
+// libpcap 1.10.3's scanner: `0x` hex, leading `0` octal, `08` rejected.
+// Hand-derived from scanner.l and issue #157 (no live libpcap was available).
+
+#[test]
+fn leading_zero_integer_literals_accepted() {
+    for f in [
+        "tcp port 010",
+        "port 00",
+        "ip proto 017",
+        "ether proto 0100",
+        "vlan 010",
+        "len = 0100",
+        "ip[010] = 1",
+        "net 10.0.0.0/010",
+        "net 10.0.0.0/0x8",
+    ] {
+        eth(f);
+    }
+}
+
+#[test]
+fn non_octal_integer_literals_rejected() {
+    for f in [
+        "tcp port 08",
+        "tcp port 09",
+        "ether proto 0800",
+        "vlan 08",
+        "less 08",
+        "ip[08] = 1",
+        "net 10.0.0.0/08",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}

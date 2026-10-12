@@ -483,6 +483,7 @@ mod parity {
         "ip6",
         "icmp6",
         "ip proto 6",
+        "ip proto 021", // octal 17 (#157)
         "ip proto 17",
         "ip6 proto 17",
         "ether proto 0x0800",
@@ -525,6 +526,7 @@ mod parity {
         "vlan",
         "vlan 100",
         "vlan 200",
+        "vlan 0144", // octal 100 (#157)
         "vlan 100 and ip",
         "vlan and tcp port 80",
         "mpls",
