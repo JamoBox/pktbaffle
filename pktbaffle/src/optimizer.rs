@@ -57,37 +57,36 @@ fn writes_a(insn: Insn) -> bool {
         || (class == BPF_MISC && (insn.code & 0xf8) == BPF_TXA)
 }
 
-/// Follow a chain of unconditional jumps starting at `target`, returning the
-/// first non-`ja` instruction index. cBPF jumps are strictly forward, so the
-/// chain cannot loop.
-fn final_target(insns: &[Insn], mut target: usize) -> usize {
-    while let Some(&insn) = insns.get(target) {
-        if !is_ja(insn) {
-            break;
-        }
-        target = target + 1 + insn.k as usize;
-    }
-    target
-}
-
-/// Retarget every jump that lands on a `ja` to the `ja`'s final destination.
+/// Retarget every jump that lands on a `ja` to the `ja`'s final destination:
+/// the first non-`ja` instruction (or out-of-range index) its chain reaches.
 ///
 /// Conditional offsets are 8-bit; a retarget that would overflow 255 is left
 /// alone (the trampoline stays, which is correct, just slower).
 fn thread_jumps(insns: &mut [Insn]) {
-    for i in 0..insns.len() {
-        let insn = insns[i];
-        if is_ja(insn) {
-            let t = final_target(insns, i + 1 + insn.k as usize);
-            insns[i].k = (t - i - 1) as u32;
-        } else if is_cond_jump(insn) {
-            let jt_target = final_target(insns, i + 1 + insn.jt as usize);
+    let n = insns.len();
+    // fin[i]: the final target of index i, computed back to front: cBPF jumps
+    // are strictly forward, so a `ja`'s target is already resolved. Chasing
+    // each chain separately was quadratic on long `ja` chains (#202).
+    let mut fin: Vec<usize> = (0..n).collect();
+    for i in (0..n).rev() {
+        if is_ja(insns[i]) {
+            let t = i + 1 + insns[i].k as usize;
+            fin[i] = if t < n { fin[t] } else { t };
+        }
+    }
+    let final_target = |t: usize| if t < n { fin[t] } else { t };
+    for (i, insn) in insns.iter_mut().enumerate() {
+        if is_ja(*insn) {
+            let t = final_target(i + 1 + insn.k as usize);
+            insn.k = (t - i - 1) as u32;
+        } else if is_cond_jump(*insn) {
+            let jt_target = final_target(i + 1 + insn.jt as usize);
             if let Ok(off) = u8::try_from(jt_target - i - 1) {
-                insns[i].jt = off;
+                insn.jt = off;
             }
-            let jf_target = final_target(insns, i + 1 + insn.jf as usize);
+            let jf_target = final_target(i + 1 + insn.jf as usize);
             if let Ok(off) = u8::try_from(jf_target - i - 1) {
-                insns[i].jf = off;
+                insn.jf = off;
             }
         }
     }

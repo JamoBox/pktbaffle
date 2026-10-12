@@ -34,6 +34,7 @@
 //! - Any instruction that writes the X register invalidates the
 //!   "X holds the transport-header offset" fact.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ast::*;
@@ -98,13 +99,23 @@ struct Patches {
     failure: Vec<Patch>,
 }
 
+/// `a` and `b` in one list, appending the shorter to the longer: a chain
+/// accumulates one long list, and copying it at every level was quadratic
+/// (#202). Order is irrelevant: every patch in a list resolves to one target.
+pub(crate) fn concat<T>(mut a: Vec<T>, mut b: Vec<T>) -> Vec<T> {
+    if a.len() < b.len() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    a.extend(b);
+    a
+}
+
 /// One step of the iterative `Codegen::emit_expr`: either an expression to
 /// emit, or the rest of an operator, run once the operand(s) before it are
 /// done, carrying the state the recursive form kept in locals.
 enum Work<'e> {
     Emit(&'e Expr),
     AndRight {
-        left: &'e Expr,
         right: &'e Expr,
     },
     AndDone {
@@ -271,34 +282,44 @@ impl GuardSet {
     }
 }
 
+/// Guard sets of `And` / `Or` nodes already computed, keyed by node address
+/// (stable: the AST is borrowed for the whole compile).
+type GuardMemo = HashMap<*const Expr, GuardSet>;
+
 /// Evaluated post-order with an explicit stack: and/or chains nest one level
-/// per term, so recursion would overflow on long chains (#149).
-fn required_guards(expr: &Expr) -> GuardSet {
+/// per term, so recursion would overflow on long chains (#149). Each OR asks
+/// for its arms' guards, and an OR chain contains every shorter chain, so
+/// results are memoised per node; recomputing them was quadratic (#202).
+fn required_guards(expr: &Expr, memo: &mut GuardMemo) -> GuardSet {
     enum Step<'e> {
         Visit(&'e Expr),
-        Union,
-        Intersect,
+        /// Both operands of this `And` / `Or` are on `done`.
+        Combine(&'e Expr),
     }
     let mut todo = vec![Step::Visit(expr)];
     let mut done: Vec<GuardSet> = Vec::new();
     while let Some(step) = todo.pop() {
         match step {
-            Step::Visit(Expr::And(l, r)) => {
-                todo.extend([Step::Union, Step::Visit(r), Step::Visit(l)])
-            }
-            Step::Visit(Expr::Or(l, r)) => {
-                todo.extend([Step::Intersect, Step::Visit(r), Step::Visit(l)])
-            }
-            // A negated check proves nothing about what its parent requires.
-            Step::Visit(Expr::Not(_)) => done.push(GuardSet::default()),
-            Step::Visit(Expr::Primitive(p)) => done.push(primitive_guards(p)),
-            Step::Union | Step::Intersect => {
+            Step::Visit(e) => match e {
+                _ if memo.contains_key(&(e as *const Expr)) => {
+                    done.push(memo[&(e as *const Expr)].clone())
+                }
+                Expr::And(l, r) | Expr::Or(l, r) => {
+                    todo.extend([Step::Combine(e), Step::Visit(r), Step::Visit(l)])
+                }
+                // A negated check proves nothing about what its parent requires.
+                Expr::Not(_) => done.push(GuardSet::default()),
+                Expr::Primitive(p) => done.push(primitive_guards(p)),
+            },
+            Step::Combine(e) => {
                 let r = done.pop().expect("right operand");
                 let l = done.pop().expect("left operand");
-                done.push(match step {
-                    Step::Union => l.union(r),
+                let g = match e {
+                    Expr::And(..) => l.union(r),
                     _ => l.intersect(r),
-                });
+                };
+                memo.insert(e, g.clone());
+                done.push(g);
             }
         }
     }
@@ -431,15 +452,6 @@ impl Codegen {
             .map(|o| o + self.vlan_depth * 4)
     }
 
-    /// Returns `true` if `expr` is, or begins with, a `vlan` primitive in an
-    /// AND-chain — i.e. the left-most leaf of any nested AND is a VLAN check.
-    fn has_leading_vlan(mut expr: &Expr) -> bool {
-        while let Expr::And(l, _) = expr {
-            expr = l;
-        }
-        matches!(expr, Expr::Primitive(Primitive::Vlan { .. }))
-    }
-
     fn push(&mut self, insn: Insn) -> usize {
         // Writing X invalidates the "X holds the transport offset" fact.
         let class = insn.code & 0x07;
@@ -496,19 +508,26 @@ impl Codegen {
     /// The walk uses an explicit work stack instead of recursion: and/or/not
     /// chains nest one AST level per term, and recursing overflowed the stack
     /// on long ones (#149). Each operator runs as steps between its operands;
-    /// finished operands' patches wait on `done`.
+    /// finished operands wait on `done` as their patches plus whether they
+    /// are, or begin with (as the leftmost leaf of an AND chain), a `vlan`
+    /// check. Carrying that bit up, like memoising guard sets, keeps the walk
+    /// linear in chain length (#202).
     fn emit_expr(&mut self, expr: &Expr) -> Result<Patches> {
         let mut work = vec![Work::Emit(expr)];
-        let mut done: Vec<Patches> = Vec::new();
+        let mut done: Vec<(Patches, bool)> = Vec::new();
+        let mut guards = GuardMemo::new();
         while let Some(step) = work.pop() {
             match step {
-                Work::Emit(Expr::Primitive(p)) => done.push(self.emit_primitive(p)?),
+                Work::Emit(Expr::Primitive(p)) => {
+                    let leading_vlan = matches!(p, Primitive::Vlan { .. });
+                    done.push((self.emit_primitive(p)?, leading_vlan));
+                }
                 Work::Emit(Expr::And(left, right)) => {
-                    work.push(Work::AndRight { left, right });
+                    work.push(Work::AndRight { right });
                     work.push(Work::Emit(left));
                 }
                 Work::Emit(Expr::Or(left, right)) => {
-                    let hoist_failure = self.emit_or_hoist(left, right)?;
+                    let hoist_failure = self.emit_or_hoist(left, right, &mut guards)?;
                     // Each arm starts from the post-hoist facts: the right arm
                     // is reached from failure points inside the left arm,
                     // where only those hold.
@@ -529,16 +548,15 @@ impl Codegen {
                 }
 
                 // AND: left falls through to right on success.
-                Work::AndRight { left, right } => {
-                    let left_p = done.pop().expect("AND left operand");
-                    // Resolve left's explicit success jumps to the start of right.
-                    let right_start = self.insns.len();
-                    self.resolve_all(left_p.success, right_start)?;
+                Work::AndRight { right } => {
                     // When the left side matches a VLAN tag (or an AND-chain
                     // that begins with one), shift all layer-3+ offsets in the
                     // right side by 4 bytes to account for the 802.1Q header
                     // inserted before the inner payload.
-                    let vlan_bump = Self::has_leading_vlan(left);
+                    let (left_p, vlan_bump) = done.pop().expect("AND left operand");
+                    // Resolve left's explicit success jumps to the start of right.
+                    let right_start = self.insns.len();
+                    self.resolve_all(left_p.success, right_start)?;
                     if vlan_bump {
                         self.vlan_depth += 1;
                     }
@@ -552,14 +570,16 @@ impl Codegen {
                     left_failure,
                     vlan_bump,
                 } => {
-                    let right_p = done.pop().expect("AND right operand");
+                    let (right_p, _) = done.pop().expect("AND right operand");
                     if vlan_bump {
                         self.vlan_depth -= 1;
                     }
-                    done.push(Patches {
+                    let patches = Patches {
                         success: right_p.success,
-                        failure: left_failure.into_iter().chain(right_p.failure).collect(),
-                    });
+                        failure: concat(left_failure, right_p.failure),
+                    };
+                    // An AND chain begins with whatever its left side does.
+                    done.push((patches, vlan_bump));
                 }
 
                 // OR: left's failures redirect to right; left's implicit
@@ -570,7 +590,7 @@ impl Codegen {
                     branch_facts,
                     x_writes_before,
                 } => {
-                    let left_p = done.pop().expect("OR left operand");
+                    let (left_p, _) = done.pop().expect("OR left operand");
                     let left_facts = std::mem::replace(&mut self.facts, branch_facts);
                     if self.x_writes != x_writes_before {
                         // The left arm may have clobbered X before any of its
@@ -598,7 +618,7 @@ impl Codegen {
                     left_facts,
                     hoist_failure,
                 } => {
-                    let right_p = done.pop().expect("OR right operand");
+                    let (right_p, _) = done.pop().expect("OR right operand");
                     // After the join, keep only facts both arms established.
                     self.facts = Facts::meet(&left_facts, &self.facts);
                     // Collect all success patches: left's explicit success
@@ -606,10 +626,9 @@ impl Codegen {
                     // success patches.
                     let mut success = left_success;
                     success.push(Patch::Ja(ja_idx));
-                    success.extend(right_p.success);
-                    let mut failure = right_p.failure;
-                    failure.extend(hoist_failure);
-                    done.push(Patches { success, failure });
+                    let success = concat(success, right_p.success);
+                    let failure = concat(right_p.failure, hoist_failure);
+                    done.push((Patches { success, failure }, false));
                 }
 
                 // NOT: swap success ↔ failure, insert a JA to handle the
@@ -619,7 +638,7 @@ impl Codegen {
                     entry_facts,
                     x_writes_before,
                 } => {
-                    let inner_p = done.pop().expect("NOT operand");
+                    let (inner_p, _) = done.pop().expect("NOT operand");
                     // NOT's success path is the inner *failure* path: only
                     // facts already proven at entry still hold there.
                     self.facts = entry_facts;
@@ -634,26 +653,33 @@ impl Codegen {
                     // new JA become NOT's failure.
                     let not_succ_start = self.insns.len();
                     self.resolve_all(inner_p.failure, not_succ_start)?;
-                    done.push(Patches {
-                        success: Vec::new(), // fall-through is the success path
-                        failure: inner_p
-                            .success
-                            .into_iter()
-                            .chain(std::iter::once(Patch::Ja(ja_idx)))
-                            .collect(),
-                    });
+                    let mut failure = inner_p.success;
+                    failure.push(Patch::Ja(ja_idx));
+                    // Fall-through is the success path.
+                    done.push((
+                        Patches {
+                            success: Vec::new(),
+                            failure,
+                        },
+                        false,
+                    ));
                 }
             }
         }
-        Ok(done.pop().expect("one result"))
+        Ok(done.pop().expect("one result").0)
     }
 
     /// Guards required by *every* arm of `left or right` are emitted once in
     /// front of the OR, so each arm can elide them; returns their failure
     /// patches, which join the OR's failure list.
-    fn emit_or_hoist(&mut self, left: &Expr, right: &Expr) -> Result<Vec<Patch>> {
+    fn emit_or_hoist(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        memo: &mut GuardMemo,
+    ) -> Result<Vec<Patch>> {
         let mut hoist_failure = Vec::new();
-        let common = required_guards(left).intersect(required_guards(right));
+        let common = required_guards(left, memo).intersect(required_guards(right, memo));
         if let Some(et) = common.ethertype {
             // RawIp rejects non-IPv4 ethertypes with an error; the arms
             // themselves would raise it, so don't pre-empt them here.

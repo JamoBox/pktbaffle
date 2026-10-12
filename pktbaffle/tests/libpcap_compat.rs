@@ -640,6 +640,16 @@ fn nested_parens_accepted_up_to_libpcap_limit() {
     assert!(try_eth(&parens(9996)).is_err());
 }
 
+/// libpcap 1.10.3 compiles long flat chains (#149, #202 report a 15000-term
+/// `tcp or ...`); that a 32000-term `tcp and ...` and a 256000-deep `!` chain
+/// are accepted is hand-derived, not re-run here. pktbaffle compiles both in
+/// linear time (#202).
+#[test]
+fn long_and_and_not_chains_accepted() {
+    eth(&vec!["tcp"; 32_000].join(" and "));
+    eth(&format!("{}tcp", "!".repeat(256_000)));
+}
+
 // ── Syntax parity: link types ─────────────────────────────────────────────────
 
 #[test]
