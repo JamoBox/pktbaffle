@@ -117,9 +117,8 @@ pub struct Spanned {
     /// The token value.
     pub token: Token,
     /// Byte offset of this token's first character in the original input.
-    /// Retained for future diagnostic spans; not read internally yet (the
-    /// lexer is a private module since 0.2.0, so the field is not public API).
-    #[allow(dead_code)]
+    /// Used by the parser to say where a prefix length is missing (the lexer
+    /// is a private module since 0.2.0, so the field is not public API).
     pub offset: usize,
 }
 

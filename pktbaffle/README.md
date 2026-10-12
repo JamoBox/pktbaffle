@@ -598,6 +598,8 @@ match pktbaffle::compile("tcp port ???", LinkType::Ethernet, Target::Classic) {
 }
 ```
 
+`LexError` means a character the tokeniser does not recognise, at its byte `offset`. A malformed number (`08`, `0x`, a literal over 32 bits, `10.0.0.256`) is a `ParseError` whose message names the literal and its offset.
+
 The `Error` type implements `std::error::Error` and `Display`, so it works with `?`, `anyhow`, `thiserror`, and any other error-handling library.
 
 ---

@@ -655,14 +655,18 @@ impl Parser<'_> {
         Ok(Primitive::Host { addr, dir })
     }
 
-    /// The length after the `/` of `addr/len`; `max` is 32 or 128.
+    /// The length after the `/` of `addr/len`, which the caller just consumed;
+    /// `max` is 32 or 128.
     fn parse_prefix_len(&mut self, family: &str, max: u64) -> Result<u8> {
+        let slash = self.tokens[self.pos - 1].offset;
         match self.advance() {
             Some(&Token::Num(n)) if n <= max => Ok(n as u8),
             Some(&Token::Num(n)) => Err(self.err(format!(
                 "{family} prefix length {n} out of range (0\u{2013}{max})"
             ))),
-            _ => Err(self.err("expected a prefix length after '/'")),
+            _ => Err(self.err(format!(
+                "expected a prefix length after '/' at offset {slash}"
+            ))),
         }
     }
 
