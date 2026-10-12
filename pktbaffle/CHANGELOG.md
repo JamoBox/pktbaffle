@@ -67,6 +67,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tcp and ...` 2.4 s; they now take about 18 ms and 9 ms, and
   `optimizer::optimize` on 64004 chained `ja`s about 1 ms instead of 1.5 s.
   Generated code is unchanged.
+- **`ast::Expr` clones, compares and debug-prints long chains without
+  overflowing the stack** (#229). The derived `Clone`, `PartialEq` and `Debug`
+  recursed once per tree level, so `expr.clone()`, `expr == other` or
+  `{:?}` on a parsed 1,000-term `or` chain aborted a 256 KiB stack and
+  100,000 terms a 2 MiB one. `Clone` and `==` now use an explicit stack and
+  behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
+  and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
+  printed as `..`, so a million-term chain formats to a short string.
 
 ### Added
 

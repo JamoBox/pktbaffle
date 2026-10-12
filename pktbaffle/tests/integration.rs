@@ -1356,6 +1356,164 @@ fn deep_hand_built_trees_compile_on_small_stack() {
     });
 }
 
+// ── Regression: Expr Clone, PartialEq and Debug must not recurse per node (#229)
+// The derived impls recursed once per tree level, so cloning, comparing or
+// `{:?}`-printing a parsed 1,000-term chain aborted a 256 KiB stack.
+
+/// Chain shapes: left-deep `or` / `and` (what the parser builds), a `!` chain
+/// and a right-deep `or`. Built by hand rather than parsed so the deepest
+/// leaf can differ without re-lexing a million terms.
+const CHAIN_SHAPES: [&str; 4] = ["or", "and", "not", "right"];
+
+/// An `n`-term chain of `shape` over `leaf`, with `tcp` as every other leaf.
+fn deep_tree(shape: &str, n: usize, leaf: pktbaffle::ast::Expr) -> pktbaffle::ast::Expr {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    let tcp = || Box::new(Expr::Primitive(Primitive::Proto(Proto::Tcp)));
+    let mut e = leaf;
+    for _ in 0..n {
+        e = match shape {
+            "or" => Expr::Or(Box::new(e), tcp()),
+            "and" => Expr::And(Box::new(e), tcp()),
+            "not" => Expr::Not(Box::new(e)),
+            _ => Expr::Or(tcp(), Box::new(e)),
+        };
+    }
+    e
+}
+
+#[test]
+fn million_term_chains_clone_and_compare_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    on_small_stack(256, || {
+        let leaf = |p| Expr::Primitive(Primitive::Proto(p));
+        for shape in CHAIN_SHAPES {
+            let a = deep_tree(shape, 1_000_000, leaf(Proto::Tcp));
+            let b = deep_tree(shape, 1_000_000, leaf(Proto::Udp));
+            let copy = a.clone();
+            assert!(copy == a, "{shape}: clone differs from original");
+            // The chains differ only at the deepest leaf: the comparison
+            // must walk all the way down to see it.
+            assert!(a != b, "{shape}: chains differing at the bottom are equal");
+            assert!(copy != b, "{shape}: clone equals a different chain");
+        }
+        // Parsed chains: the left spine holds every operator.
+        for op in ["or", "and"] {
+            let e = pktbaffle::parse(&chain("tcp", op, 1_000_000)).unwrap();
+            let other = pktbaffle::parse(&chain("tcp", op, 999_999)).unwrap();
+            let copy = e.clone();
+            assert!(copy == e, "parsed {op} chain");
+            assert!(copy != other, "parsed {op} chains of different length");
+        }
+    });
+}
+
+#[test]
+fn expr_eq_distinguishes_variants_and_payloads() {
+    use pktbaffle::parse;
+
+    let p = |s: &str| parse(s).unwrap();
+    assert!(p("tcp or udp") == p("tcp or udp"));
+    assert!(p("tcp or udp") != p("tcp and udp"));
+    assert!(p("tcp or udp") != p("udp or tcp"));
+    assert!(p("not tcp") != p("tcp"));
+    assert!(p("not tcp") == p("!tcp"));
+    assert!(p("port 80") != p("port 81"));
+    assert!(p("port 80") != p("src port 80"));
+    assert!(p("tcp[13] & 2 != 0") != p("tcp[13] & 3 != 0"));
+    assert!(p("tcp or udp or icmp") != p("tcp or (udp or icmp)"));
+}
+
+#[test]
+fn million_term_chains_debug_format_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    on_small_stack(256, || {
+        let tcp = Expr::Primitive(Primitive::Proto(Proto::Tcp));
+        for shape in CHAIN_SHAPES {
+            let e = deep_tree(shape, 1_000_000, tcp.clone());
+            for s in [format!("{e:?}"), format!("{e:#?}")] {
+                // Elided: bounded output, not one entry per node.
+                assert!(s.len() < 1 << 20, "{shape}: {} bytes of output", s.len());
+                assert!(s.contains(".."), "{shape}: printed without elision");
+            }
+        }
+        let parsed = pktbaffle::parse(&chain("tcp", "or", 1_000_000)).unwrap();
+        assert!(format!("{parsed:?}").starts_with("Or(Or(Or("));
+        // A `!` chain shows exactly the documented 128 levels, then `..`.
+        let nots = deep_tree("not", 1_000_000, tcp);
+        assert_eq!(
+            format!("{nots:?}"),
+            format!("{}..{}", "Not(".repeat(129), ")".repeat(129))
+        );
+    });
+}
+
+/// `ast::Expr` as `#[derive(Debug)]` would write it, to pin that the
+/// hand-written `Debug` prints the same bytes. (Fields are only read by the
+/// derived `Debug`, which dead-code analysis ignores.)
+#[derive(Debug)]
+#[allow(dead_code)]
+enum DerivedExpr {
+    And(Box<DerivedExpr>, Box<DerivedExpr>),
+    Or(Box<DerivedExpr>, Box<DerivedExpr>),
+    Not(Box<DerivedExpr>),
+    Primitive(pktbaffle::ast::Primitive),
+}
+
+fn derived_mirror(e: &pktbaffle::ast::Expr) -> DerivedExpr {
+    use pktbaffle::ast::Expr;
+
+    match e {
+        Expr::And(l, r) => {
+            DerivedExpr::And(Box::new(derived_mirror(l)), Box::new(derived_mirror(r)))
+        }
+        Expr::Or(l, r) => DerivedExpr::Or(Box::new(derived_mirror(l)), Box::new(derived_mirror(r))),
+        Expr::Not(x) => DerivedExpr::Not(Box::new(derived_mirror(x))),
+        Expr::Primitive(p) => DerivedExpr::Primitive(p.clone()),
+        _ => unreachable!("new Expr variant: extend DerivedExpr"),
+    }
+}
+
+#[test]
+fn expr_debug_matches_derived_output() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    let mut exprs: Vec<Expr> = [
+        "tcp",
+        "not tcp",
+        "tcp and udp",
+        "tcp or udp",
+        "!(tcp and udp) or port 80",
+        "src net 192.168.0.0/16 or ip6 host ::1 and not ether host 00:11:22:33:44:55",
+        "src portrange 1000-2000 or vlan 5 or mpls or less 100 or inbound",
+        "tcp[13] & 2 != 0 or ip[2:2] = 40 or tcp[0] = tcp[4]",
+        "host 10.0.0.1 and (port 22 or port 80) and not (icmp or ip proto 47)",
+    ]
+    .iter()
+    .map(|f| pktbaffle::parse(f).unwrap())
+    .collect();
+    // Deepest trees printed in full: 128 levels (and a long parsed chain).
+    exprs.push(pktbaffle::parse(&chain("tcp", "or", 100)).unwrap());
+    let leaf = || Expr::Primitive(Primitive::Proto(Proto::Tcp));
+    let (mut nots, mut ands) = (leaf(), leaf());
+    for _ in 0..128 {
+        nots = Expr::Not(Box::new(nots));
+        ands = Expr::And(Box::new(leaf()), Box::new(ands));
+    }
+    exprs.extend([nots, ands]);
+
+    for e in &exprs {
+        let want = derived_mirror(e);
+        assert_eq!(format!("{e:?}"), format!("{want:?}"));
+        assert_eq!(format!("{e:#?}"), format!("{want:#?}"));
+        // Formatter flags reach the leaves exactly as they do when derived.
+        assert_eq!(format!("{e:x?}"), format!("{want:x?}"));
+        assert_eq!(format!("{e:#X?}"), format!("{want:#X?}"));
+    }
+}
+
 #[test]
 fn long_and_chain_compiles_like_one_term() {
     // Every later `tcp` is elided by the facts the first one proves.
