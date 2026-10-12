@@ -1056,9 +1056,10 @@ fn very_complex_filter_does_not_panic() {
 fn deeply_nested_parens_returns_error_not_stack_overflow() {
     use pktbaffle::{compile, Error, LinkType, Target};
 
-    // 200 open parens — well past the parser's depth limit — must return
-    // ParseError, not panic / SIGSEGV.
-    let deeply_nested = format!("{}tcp{}", "(".repeat(200), ")".repeat(200));
+    // 10_000 open parens — past the parser's limit — must return ParseError,
+    // not panic / SIGSEGV. (This used 200 while the limit was 127; libpcap
+    // 1.10.3 accepts 9995 and rejects 9996, per #199, and so does pktbaffle.)
+    let deeply_nested = format!("{}tcp{}", "(".repeat(10_000), ")".repeat(10_000));
     for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
         let r = compile(&deeply_nested, link, Target::Classic);
         assert!(
@@ -1235,14 +1236,14 @@ fn moderately_nested_offset_expr_still_compiles() {
 }
 
 #[test]
-fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
+fn nested_parens_around_nested_offset_expr_return_error() {
     use pktbaffle::Error;
 
-    // Parenthesised expressions and offset expressions draw on one depth budget,
-    // so deep nesting of both cannot add up to a stack overflow.  1 MiB is the
-    // Windows main-thread stack.
-    on_small_stack(1024, || {
-        for outer in [0, 50, 100, 126] {
+    // Deep nesting of both parenthesised expressions and offset expressions
+    // cannot add up to a stack overflow. (Until #199 the two shared one depth
+    // budget; outer parens now cost no stack, so the offset keeps its own.)
+    on_small_stack(256, || {
+        for outer in [0, 50, 100, 126, 9995] {
             let filter = format!(
                 "{}ip[{}1{}] = 0{}",
                 "(".repeat(outer),
@@ -1256,5 +1257,480 @@ fn nested_parens_around_nested_offset_expr_share_one_depth_budget() {
                 "{outer} outer parens: expected ParseError, got {r:?}"
             );
         }
+    });
+}
+
+// ── Regression: long and/or/not chains must not stack-overflow (#149) ────────
+// `a or b or ...`, `a and b and ...` and `!!!...x` build an AST as deep as the
+// chain is long, and dropping it, emitting cBPF or eBPF, or (for `!`) parsing
+// it recursed once per term with no limit: a few hundred terms aborted a debug
+// build on a 1 MiB stack (an uncatchable stack overflow). libpcap 1.10.3
+// compiles a 15000-term `tcp or ...` and a 1000-term host list (per the issue;
+// not re-run here). Every input below must now return `Ok` or `Err`.
+
+/// `term op term op ...` with `n` terms.
+fn chain(term: &str, op: &str, n: usize) -> String {
+    vec![term; n].join(&format!(" {op} "))
+}
+
+/// The long-chain inputs: `or`, `and`, juxtaposition, `!` and `not` chains.
+fn long_chains(n: usize) -> Vec<String> {
+    vec![
+        chain("tcp", "or", n),
+        chain("tcp", "and", n),
+        vec!["tcp"; n].join(" "),
+        format!("{}tcp", "!".repeat(n)),
+        format!("{}tcp", "not ".repeat(n)),
+    ]
+}
+
+#[test]
+fn long_chains_compile_on_small_stack() {
+    on_small_stack(256, || {
+        for filter in long_chains(5000) {
+            for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+                for &target in &[Target::Classic, Target::Extended] {
+                    // Ok or Err are both fine; returning at all is the test.
+                    let _ = compile(&filter, link, target);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn million_term_chain_parses_and_drops_on_small_stack() {
+    use pktbaffle::ast::Expr;
+
+    on_small_stack(256, || {
+        for op in ["or", "and"] {
+            let expr = pktbaffle::parse(&chain("tcp", op, 1_000_000)).unwrap();
+            // Left-deep: the left spine holds every operator.
+            let (mut depth, mut e) = (0, &expr);
+            while let Expr::Or(l, _) | Expr::And(l, _) = e {
+                depth += 1;
+                e = l;
+            }
+            assert_eq!(depth, 999_999, "{op} chain");
+            drop(expr);
+        }
+        for neg in ["!", "not "] {
+            let expr = pktbaffle::parse(&format!("{}tcp", neg.repeat(100_000))).unwrap();
+            let (mut depth, mut e) = (0, &expr);
+            while let Expr::Not(inner) = e {
+                depth += 1;
+                e = inner;
+            }
+            assert_eq!(depth, 100_000, "{neg:?} chain");
+        }
+    });
+}
+
+#[test]
+fn deep_hand_built_trees_compile_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+    use pktbaffle::{codegen, ebpf_codegen};
+
+    // The public codegen entry points take any `Expr`, including right-deep
+    // and mixed shapes the parser only produces through parentheses.
+    on_small_stack(256, || {
+        let tcp = || Expr::Primitive(Primitive::Proto(Proto::Tcp));
+        let mut right_or = tcp();
+        let mut right_and = tcp();
+        let mut mixed = tcp();
+        for i in 0..5000 {
+            right_or = Expr::Or(Box::new(tcp()), Box::new(right_or));
+            right_and = Expr::And(Box::new(tcp()), Box::new(right_and));
+            mixed = match i % 3 {
+                0 => Expr::Not(Box::new(mixed)),
+                1 => Expr::And(Box::new(mixed), Box::new(tcp())),
+                _ => Expr::Or(Box::new(tcp()), Box::new(mixed)),
+            };
+        }
+        for expr in [&right_or, &right_and, &mixed] {
+            for &link in &[LinkType::Ethernet, LinkType::RawIp] {
+                let _ = codegen::compile(expr, link);
+                let _ = ebpf_codegen::compile(expr, link);
+            }
+        }
+    });
+}
+
+// ── Regression: Expr Clone, PartialEq and Debug must not recurse per node (#229)
+// The derived impls recursed once per tree level, so cloning, comparing or
+// `{:?}`-printing a parsed 1,000-term chain aborted a 256 KiB stack.
+
+/// Chain shapes: left-deep `or` / `and` (what the parser builds), a `!` chain
+/// and a right-deep `or`. Built by hand rather than parsed so the deepest
+/// leaf can differ without re-lexing a million terms.
+const CHAIN_SHAPES: [&str; 4] = ["or", "and", "not", "right"];
+
+/// An `n`-term chain of `shape` over `leaf`, with `tcp` as every other leaf.
+fn deep_tree(shape: &str, n: usize, leaf: pktbaffle::ast::Expr) -> pktbaffle::ast::Expr {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    let tcp = || Box::new(Expr::Primitive(Primitive::Proto(Proto::Tcp)));
+    let mut e = leaf;
+    for _ in 0..n {
+        e = match shape {
+            "or" => Expr::Or(Box::new(e), tcp()),
+            "and" => Expr::And(Box::new(e), tcp()),
+            "not" => Expr::Not(Box::new(e)),
+            _ => Expr::Or(tcp(), Box::new(e)),
+        };
+    }
+    e
+}
+
+#[test]
+fn million_term_chains_clone_and_compare_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    on_small_stack(256, || {
+        let leaf = |p| Expr::Primitive(Primitive::Proto(p));
+        for shape in CHAIN_SHAPES {
+            let a = deep_tree(shape, 1_000_000, leaf(Proto::Tcp));
+            let b = deep_tree(shape, 1_000_000, leaf(Proto::Udp));
+            let copy = a.clone();
+            assert!(copy == a, "{shape}: clone differs from original");
+            // The chains differ only at the deepest leaf: the comparison
+            // must walk all the way down to see it.
+            assert!(a != b, "{shape}: chains differing at the bottom are equal");
+            assert!(copy != b, "{shape}: clone equals a different chain");
+        }
+        // Parsed chains: the left spine holds every operator.
+        for op in ["or", "and"] {
+            let e = pktbaffle::parse(&chain("tcp", op, 1_000_000)).unwrap();
+            let other = pktbaffle::parse(&chain("tcp", op, 999_999)).unwrap();
+            let copy = e.clone();
+            assert!(copy == e, "parsed {op} chain");
+            assert!(copy != other, "parsed {op} chains of different length");
+        }
+    });
+}
+
+#[test]
+fn expr_eq_distinguishes_variants_and_payloads() {
+    use pktbaffle::parse;
+
+    let p = |s: &str| parse(s).unwrap();
+    assert!(p("tcp or udp") == p("tcp or udp"));
+    assert!(p("tcp or udp") != p("tcp and udp"));
+    assert!(p("tcp or udp") != p("udp or tcp"));
+    assert!(p("not tcp") != p("tcp"));
+    assert!(p("not tcp") == p("!tcp"));
+    assert!(p("port 80") != p("port 81"));
+    assert!(p("port 80") != p("src port 80"));
+    assert!(p("tcp[13] & 2 != 0") != p("tcp[13] & 3 != 0"));
+    assert!(p("tcp or udp or icmp") != p("tcp or (udp or icmp)"));
+}
+
+#[test]
+fn million_term_chains_debug_format_on_small_stack() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    on_small_stack(256, || {
+        let tcp = Expr::Primitive(Primitive::Proto(Proto::Tcp));
+        for shape in CHAIN_SHAPES {
+            let e = deep_tree(shape, 1_000_000, tcp.clone());
+            for s in [format!("{e:?}"), format!("{e:#?}")] {
+                // Elided: bounded output, not one entry per node.
+                assert!(s.len() < 1 << 20, "{shape}: {} bytes of output", s.len());
+                assert!(s.contains(".."), "{shape}: printed without elision");
+            }
+        }
+        let parsed = pktbaffle::parse(&chain("tcp", "or", 1_000_000)).unwrap();
+        assert!(format!("{parsed:?}").starts_with("Or(Or(Or("));
+        // A `!` chain shows exactly the documented 128 levels, then `..`.
+        let nots = deep_tree("not", 1_000_000, tcp);
+        assert_eq!(
+            format!("{nots:?}"),
+            format!("{}..{}", "Not(".repeat(129), ")".repeat(129))
+        );
+    });
+}
+
+/// `ast::Expr` as `#[derive(Debug)]` would write it, to pin that the
+/// hand-written `Debug` prints the same bytes. (Fields are only read by the
+/// derived `Debug`, which dead-code analysis ignores.)
+#[derive(Debug)]
+#[allow(dead_code)]
+enum DerivedExpr {
+    And(Box<DerivedExpr>, Box<DerivedExpr>),
+    Or(Box<DerivedExpr>, Box<DerivedExpr>),
+    Not(Box<DerivedExpr>),
+    Primitive(pktbaffle::ast::Primitive),
+}
+
+fn derived_mirror(e: &pktbaffle::ast::Expr) -> DerivedExpr {
+    use pktbaffle::ast::Expr;
+
+    match e {
+        Expr::And(l, r) => {
+            DerivedExpr::And(Box::new(derived_mirror(l)), Box::new(derived_mirror(r)))
+        }
+        Expr::Or(l, r) => DerivedExpr::Or(Box::new(derived_mirror(l)), Box::new(derived_mirror(r))),
+        Expr::Not(x) => DerivedExpr::Not(Box::new(derived_mirror(x))),
+        Expr::Primitive(p) => DerivedExpr::Primitive(p.clone()),
+        _ => unreachable!("new Expr variant: extend DerivedExpr"),
+    }
+}
+
+#[test]
+fn expr_debug_matches_derived_output() {
+    use pktbaffle::ast::{Expr, Primitive, Proto};
+
+    let mut exprs: Vec<Expr> = [
+        "tcp",
+        "not tcp",
+        "tcp and udp",
+        "tcp or udp",
+        "!(tcp and udp) or port 80",
+        "src net 192.168.0.0/16 or ip6 host ::1 and not ether host 00:11:22:33:44:55",
+        "src portrange 1000-2000 or vlan 5 or mpls or less 100 or inbound",
+        "tcp[13] & 2 != 0 or ip[2:2] = 40 or tcp[0] = tcp[4]",
+        "host 10.0.0.1 and (port 22 or port 80) and not (icmp or ip proto 47)",
+    ]
+    .iter()
+    .map(|f| pktbaffle::parse(f).unwrap())
+    .collect();
+    // Deepest trees printed in full: 128 levels (and a long parsed chain).
+    exprs.push(pktbaffle::parse(&chain("tcp", "or", 100)).unwrap());
+    let leaf = || Expr::Primitive(Primitive::Proto(Proto::Tcp));
+    let (mut nots, mut ands) = (leaf(), leaf());
+    for _ in 0..128 {
+        nots = Expr::Not(Box::new(nots));
+        ands = Expr::And(Box::new(leaf()), Box::new(ands));
+    }
+    exprs.extend([nots, ands]);
+
+    for e in &exprs {
+        let want = derived_mirror(e);
+        assert_eq!(format!("{e:?}"), format!("{want:?}"));
+        assert_eq!(format!("{e:#?}"), format!("{want:#?}"));
+        // Formatter flags reach the leaves exactly as they do when derived.
+        assert_eq!(format!("{e:x?}"), format!("{want:x?}"));
+        assert_eq!(format!("{e:#X?}"), format!("{want:#X?}"));
+    }
+}
+
+#[test]
+fn long_and_chain_compiles_like_one_term() {
+    // Every later `tcp` is elided by the facts the first one proves.
+    on_small_stack(1024, || {
+        assert_eq!(
+            eth_prog(&chain("tcp", "and", 5000)).instructions(),
+            eth_prog("tcp").instructions()
+        );
+    });
+}
+
+/// `host 10.0.0.1 or host 10.0.0.2 ... or host 10.0.3.232` (1000 hosts).
+fn thousand_host_list() -> String {
+    (1u32..=1000)
+        .map(|i| format!("host 10.0.{}.{}", i >> 8, i & 0xff))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+#[test]
+fn thousand_host_list_compiles_for_extended_on_1mib_stack() {
+    // #149 acceptance: libpcap 1.10.3 compiles this list (1259 insns, per the
+    // issue). 1 MiB is the Windows main-thread stack; this runs in debug too.
+    on_small_stack(1024, || {
+        let r = compile(&thousand_host_list(), LinkType::Ethernet, Target::Extended);
+        assert!(
+            r.is_ok(),
+            "1000-host list must compile for eBPF: {:?}",
+            r.err()
+        );
+    });
+}
+
+// ── Nested parentheses up to libpcap's limit (#199) ──────────────────────────
+// The parser rejected 128 or more nested parentheses. libpcap 1.10.3 accepts
+// 9995 around a primitive and fails with "memory exhausted" at 9996 (verified
+// in the issue; not re-run here). pktbaffle now accepts the same 9995.
+
+/// `n` nested parentheses around `body`.
+fn parens(n: usize, body: &str) -> String {
+    format!("{}{body}{}", "(".repeat(n), ")".repeat(n))
+}
+
+#[test]
+fn nested_parens_up_to_9995_compile_on_small_stack() {
+    on_small_stack(256, || {
+        let tcp = pktbaffle::parse("tcp").unwrap();
+        let tcp_classic = compile("tcp", LinkType::Ethernet, Target::Classic).unwrap();
+        let tcp_ebpf = compile("tcp", LinkType::Ethernet, Target::Extended).unwrap();
+        for n in [127, 128, 1000, 9995] {
+            let f = parens(n, "tcp");
+            // Parentheses add no AST nodes.
+            assert_eq!(pktbaffle::parse(&f).unwrap(), tcp, "{n} parens");
+            let c = compile(&f, LinkType::Ethernet, Target::Classic).unwrap();
+            assert_eq!(c.instructions(), tcp_classic.instructions(), "{n} parens");
+            let e = compile(&f, LinkType::Ethernet, Target::Extended).unwrap();
+            assert_eq!(
+                e.as_extended().unwrap().instructions(),
+                tcp_ebpf.as_extended().unwrap().instructions(),
+                "{n} parens"
+            );
+        }
+    });
+}
+
+#[test]
+fn nested_parens_past_9995_return_parse_error() {
+    use pktbaffle::Error;
+
+    on_small_stack(256, || {
+        for n in [9996, 100_000] {
+            let f = parens(n, "tcp");
+            let r = pktbaffle::parse(&f);
+            match &r {
+                Err(Error::ParseError { message }) => {
+                    assert!(message.contains("9995"), "{n} parens: {message}")
+                }
+                _ => panic!("{n} parens: expected ParseError, got {r:?}"),
+            }
+            for &target in &[Target::Classic, Target::Extended] {
+                let r = compile(&f, LinkType::Ethernet, target);
+                assert!(
+                    matches!(r, Err(Error::ParseError { .. })),
+                    "{n} parens, {target:?}: got {r:?}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn deep_parens_mixed_with_operators_compile_on_small_stack() {
+    use pktbaffle::ast::Expr;
+
+    on_small_stack(256, || {
+        // `!(!(...tcp...))`, `tcp and (tcp and (...))`, and the worst case for
+        // the remaining recursion: 9995 parens around the deepest offset
+        // expression accepted (31 nested `(` inside `[...]`).
+        let not_nest = format!("{}tcp{}", "!(".repeat(9995), ")".repeat(9995));
+        let and_nest = format!("{}tcp{}", "tcp and (".repeat(9995), ")".repeat(9995));
+        let offset = parens(9995, &format!("ip[{}] = 0", parens(31, "1")));
+        let expr = pktbaffle::parse(&and_nest).unwrap();
+        // Right-deep: each level is `tcp and (...)`.
+        let (mut depth, mut e) = (0, &expr);
+        while let Expr::And(_, r) = e {
+            depth += 1;
+            e = r;
+        }
+        assert_eq!(depth, 9995);
+        for f in [&not_nest, &and_nest, &offset] {
+            for &target in &[Target::Classic, Target::Extended] {
+                // eBPF runs out of jump range on the 9995-term `and` chain,
+                // exactly as on the flat chain; parsing always succeeds.
+                let r = compile(f, LinkType::Ethernet, target);
+                assert!(
+                    !matches!(r, Err(pktbaffle::Error::ParseError { .. })),
+                    "{target:?}: {}...: {r:?}",
+                    &f[..20]
+                );
+            }
+        }
+    });
+}
+
+// ── Regression: compile time is linear in chain length (#202) ────────────────
+// Long left-deep `and` / `or` / `!` chains compiled in quadratic time: every OR
+// recomputed its arms' guard sets, every AND rescanned its left spine for a
+// leading `vlan` and copied the accumulated failure list, and jump threading
+// chased each `ja` trampoline chain to its end. A 32000-term `tcp or ...`
+// took 8.6 s (release). These tests compare sizes n and 4n instead of timing
+// against a threshold: linear work grows ~4x, quadratic ~16x.
+
+/// Fastest of three runs of `f`, in seconds.
+fn fastest(f: impl Fn()) -> f64 {
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_secs_f64()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// `f(4 * n)` must take less than 10x as long as `f(n)`, with 5 ms of slack
+/// for timer noise.
+fn assert_linear(name: &str, n: usize, f: impl Fn(usize)) {
+    let small = fastest(|| f(n));
+    let large = fastest(|| f(4 * n));
+    assert!(
+        large < 10.0 * small + 0.005,
+        "{name}: {n} terms took {small:.4}s but {} took {large:.4}s",
+        4 * n
+    );
+}
+
+#[test]
+fn compile_time_is_linear_in_chain_length() {
+    let run = |target: Target, filter: String| {
+        // Ok or "too complex" Err: only the time matters here.
+        let _ = compile(&filter, LinkType::Ethernet, target);
+    };
+    for target in [Target::Classic, Target::Extended] {
+        assert_linear(&format!("{target:?} or"), 8000, |n| {
+            run(target, chain("tcp", "or", n))
+        });
+        assert_linear(&format!("{target:?} and"), 8000, |n| {
+            run(target, chain("tcp", "and", n))
+        });
+        assert_linear(&format!("{target:?} !"), 64_000, |n| {
+            run(target, format!("{}tcp", "!".repeat(n)))
+        });
+        // Right-deep, through parentheses (within the 9995 limit).
+        assert_linear(&format!("{target:?} nested and"), 2000, |n| {
+            run(
+                target,
+                format!("{}tcp{}", "tcp and (".repeat(n), ")".repeat(n)),
+            )
+        });
+        assert_linear(&format!("{target:?} nested or"), 2000, |n| {
+            run(
+                target,
+                format!("{}tcp{}", "tcp or (".repeat(n), ")".repeat(n)),
+            )
+        });
+    }
+}
+
+#[test]
+fn optimizer_time_is_linear_in_ja_chain_length() {
+    use pktbaffle::bpf::Insn;
+
+    // `n` chained `ja 0` trampolines in front of `ret #-1`: every one threads
+    // to the `ret`. (#202: 64004 of these took about 1.5 s.)
+    assert_linear("optimize ja chain", 16_000, |n| {
+        let mut insns = vec![Insn::ja(0); n];
+        insns.push(Insn::ret_k(0xffff_ffff));
+        pktbaffle::optimizer::optimize(&mut insns);
+        // The first `ja` now jumps straight to the `ret`; the rest are dead.
+        assert_eq!(insns, [Insn::ja(0), Insn::ret_k(0xffff_ffff)]);
+    });
+}
+
+#[test]
+fn hundred_thousand_term_chains_compile_on_small_stack() {
+    // #149 acceptance, practical only once compile time is linear: on a
+    // 256 KiB stack a 100000-term `or` / `and` chain returns for both targets.
+    on_small_stack(256, || {
+        for op in ["or", "and"] {
+            let f = chain("tcp", op, 100_000);
+            for &target in &[Target::Classic, Target::Extended] {
+                let _ = compile(&f, LinkType::Ethernet, target);
+            }
+        }
+        // The `and` chain is still just `tcp` in cBPF.
+        assert_eq!(
+            eth_prog(&chain("tcp", "and", 100_000)).instructions(),
+            eth_prog("tcp").instructions()
+        );
     });
 }

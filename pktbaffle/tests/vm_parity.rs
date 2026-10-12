@@ -965,3 +965,61 @@ fn icmp_redirect_constant() {
     assert!(run_filter("icmp[icmptype] = icmp-redirect", &redirect));
     assert!(!run_filter("icmp[icmptype] = icmp-redirect", &echo));
 }
+
+// ── Long and/not chains (#149) ───────────────────────────────────────────────
+// These used to abort with a stack overflow. Expected verdicts are
+// hand-derived from libpcap semantics (`tcp and tcp ...` is `tcp`; an even
+// number of `!` cancels out); libpcap was not run for these.
+
+#[test]
+fn long_and_chain_matches_like_tcp() {
+    let f = vec!["tcp"; 5000].join(" and ");
+    assert!(run_filter(&f, &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(!run_filter(&f, &udp(IP_A, IP_B, 1234, 53)));
+}
+
+#[test]
+fn long_not_chain_matches_by_parity() {
+    let tcp_pkt = tcp(IP_A, IP_B, 1234, 80);
+    let udp_pkt = udp(IP_A, IP_B, 1234, 53);
+    let even = format!("{}tcp", "!".repeat(5000));
+    let odd = format!("{}tcp", "not ".repeat(5001));
+    assert!(run_filter(&even, &tcp_pkt));
+    assert!(!run_filter(&even, &udp_pkt));
+    assert!(!run_filter(&odd, &tcp_pkt));
+    assert!(run_filter(&odd, &udp_pkt));
+}
+
+// ── Deeply nested parentheses (#199) ────────────────────────────────────────
+// libpcap 1.10.3 accepts up to 9995 nested parentheses (per the issue);
+// parentheses do not change the meaning, so these match like `tcp` and
+// `not tcp` (hand-derived).
+
+#[test]
+fn thousand_nested_parens_match_like_tcp() {
+    let tcp_pkt = tcp(IP_A, IP_B, 1234, 80);
+    let udp_pkt = udp(IP_A, IP_B, 1234, 53);
+    let f = format!("{}tcp{}", "(".repeat(1000), ")".repeat(1000));
+    assert!(run_filter(&f, &tcp_pkt));
+    assert!(!run_filter(&f, &udp_pkt));
+    let not_f = format!("not {f}");
+    assert!(!run_filter(&not_f, &tcp_pkt));
+    assert!(run_filter(&not_f, &udp_pkt));
+}
+
+// ── Very long chains, now compiled in linear time (#202) ────────────────────
+// Hand-derived verdicts, as for #149 above: a 32000-term `tcp and ...` is
+// `tcp`, and 256000 `!`s cancel out.
+
+#[test]
+fn very_long_and_and_not_chains_match_like_tcp() {
+    let tcp_pkt = tcp(IP_A, IP_B, 1234, 80);
+    let udp_pkt = udp(IP_A, IP_B, 1234, 53);
+    for f in [
+        vec!["tcp"; 32_000].join(" and "),
+        format!("{}tcp", "!".repeat(256_000)),
+    ] {
+        assert!(run_filter(&f, &tcp_pkt));
+        assert!(!run_filter(&f, &udp_pkt));
+    }
+}

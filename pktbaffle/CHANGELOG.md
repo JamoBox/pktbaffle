@@ -38,6 +38,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Err(ParseError)` past 31 nested `(` (or 127 chained unary `-`); libpcap
   accepts thousands (#199 tracks raising limits). Shallower nesting is
   unchanged. Chains of `not` / `!` are not covered by this fix.
+- **No stack overflow on long `and` / `or` / `not` chains** (#149).
+  `a or b or ...`, `a and b and ...` and `!!!...x` build an AST one level
+  deep per term, and dropping it, emitting cBPF or eBPF, and (for `!`)
+  parsing it recursed per term: a few hundred terms aborted a debug build on
+  a 1 MiB stack, a few thousand a release build. The parser, both code
+  generators and `Drop for ast::Expr` are now iterative, so `compile()` and
+  `parse()` return `Ok` or `Err` at any chain length (a 1000-host
+  `host a or host b ...` list compiles for `Target::Extended`, as in libpcap).
+  Generated code is unchanged. `ast::Expr` now implements `Drop`, so its
+  fields can no longer be moved out by destructuring a value (match on a
+  reference instead).
+- **Up to 9995 nested parentheses are accepted, as in libpcap** (#199). The
+  parser rejected 128 or more nested parentheses (with a message that said
+  "max 128 levels"), and the old limit itself could overflow a 256 KiB stack
+  in a debug build. Parentheses are now parsed with an explicit stack instead
+  of recursion, and the limit matches libpcap 1.10.3, which accepts 9995
+  around a primitive and rejects 9996; past it, `Err(ParseError)` names the
+  limit. Offset expressions inside `[...]` keep their own unchanged limits
+  (31 nested `(`, 127 unary `-`), now independent of the surrounding
+  parentheses.
+- **Compile time is linear in the length of `and` / `or` / `not` chains**
+  (#202). Several codegen steps re-walked or re-copied everything before
+  them: cBPF recomputed guard sets at every `or` and rescanned for a leading
+  `vlan` at every `and`, both backends copied the accumulated failure list at
+  every `and`, and jump threading chased every `ja` trampoline chain to its
+  end. A 32000-term `tcp or ...` took 8.6 s (release) and a 32000-term
+  `tcp and ...` 2.4 s; they now take about 18 ms and 9 ms, and
+  `optimizer::optimize` on 64004 chained `ja`s about 1 ms instead of 1.5 s.
+  Generated code is unchanged.
+- **`ast::Expr` clones, compares and debug-prints long chains without
+  overflowing the stack** (#229). The derived `Clone`, `PartialEq` and `Debug`
+  recursed once per tree level, so `expr.clone()`, `expr == other` or
+  `{:?}` on a parsed 1,000-term `or` chain aborted a 256 KiB stack and
+  100,000 terms a 2 MiB one. `Clone` and `==` now use an explicit stack and
+  behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
+  and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
+  printed as `..`, so a million-term chain formats to a short string.
 
 ### Added
 

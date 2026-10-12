@@ -35,7 +35,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ast::*;
-use crate::codegen::LinkType;
+use crate::codegen::{concat, LinkType};
 use crate::ebpf::{self, Insn, Program, R2, R3, R4, R5, R6, XDP_DROP, XDP_PASS};
 use crate::error::{Error, Result};
 
@@ -51,6 +51,21 @@ struct Patches {
     success: Vec<Patch>,
     /// Jump to the DROP epilogue when resolved.
     failure: Vec<Patch>,
+}
+
+/// One step of the iterative `Codegen::emit_expr`: either an expression to
+/// emit, or the rest of an operator, run once the operand before it is done.
+enum Work<'e> {
+    Emit(&'e Expr),
+    /// Left operand done; emit the right.
+    AndRight(&'e Expr),
+    /// Both done; carries the left operand's failure patches.
+    AndDone(Vec<Patch>),
+    /// Left operand done; emit the right.
+    OrRight(&'e Expr),
+    /// Both done; carries the left's success patches and the JA between arms.
+    OrDone(Vec<Patch>, usize),
+    NotDone,
 }
 
 // ── Compiler state ────────────────────────────────────────────────────────────
@@ -258,54 +273,81 @@ impl Codegen {
 
     // ── Expression dispatch ───────────────────────────────────────────────────
 
+    /// Emit `expr`, returning its patch lists.
+    ///
+    /// The walk uses an explicit work stack instead of recursion: and/or/not
+    /// chains nest one AST level per term, and recursing overflowed the stack
+    /// on long ones (#149). Each operator runs as steps between its operands;
+    /// finished operands' patches wait on `done`.
     fn emit_expr(&mut self, expr: &Expr) -> Result<Patches> {
-        match expr {
-            Expr::And(l, r) => self.emit_and(l, r),
-            Expr::Or(l, r) => self.emit_or(l, r),
-            Expr::Not(e) => self.emit_not(e),
-            Expr::Primitive(p) => self.emit_primitive(p),
+        let mut work = vec![Work::Emit(expr)];
+        let mut done: Vec<Patches> = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                Work::Emit(Expr::Primitive(p)) => done.push(self.emit_primitive(p)?),
+                Work::Emit(Expr::And(left, right)) => {
+                    work.push(Work::AndRight(right));
+                    work.push(Work::Emit(left));
+                }
+                Work::Emit(Expr::Or(left, right)) => {
+                    work.push(Work::OrRight(right));
+                    work.push(Work::Emit(left));
+                }
+                Work::Emit(Expr::Not(inner)) => {
+                    work.push(Work::NotDone);
+                    work.push(Work::Emit(inner));
+                }
+                // AND: left falls through to right on success.
+                Work::AndRight(right) => {
+                    let left_p = done.pop().expect("AND left operand");
+                    let right_start = self.insns.len();
+                    self.resolve_all(left_p.success, right_start)?;
+                    work.push(Work::AndDone(left_p.failure));
+                    work.push(Work::Emit(right));
+                }
+                Work::AndDone(left_failure) => {
+                    let right_p = done.pop().expect("AND right operand");
+                    done.push(Patches {
+                        success: right_p.success,
+                        failure: concat(left_failure, right_p.failure),
+                    });
+                }
+                // OR: left's failures try right; left's fall-through success
+                // jumps past right.
+                Work::OrRight(right) => {
+                    let left_p = done.pop().expect("OR left operand");
+                    let ja_idx = self.push(Insn::ja(0));
+                    let right_start = self.insns.len();
+                    self.resolve_all(left_p.failure, right_start)?;
+                    work.push(Work::OrDone(left_p.success, ja_idx));
+                    work.push(Work::Emit(right));
+                }
+                Work::OrDone(left_success, ja_idx) => {
+                    let right_p = done.pop().expect("OR right operand");
+                    let mut success = left_success;
+                    success.push(Patch(ja_idx));
+                    done.push(Patches {
+                        success: concat(success, right_p.success),
+                        failure: right_p.failure,
+                    });
+                }
+                // NOT: inner failure is NOT's success; inner success and a JA
+                // after the inner fall-through are NOT's failure.
+                Work::NotDone => {
+                    let inner_p = done.pop().expect("NOT operand");
+                    let ja_idx = self.push(Insn::ja(0));
+                    let not_succ_start = self.insns.len();
+                    self.resolve_all(inner_p.failure, not_succ_start)?;
+                    let mut failure = inner_p.success;
+                    failure.push(Patch(ja_idx));
+                    done.push(Patches {
+                        success: vec![],
+                        failure,
+                    });
+                }
+            }
         }
-    }
-
-    fn emit_and(&mut self, left: &Expr, right: &Expr) -> Result<Patches> {
-        let left_p = self.emit_expr(left)?;
-        let right_start = self.insns.len();
-        self.resolve_all(left_p.success, right_start)?;
-        let right_p = self.emit_expr(right)?;
-        Ok(Patches {
-            success: right_p.success,
-            failure: left_p.failure.into_iter().chain(right_p.failure).collect(),
-        })
-    }
-
-    fn emit_or(&mut self, left: &Expr, right: &Expr) -> Result<Patches> {
-        let left_p = self.emit_expr(left)?;
-        let ja_idx = self.push(Insn::ja(0));
-        let right_start = self.insns.len();
-        self.resolve_all(left_p.failure, right_start)?;
-        let right_p = self.emit_expr(right)?;
-        let mut success = left_p.success;
-        success.push(Patch(ja_idx));
-        success.extend(right_p.success);
-        Ok(Patches {
-            success,
-            failure: right_p.failure,
-        })
-    }
-
-    fn emit_not(&mut self, inner: &Expr) -> Result<Patches> {
-        let inner_p = self.emit_expr(inner)?;
-        let ja_idx = self.push(Insn::ja(0));
-        let not_succ_start = self.insns.len();
-        self.resolve_all(inner_p.failure, not_succ_start)?;
-        Ok(Patches {
-            success: vec![],
-            failure: inner_p
-                .success
-                .into_iter()
-                .chain(std::iter::once(Patch(ja_idx)))
-                .collect(),
-        })
+        Ok(done.pop().expect("one result"))
     }
 
     // ── Primitives ────────────────────────────────────────────────────────────

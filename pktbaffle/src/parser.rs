@@ -1,4 +1,5 @@
-//! Recursive-descent parser for libpcap-style filter expressions.
+//! Parser for libpcap-style filter expressions: recursive descent for
+//! primitives, an explicit stack for `and` / `or` / `not` and parentheses.
 //!
 //! Grammar (lowest to highest precedence). As in libpcap, `and`, `or` and
 //! juxtaposition (implicit AND) have *equal* precedence and associate left to
@@ -6,7 +7,7 @@
 //!
 //! ```text
 //! expr      ::= not_expr (('and' | 'or')? not_expr)*   // juxtaposition = AND
-//! not_expr  ::= ('not' | '!') not_expr | atom
+//! not_expr  ::= ('not' | '!')* atom
 //! atom      ::= '(' expr ')' | primitive
 //! ```
 
@@ -50,18 +51,26 @@ pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
     Ok(expr)
 }
 
-const MAX_DEPTH: usize = 128;
+/// Most parentheses a filter may nest. libpcap 1.10.3 accepts 9995 around a
+/// primitive (its bison stack holds 10000 entries) and fails at 9996 with
+/// "memory exhausted". Parentheses are parsed with an explicit stack, so the
+/// limit only exists to reject absurd input the way libpcap does (#199).
+const MAX_PAREN_DEPTH: usize = 9995;
 
-/// Budget charged against `MAX_DEPTH` for each `(` nested inside a `[...]`
-/// offset. A level re-enters seven `parse_offset_*` frames, about twice the
-/// stack of a parenthesised expression in a debug build, so at 4 the limit is
-/// 31 levels and fits a 256 KiB stack even unoptimised. A unary `-` is a single
-/// frame and costs 1.
+/// Recursion budget for offset expressions inside `[...]`, which are parsed
+/// recursively (#135).
+const MAX_OFFSET_DEPTH: usize = 127;
+
+/// Budget charged against `MAX_OFFSET_DEPTH` for each `(` nested inside a
+/// `[...]` offset. A level re-enters seven `parse_offset_*` frames, so at 4
+/// the limit is 31 levels and fits a 256 KiB stack even unoptimised. A unary
+/// `-` is a single frame and costs 1, for 127 levels.
 const OFFSET_PAREN_COST: usize = 4;
 
 struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
+    /// Offset-expression recursion depth, charged by `nested_offset`.
     depth: usize,
 }
 
@@ -107,40 +116,86 @@ impl Parser<'_> {
 
     // ── expression levels ────────────────────────────────────────────────────
 
-    fn parse_expr(&mut self) -> Result<Expr> {
-        self.depth += 1;
-        if self.depth > MAX_DEPTH {
-            return Err(self.err(format!(
-                "expression nested too deeply (max {MAX_DEPTH} levels)"
-            )));
-        }
-        let result = self.parse_logical();
-        self.depth -= 1;
-        result
-    }
-
+    /// Parse `expr` (see the module grammar).
+    ///
     /// `and`, `or` and juxtaposition share one precedence level and fold left
     /// to right, matching libpcap (`%left OR AND`); only `not` binds tighter.
-    fn parse_logical(&mut self) -> Result<Expr> {
-        let mut left = self.parse_not()?;
+    ///
+    /// Not recursive: a `(` suspends the enclosing level on `open` and its `)`
+    /// resumes it, so nesting costs heap rather than call stack (#199), and a
+    /// `!` chain is counted, then applied (#149).
+    fn parse_expr(&mut self) -> Result<Expr> {
+        /// An enclosing level suspended at a `(`: what it had folded so far
+        /// with the operator joining the group to it, and the `!`s before
+        /// the `(`.
+        struct Open {
+            left: Option<(Expr, bool)>,
+            nots: usize,
+        }
+        let mut open: Vec<Open> = Vec::new();
+        // The current level so far, and whether the next operand joins it
+        // with `or` (else `and`).
+        let mut left: Option<(Expr, bool)> = None;
         loop {
-            let is_or = self.eat(&Token::Or);
-            if !is_or && !self.eat(&Token::And) {
-                // Implicit AND: only if the current position actually looks
-                // like the start of a primitive (so `)` and end of input stop
-                // the loop, as does any dangling token).
-                if !self.looks_like_primitive_start() {
+            // One operand: `('not' | '!')* ('(' | primitive)`.
+            let mut nots = 0;
+            while self.eat(&Token::Not) || self.eat(&Token::Bang) {
+                nots += 1;
+            }
+            if self.eat(&Token::LParen) {
+                if open.len() == MAX_PAREN_DEPTH {
+                    return Err(self.err(format!(
+                        "expression nested too deeply (max {MAX_PAREN_DEPTH} parentheses)"
+                    )));
+                }
+                open.push(Open {
+                    left: left.take(),
+                    nots,
+                });
+                continue;
+            }
+            let mut operand = Expr::Primitive(self.parse_primitive()?);
+            // Fold the operand into its level. If no operator follows, the
+            // level is complete: close its `(` and fold it, as an operand,
+            // into the enclosing level.
+            loop {
+                for _ in 0..nots {
+                    operand = Expr::Not(Box::new(operand));
+                }
+                let expr = match left.take() {
+                    None => operand,
+                    Some((l, true)) => Expr::Or(Box::new(l), Box::new(operand)),
+                    Some((l, false)) => Expr::And(Box::new(l), Box::new(operand)),
+                };
+                if let Some(is_or) = self.parse_logical_op() {
+                    left = Some((expr, is_or));
                     break;
                 }
+                let Some(outer) = open.pop() else {
+                    return Ok(expr);
+                };
+                self.expect(&Token::RParen)?;
+                operand = expr;
+                nots = outer.nots;
+                left = outer.left;
             }
-            let right = self.parse_not()?;
-            left = if is_or {
-                Expr::Or(Box::new(left), Box::new(right))
-            } else {
-                Expr::And(Box::new(left), Box::new(right))
-            };
         }
-        Ok(left)
+    }
+
+    /// Consume the operator after an operand: `Some(true)` for `or`,
+    /// `Some(false)` for `and` or juxtaposition (implicit AND), `None` if the
+    /// expression ends here.
+    fn parse_logical_op(&mut self) -> Option<bool> {
+        if self.eat(&Token::Or) {
+            Some(true)
+        } else if self.eat(&Token::And) {
+            Some(false)
+        } else {
+            // Implicit AND: only if the current position actually looks like
+            // the start of a primitive (so `)` and end of input stop the
+            // loop, as does any dangling token).
+            self.looks_like_primitive_start().then_some(false)
+        }
     }
 
     fn looks_like_primitive_start(&self) -> bool {
@@ -191,23 +246,6 @@ impl Parser<'_> {
                     | Token::LBracket
             )
         )
-    }
-
-    fn parse_not(&mut self) -> Result<Expr> {
-        if self.eat(&Token::Not) || self.eat(&Token::Bang) {
-            let inner = self.parse_not()?;
-            return Ok(Expr::Not(Box::new(inner)));
-        }
-        self.parse_atom()
-    }
-
-    fn parse_atom(&mut self) -> Result<Expr> {
-        if self.eat(&Token::LParen) {
-            let inner = self.parse_expr()?;
-            self.expect(&Token::RParen)?;
-            return Ok(inner);
-        }
-        self.parse_primitive().map(Expr::Primitive)
     }
 
     // ── primitives ───────────────────────────────────────────────────────────
@@ -1096,15 +1134,15 @@ impl Parser<'_> {
     }
 
     /// Run `f` one offset-expression level deeper, charging `cost` against the
-    /// `MAX_DEPTH` budget shared with `parse_expr` so the two cannot add up to
-    /// a stack overflow.
+    /// `MAX_OFFSET_DEPTH` budget so the recursion cannot overflow the stack.
+    /// (Enclosing parentheses cost no stack: `parse_expr` is iterative.)
     fn nested_offset<T>(
         &mut self,
         cost: usize,
         f: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
         self.depth += cost;
-        if self.depth > MAX_DEPTH {
+        if self.depth > MAX_OFFSET_DEPTH {
             return Err(self.err("offset expression nested too deeply"));
         }
         let result = f(self);

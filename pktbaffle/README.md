@@ -626,6 +626,7 @@ If the wrong link type is used, field offsets will be wrong and the filter will 
 - **`inbound` / `outbound`** — these direction primitives cannot be expressed in BPF and produce a `CodegenError`.
 - **`ether multicast`** — parsed but generates a stub that always accepts; use `ip multicast` or `ip6 multicast` instead.
 - **IPv6 fields** — complex IPv6 extension-header traversal is not supported; basic `ip6 and tcp port N` works correctly.
+- **Nesting limits** — up to 9995 nested parentheses, as libpcap 1.10.3 allows around a primitive; deeper nesting is a `ParseError`. Inside a byte-access offset (`ip[...]`) the limit is 31 nested parentheses or 127 chained unary `-`, where libpcap accepts thousands. `and` / `or` / `not` chains have no length limit (long ones may still exceed the BPF jump range and return a `CodegenError`).
 
 ---
 

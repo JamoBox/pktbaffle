@@ -1132,3 +1132,43 @@ mod explicit {
         );
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Long host list (#149)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// #149 acceptance: a 1000-host `host 10.0.0.1 or ... or host 10.0.3.232` list
+/// compiles for eBPF on a 1 MiB stack (debug builds included) and matches only
+/// listed hosts. libpcap 1.10.3 compiles the same shape of list (per the
+/// issue); these verdicts are hand-derived, not taken from libpcap.
+#[test]
+fn thousand_host_list_matches_listed_hosts_only() {
+    use common::packets::{tcp, IP_C};
+    use pktbaffle::{compile, LinkType, Target};
+
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let filter = (1u32..=1000)
+                .map(|i| format!("host 10.0.{}.{}", i >> 8, i & 0xff))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            let prog = compile(&filter, LinkType::Ethernet, Target::Extended)
+                .unwrap_or_else(|e| panic!("1000-host list must compile: {e}"));
+            let insns = prog.as_extended().unwrap().instructions();
+            for host in [Little, Big] {
+                for (dst, want) in [
+                    ([10, 0, 0, 1], Verdict::Match),   // first term
+                    ([10, 0, 3, 232], Verdict::Match), // last term
+                    ([10, 0, 3, 233], Verdict::NoMatch),
+                    ([10, 0, 4, 1], Verdict::NoMatch),
+                ] {
+                    let got = run_ebpf(insns, &tcp(IP_C, dst, 1234, 80), host);
+                    assert_eq!(got, Ok(want), "{host:?} dst {dst:?}");
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("thread panicked (see message above)");
+}

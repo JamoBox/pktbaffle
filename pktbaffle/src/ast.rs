@@ -1,5 +1,6 @@
 //! Abstract syntax tree for libpcap-style filter expressions.
 
+use std::fmt;
 use std::net::IpAddr;
 
 /// Direction qualifier: which address(es) to test.
@@ -248,7 +249,19 @@ pub struct ByteAccess {
 }
 
 /// A node in the filter expression tree.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `a or b or c` parses left-deep (`Or(Or(a, b), c)`), so a long chain is a
+/// deep tree. Dropping, cloning, comparing (`==`) and compiling one all run in
+/// constant stack, at any depth.
+///
+/// `Debug` output matches what `#[derive(Debug)]` would print (both `{:?}`
+/// and `{:#?}`) for a tree up to 128 levels deep. Anything nested deeper is
+/// printed as `..`, so formatting a very long chain returns a short string
+/// instead of overflowing the stack (or producing hundreds of megabytes).
+///
+/// `Expr` implements [`Drop`], so its fields cannot be moved out by
+/// destructuring a value; match on a reference instead (and clone what you
+/// keep), or use [`std::mem::replace`].
 #[non_exhaustive]
 pub enum Expr {
     /// Logical AND (short-circuiting).
@@ -259,4 +272,125 @@ pub enum Expr {
     Not(Box<Expr>),
     /// A leaf predicate.
     Primitive(Primitive),
+}
+
+/// Drops the tree with an explicit stack: `a or b or ...` and `!!!...x` nest
+/// one level per term, so the default recursive drop would overflow the
+/// stack on long chains (#149).
+impl Drop for Expr {
+    fn drop(&mut self) {
+        fn take_children(e: &mut Expr, stack: &mut Vec<Expr>) {
+            // A unit-like leaf: replacing a child with it allocates nothing.
+            let mut take = |b: &mut Box<Expr>| {
+                stack.push(std::mem::replace(
+                    &mut **b,
+                    Expr::Primitive(Primitive::IpBroadcast),
+                ))
+            };
+            match e {
+                Expr::And(l, r) | Expr::Or(l, r) => {
+                    take(l);
+                    take(r);
+                }
+                Expr::Not(inner) => take(inner),
+                Expr::Primitive(_) => {}
+            }
+        }
+        let mut stack = Vec::new();
+        take_children(self, &mut stack);
+        // Each popped node's children are detached before it drops, so its
+        // own `drop` sees only leaves and never recurses further.
+        while let Some(mut e) = stack.pop() {
+            take_children(&mut e, &mut stack);
+        }
+    }
+}
+
+/// A unit-like leaf: building or replacing a node with it allocates nothing.
+fn placeholder() -> Expr {
+    Expr::Primitive(Primitive::IpBroadcast)
+}
+
+/// Clones with an explicit stack (#229): each entry pairs a source node with
+/// the empty slot in the new tree that it is copied into.
+impl Clone for Expr {
+    fn clone(&self) -> Self {
+        let mut root = placeholder();
+        let mut stack = vec![(self, &mut root)];
+        while let Some((src, dst)) = stack.pop() {
+            *dst = match src {
+                Expr::And(..) => Expr::And(Box::new(placeholder()), Box::new(placeholder())),
+                Expr::Or(..) => Expr::Or(Box::new(placeholder()), Box::new(placeholder())),
+                Expr::Not(_) => Expr::Not(Box::new(placeholder())),
+                Expr::Primitive(p) => Expr::Primitive(p.clone()),
+            };
+            match (src, dst) {
+                (Expr::And(sl, sr), Expr::And(dl, dr)) | (Expr::Or(sl, sr), Expr::Or(dl, dr)) => {
+                    stack.push((&**sr, &mut **dr));
+                    stack.push((&**sl, &mut **dl));
+                }
+                (Expr::Not(s), Expr::Not(d)) => stack.push((&**s, &mut **d)),
+                _ => {}
+            }
+        }
+        root
+    }
+}
+
+/// Compares with an explicit stack of node pairs (#229); same result as the
+/// derived impl: same variant, equal children, equal leaf payloads.
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some(pair) = stack.pop() {
+            match pair {
+                (Expr::And(al, ar), Expr::And(bl, br)) | (Expr::Or(al, ar), Expr::Or(bl, br)) => {
+                    stack.push((&**ar, &**br));
+                    stack.push((&**al, &**bl));
+                }
+                (Expr::Not(a), Expr::Not(b)) => stack.push((&**a, &**b)),
+                (Expr::Primitive(a), Expr::Primitive(b)) if a == b => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// Deepest nesting level `Debug` prints in full; anything below it is `..`
+/// (#229). Each level costs a few hundred bytes of stack in a debug build.
+const DEBUG_MAX_DEPTH: usize = 128;
+
+/// An `Expr` at a known nesting depth. Its `Debug` is what `derive` generates
+/// for `Expr`, except that it stops at [`DEBUG_MAX_DEPTH`].
+struct AtDepth<'a>(&'a Expr, usize);
+
+impl fmt::Debug for AtDepth<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let AtDepth(e, depth) = *self;
+        if depth > DEBUG_MAX_DEPTH {
+            return f.write_str("..");
+        }
+        let d = depth + 1;
+        match e {
+            Expr::And(l, r) => f
+                .debug_tuple("And")
+                .field(&AtDepth(l, d))
+                .field(&AtDepth(r, d))
+                .finish(),
+            Expr::Or(l, r) => f
+                .debug_tuple("Or")
+                .field(&AtDepth(l, d))
+                .field(&AtDepth(r, d))
+                .finish(),
+            Expr::Not(x) => f.debug_tuple("Not").field(&AtDepth(x, d)).finish(),
+            Expr::Primitive(p) => f.debug_tuple("Primitive").field(p).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&AtDepth(self, 0), f)
+    }
 }
