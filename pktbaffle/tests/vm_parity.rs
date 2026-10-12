@@ -1130,3 +1130,200 @@ fn ja_forward_within_program_still_works() {
         b"x"
     ));
 }
+
+// ── Malformed cBPF opcodes make the VM return false (#201) ──────────────────
+// `vm::run` used to mask individual bit fields, so malformed opcodes ran as if
+// they were valid ones (RET|X returned k, MISC 0xff ran as TXA, ...).  libpcap
+// 1.10.3's `bpf_validate()` accepts them (it checks class and mode only), but
+// `bpf_filter()` switches on the exact opcode and hits `abort()` for each
+// code below (the issue ran `pcap_offline_filter`: SIGABRT), and the kernel's
+// `bpf_check_classic()` rejects them with EINVAL; the documented pktbaffle
+// contract is `false`.  The verdicts for the issue's seven programs are the
+// issue's observations of the old behaviour inverted; the valid siblings are
+// hand-derived.
+
+fn raw(code: u16, k: u32) -> pktbaffle::bpf::Insn {
+    pktbaffle::bpf::Insn {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+fn vm(insns: &[pktbaffle::bpf::Insn], pkt: &[u8]) -> bool {
+    pktbaffle::vm::run(insns, pkt)
+}
+
+#[test]
+fn malformed_opcodes_from_the_issue_return_false() {
+    use pktbaffle::bpf::Insn;
+
+    let jeq3 = Insn {
+        code: 0x15,
+        jt: 0,
+        jf: 1,
+        k: 3,
+    };
+    // RET|X (0x0e) is not an opcode; it used to return k.
+    assert!(!vm(&[raw(0x0e, 1)], &[]));
+    // MISC 0xff used to run as TXA: ldx #5 ; ld #0 ; <0xff> ; ret a.
+    assert!(!vm(
+        &[raw(0x01, 5), raw(0x00, 0), raw(0xff, 0), raw(0x16, 0)],
+        &[]
+    ));
+    // LD|H|LEN (0x88) used to run as LD LEN: ld len ; jeq #3 ; ret 1 ; ret 0.
+    assert!(!vm(
+        &[raw(0x88, 0), jeq3, raw(0x06, 1), raw(0x06, 0)],
+        &[1, 2, 3]
+    ));
+    // LD|B|IMM (0x10) used to run as LD IMM.
+    assert!(!vm(&[raw(0x10, 7), raw(0x16, 0)], &[]));
+    // ST with stray bits (0x62) used to store to M[0].
+    assert!(!vm(
+        &[
+            raw(0x00, 9),
+            raw(0x62, 0),
+            raw(0x00, 0),
+            raw(0x60, 0),
+            raw(0x16, 0)
+        ],
+        &[]
+    ));
+    // ALU NEG|X (0x8c) used to negate.
+    assert!(!vm(&[raw(0x00, 5), raw(0x8c, 0), raw(0x16, 0)], &[]));
+    // LDX|H|IMM (0x09) used to load the immediate.
+    assert!(!vm(&[raw(0x09, 3), raw(0x87, 0), raw(0x16, 0)], &[]));
+}
+
+#[test]
+fn valid_siblings_of_the_malformed_opcodes_still_run() {
+    use pktbaffle::bpf::Insn;
+
+    let jeq3 = Insn {
+        code: 0x15,
+        jt: 0,
+        jf: 1,
+        k: 3,
+    };
+    assert!(vm(&[raw(0x06, 1)], &[])); // RET|K
+    assert!(vm(
+        &[raw(0x01, 5), raw(0x00, 0), raw(0x87, 0), raw(0x16, 0)],
+        &[]
+    )); // TXA
+    assert!(vm(
+        &[raw(0x80, 0), jeq3, raw(0x06, 1), raw(0x06, 0)],
+        &[1, 2, 3]
+    )); // LD|W|LEN
+    assert!(vm(&[raw(0x00, 7), raw(0x16, 0)], &[])); // LD|W|IMM
+    assert!(vm(
+        &[
+            raw(0x00, 9),
+            raw(0x02, 0),
+            raw(0x00, 0),
+            raw(0x60, 0),
+            raw(0x16, 0)
+        ],
+        &[]
+    )); // ST, LD|W|MEM
+    assert!(vm(&[raw(0x00, 5), raw(0x84, 0), raw(0x16, 0)], &[])); // ALU NEG|K
+    assert!(vm(&[raw(0x01, 3), raw(0x87, 0), raw(0x16, 0)], &[])); // LDX|W|IMM
+    assert!(!vm(&[raw(0x16, 0)], &[])); // RET|A with A = 0: the issue's baseline
+}
+
+/// The 47 opcodes `vm::run` implements, written out by hand from libpcap's
+/// `bpf_filter()` switch (plus ALU XOR, which pktbaffle's codegen emits).
+/// ALU MOD (0x94 / 0x9c, kernel-only) is not implemented by the VM, so it is
+/// invalid here.
+const VALID_OPCODES: &[u16] = &[
+    // LD: W/H/B ABS, W/H/B IND, W LEN, W IMM, W MEM
+    0x20, 0x28, 0x30, 0x40, 0x48, 0x50, 0x80, 0x00, 0x60,
+    // LDX: W IMM, W LEN, W MEM, B MSH
+    0x01, 0x81, 0x61, 0xb1, // ST, STX
+    0x02, 0x03, // ALU K/X: add sub mul div or and lsh rsh; NEG (K only); XOR K/X
+    0x04, 0x0c, 0x14, 0x1c, 0x24, 0x2c, 0x34, 0x3c, 0x44, 0x4c, 0x54, 0x5c, 0x64, 0x6c, 0x74, 0x7c,
+    0x84, 0xa4, 0xac, // JMP: JA (K only), JEQ/JGT/JGE/JSET K/X
+    0x05, 0x15, 0x1d, 0x25, 0x2d, 0x35, 0x3d, 0x45, 0x4d, // RET K/A, TAX, TXA
+    0x06, 0x16, 0x07, 0x87,
+];
+
+#[test]
+fn only_exact_cbpf_opcodes_execute_and_disassemble() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    assert_eq!(VALID_OPCODES.len(), 47);
+    let pkt = [0u8; 16];
+    for code in 0..=u16::MAX {
+        let insn = Insn {
+            code,
+            jt: 0,
+            jf: 0,
+            k: 1,
+        };
+        let shown = insn.to_string();
+        if VALID_OPCODES.contains(&code) {
+            assert!(!shown.contains(".word"), "{code:#06x} is valid: {shown}");
+        } else {
+            assert!(
+                shown.contains(".word") && shown.contains("invalid"),
+                "{code:#06x} must be marked invalid: {shown}"
+            );
+            // Were it executed, a non-jump opcode would fall through to the
+            // accepting `ret`.
+            assert!(!vm(&[insn, Insn::ret_k(BPF_ACCEPT)], &pkt), "{code:#06x}");
+        }
+    }
+}
+
+#[test]
+fn compiled_programs_contain_only_valid_opcodes() {
+    // Every opcode `compile()` emits (all link types, byte access, arithmetic,
+    // vlan/mpls, protochain, ...) must stay inside the valid set.
+    let filters = [
+        "tcp",
+        "udp or icmp",
+        "ip6 and tcp port 80",
+        "host 10.0.0.1 and not port 22",
+        "net 10.0.0.0/8",
+        "ether host aa:bb:cc:dd:ee:ff",
+        "ether broadcast",
+        "vlan 100 and tcp",
+        "mpls 5",
+        "pppoes 7",
+        "len > 100 and len <= 1500",
+        "tcp[13] & 2 != 0",
+        "tcp[tcpflags] & tcp-syn != 0",
+        "ip[2:2] + 20 > 40",
+        "ip[0] & 0xf * 4 = 20",
+        "ip[1] - 1 = ip[2]",
+        "ip[0] ^ 1 = 4",
+        "ip[0] << 1 = 4",
+        "ip[0] >> 1 & 3 = 2",
+        "ip[0] - 1 = 2",
+        "ip[8] * 2 / 2 = 64",
+        "icmp[icmptype] = icmp-echo",
+        "ip6 protochain 6",
+        "ip protochain 17",
+        "portrange 1000-2000",
+        "ip multicast or ip6 multicast",
+        "arp or rarp",
+        "greater 100 or less 50",
+    ];
+    for &link in &[LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+        for f in filters {
+            let prog = match compile(f, link, Target::Classic) {
+                Ok(p) => p,
+                // Ethernet-only primitives are rejected on the other links.
+                Err(_) if link != LinkType::Ethernet => continue,
+                Err(e) => panic!("compile({f:?}): {e}"),
+            };
+            for insn in prog.instructions() {
+                assert!(
+                    VALID_OPCODES.contains(&insn.code),
+                    "{f:?} on {link:?} emitted opcode {:#06x}",
+                    insn.code
+                );
+            }
+        }
+    }
+}
