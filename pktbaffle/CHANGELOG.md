@@ -4,6 +4,49 @@ All notable changes to **pktbaffle** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`and` / `or` precedence now matches libpcap** (#128). The parser gave `and`
+  higher precedence than `or`; libpcap (`%left OR AND`, pcap-filter(7)) gives
+  `and`, `or` and juxtaposition *equal* precedence, left-associative. This is a
+  **behaviour change** for unparenthesised filters where an `or` is followed
+  later by an `and`: `port 22 or port 80 and host 10.0.0.1` is now
+  `(port 22 or port 80) and host 10.0.0.1` (previously
+  `port 22 or (port 80 and host 10.0.0.1)`), in both the cBPF and eBPF
+  backends. `a and b or c` and `not` binding are unchanged. Add parentheses
+  to keep the old grouping.
+- **eBPF backend**: 16- and 32-bit packet fields were loaded with a plain
+  `LDX MEM` and compared in host byte order against network-order constants, so
+  on little-endian hosts (x86_64, arm64) nearly every filter (`tcp`, `ip`,
+  `host`, `port`, `vlan`, `ip[2:2] = 40`, ...) never matched. Every multi-byte
+  packet load is now followed by `BPF_END` (`be16` / `be32`), which makes the
+  program correct on both endiannesses and keeps ordered comparisons and
+  arithmetic working. (#129)
+- **Parser no longer panics on overflowing byte-access offsets** (#134).
+  `ip[(1<<63)/-1]` (`i64::MIN / -1`) aborted `compile()` / `parse()` with
+  "attempt to divide with overflow", and `ip[1<<63]` was silently compiled as
+  `ip[0]`. Division and `<<` inside `[...]` are now overflow-checked, and an
+  offset outside `i32` is rejected instead of truncated; all of these return
+  `Err(ParseError)`. In-range offset expressions are unchanged.
+- **Parser no longer overflows the stack on deeply nested byte-access
+  offsets** (#135). `(` and unary `-` inside `[...]` (`ip[((((...1))))]`,
+  `ip[-----...1]`) recursed without a limit, so a few KB of filter text
+  aborted the process with an uncatchable stack overflow. Offset nesting now
+  draws on the same depth budget as parenthesised expressions and returns
+  `Err(ParseError)` past 31 nested `(` (or 127 chained unary `-`); libpcap
+  accepts thousands (#199 tracks raising limits). Shallower nesting is
+  unchanged. Chains of `not` / `!` are not covered by this fix.
+
+### Added
+
+- `ebpf::Insn::be16` / `Insn::be32` constructors and the `BPF_END`, `BPF_TO_LE`
+  and `BPF_TO_BE` opcode constants.
+- Execution-based tests for the eBPF backend: a test-only reference interpreter
+  (selectable host endianness) and a parity table checking eBPF verdicts
+  against the cBPF VM. No change to the crate's dependencies. (#219)
+
 ## [0.2.0] - 2026-07-30
 
 ### Changed (breaking)

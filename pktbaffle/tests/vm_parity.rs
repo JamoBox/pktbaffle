@@ -6,28 +6,10 @@
 
 #![cfg(feature = "vm")]
 
+mod common;
+
+use common::packets::*;
 use pktbaffle::{compile, LinkType, Target};
-
-// ── Ethernet constants ────────────────────────────────────────────────────────
-
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const ETHERTYPE_ARP: u16 = 0x0806;
-const ETHERTYPE_IPV6: u16 = 0x86DD;
-const ETHERTYPE_VLAN: u16 = 0x8100;
-
-const IPPROTO_ICMP: u8 = 1;
-const IPPROTO_TCP: u8 = 6;
-const IPPROTO_UDP: u8 = 17;
-
-// Fixed test MACs and IPs — arbitrary but distinct.
-const MAC_A: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
-const MAC_B: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-const MAC_BCAST: [u8; 6] = [0xff; 6];
-const MAC_MCAST: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]; // IPv4 multicast MAC
-
-const IP_A: [u8; 4] = [192, 168, 1, 1];
-const IP_B: [u8; 4] = [10, 0, 0, 1];
-const IP_C: [u8; 4] = [172, 16, 0, 1];
 
 // ── Core helper ──────────────────────────────────────────────────────────────
 
@@ -35,205 +17,6 @@ fn run_filter(filter: &str, pkt: &[u8]) -> bool {
     let prog = compile(filter, LinkType::Ethernet, Target::Classic)
         .unwrap_or_else(|e| panic!("compile({filter:?}): {e}"));
     pktbaffle::vm::run(prog.instructions(), pkt)
-}
-
-// ── Packet builders ───────────────────────────────────────────────────────────
-
-/// Ethernet/IPv4/TCP frame.
-///
-/// Layout: 14 (Eth) + 20 (IPv4, IHL=5) + 20 (TCP) + payload_len bytes.
-fn eth_ipv4_tcp(
-    dst_mac: [u8; 6],
-    src_mac: [u8; 6],
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-    tcp_flags: u8,
-    payload_len: usize,
-) -> Vec<u8> {
-    let mut p = Vec::new();
-    // Ethernet header
-    p.extend_from_slice(&dst_mac);
-    p.extend_from_slice(&src_mac);
-    p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-    // IPv4 header (no options, IHL=5)
-    p.push(0x45); // version=4, IHL=5
-    p.push(0x00); // DSCP/ECN
-    let total_len = (20u16 + 20 + payload_len as u16).to_be_bytes();
-    p.extend_from_slice(&total_len);
-    p.extend_from_slice(&[0x00, 0x00]); // identification
-    p.extend_from_slice(&[0x00, 0x00]); // flags + fragment offset
-    p.push(64); // TTL
-    p.push(IPPROTO_TCP);
-    p.extend_from_slice(&[0x00, 0x00]); // header checksum (not validated by VM)
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    // TCP header
-    p.extend_from_slice(&src_port.to_be_bytes());
-    p.extend_from_slice(&dst_port.to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // seq
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // ack
-    p.push(0x50); // data offset=5, reserved=0
-    p.push(tcp_flags);
-    p.extend_from_slice(&[0xff, 0xff]); // window
-    p.extend_from_slice(&[0x00, 0x00]); // checksum
-    p.extend_from_slice(&[0x00, 0x00]); // urgent pointer
-    p.extend(std::iter::repeat(0u8).take(payload_len));
-    p
-}
-
-/// Ethernet/IPv4/UDP frame.
-fn eth_ipv4_udp(
-    dst_mac: [u8; 6],
-    src_mac: [u8; 6],
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&dst_mac);
-    p.extend_from_slice(&src_mac);
-    p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-    p.push(0x45);
-    p.push(0x00);
-    p.extend_from_slice(&(20u16 + 8).to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.push(64);
-    p.push(IPPROTO_UDP);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    p.extend_from_slice(&src_port.to_be_bytes());
-    p.extend_from_slice(&dst_port.to_be_bytes());
-    p.extend_from_slice(&8u16.to_be_bytes()); // UDP length
-    p.extend_from_slice(&[0x00, 0x00]); // checksum
-    p
-}
-
-/// Ethernet/IPv4/ICMP frame.
-fn eth_ipv4_icmp(src_ip: [u8; 4], dst_ip: [u8; 4], icmp_type: u8, icmp_code: u8) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&MAC_B);
-    p.extend_from_slice(&MAC_A);
-    p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
-    p.push(0x45);
-    p.push(0x00);
-    p.extend_from_slice(&(20u16 + 8).to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.push(64);
-    p.push(IPPROTO_ICMP);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    // ICMP header: type, code, checksum (2), rest-of-header (4)
-    p.push(icmp_type);
-    p.push(icmp_code);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-    p
-}
-
-/// Ethernet/ARP frame.
-fn eth_arp(src_ip: [u8; 4], dst_ip: [u8; 4]) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&MAC_B);
-    p.extend_from_slice(&MAC_A);
-    p.extend_from_slice(&ETHERTYPE_ARP.to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x01]); // HTYPE = Ethernet
-    p.extend_from_slice(&[0x08, 0x00]); // PTYPE = IPv4
-    p.push(6); // HLEN
-    p.push(4); // PLEN
-    p.extend_from_slice(&[0x00, 0x01]); // OPER = request
-    p.extend_from_slice(&MAC_A); // SHA
-    p.extend_from_slice(&src_ip); // SPA
-    p.extend_from_slice(&MAC_B); // THA
-    p.extend_from_slice(&dst_ip); // TPA
-    p
-}
-
-/// VLAN-tagged Ethernet/IPv4/TCP frame (802.1Q).
-fn eth_vlan_ipv4_tcp(
-    vlan_id: u16,
-    src_ip: [u8; 4],
-    dst_ip: [u8; 4],
-    src_port: u16,
-    dst_port: u16,
-    tcp_flags: u8,
-) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&MAC_B);
-    p.extend_from_slice(&MAC_A);
-    p.extend_from_slice(&ETHERTYPE_VLAN.to_be_bytes()); // outer ethertype
-    p.extend_from_slice(&(vlan_id & 0x0FFF).to_be_bytes()); // TCI (PCP=0, DEI=0, VID)
-    p.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes()); // inner ethertype
-                                                        // IPv4 + TCP
-    p.push(0x45);
-    p.push(0x00);
-    p.extend_from_slice(&(20u16 + 20).to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.push(64);
-    p.push(IPPROTO_TCP);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    p.extend_from_slice(&src_port.to_be_bytes());
-    p.extend_from_slice(&dst_port.to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-    p.push(0x50);
-    p.push(tcp_flags);
-    p.extend_from_slice(&[0xff, 0xff]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p
-}
-
-/// Ethernet/IPv6/TCP frame (40-byte IPv6 header, no extension headers).
-fn eth_ipv6_tcp(
-    src_ip: [u8; 16],
-    dst_ip: [u8; 16],
-    src_port: u16,
-    dst_port: u16,
-    tcp_flags: u8,
-) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&MAC_B);
-    p.extend_from_slice(&MAC_A);
-    p.extend_from_slice(&ETHERTYPE_IPV6.to_be_bytes());
-    // IPv6 fixed header (40 bytes)
-    p.push(0x60); // version=6, traffic class high nibble=0
-    p.extend_from_slice(&[0x00, 0x00, 0x00]); // traffic class low + flow label
-    p.extend_from_slice(&20u16.to_be_bytes()); // payload length = TCP header
-    p.push(IPPROTO_TCP); // next header
-    p.push(64); // hop limit
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    // TCP header
-    p.extend_from_slice(&src_port.to_be_bytes());
-    p.extend_from_slice(&dst_port.to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-    p.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-    p.push(0x50);
-    p.push(tcp_flags);
-    p.extend_from_slice(&[0xff, 0xff]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p.extend_from_slice(&[0x00, 0x00]);
-    p
-}
-
-/// Convenience wrapper: Ethernet/IPv4/TCP with SYN flag set.
-fn tcp(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
-    eth_ipv4_tcp(MAC_B, MAC_A, src_ip, dst_ip, src_port, dst_port, 0x02, 0)
-}
-
-/// Convenience wrapper: Ethernet/IPv4/UDP.
-fn udp(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16) -> Vec<u8> {
-    eth_ipv4_udp(MAC_B, MAC_A, src_ip, dst_ip, src_port, dst_port)
 }
 
 // ── Host filters ─────────────────────────────────────────────────────────────
@@ -506,6 +289,74 @@ fn juxtaposition_acts_as_and() {
     assert!(!run_filter("tcp port 80", &wrong));
 }
 
+/// `and`/`or` have equal precedence and associate left to right (#128).
+///
+/// Expected verdicts are libpcap 1.10.3 `pcap_compile` + `pcap_offline_filter`
+/// results recorded in issue #128, not derived from pktbaffle: libpcap parses
+/// `X or Y and Z` as `(X or Y) and Z`. The two MATCH entries on the `tcp or udp`
+/// filter are not in the issue; they follow from that same documented parse.
+#[test]
+fn or_then_and_has_equal_precedence_like_libpcap() {
+    const NOMATCH: bool = false;
+    const MATCH: bool = true;
+    const OTHER: [u8; 4] = [9, 9, 9, 9];
+    const TARGET: [u8; 4] = [10, 0, 0, 1];
+    const DST: [u8; 4] = [8, 8, 8, 8];
+
+    let cases: [(&str, Vec<u8>, bool); 6] = [
+        // The issue's headline case: host guards BOTH port tests.
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 22),
+            NOMATCH,
+        ),
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(TARGET, DST, 1234, 80),
+            MATCH,
+        ),
+        (
+            "port 22 or port 80 and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 80),
+            NOMATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            tcp(OTHER, DST, 1234, 80),
+            NOMATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            tcp(TARGET, DST, 1234, 80),
+            MATCH,
+        ),
+        (
+            "tcp or udp and host 10.0.0.1",
+            udp(TARGET, DST, 1234, 53),
+            MATCH,
+        ),
+    ];
+
+    // The tree shape is link-independent, but codegen is not: run each packet
+    // on Ethernet, RawIp (Ethernet header stripped) and LinuxSll (cooked header).
+    for (filter, eth_pkt, expected) in &cases {
+        let mut sll = vec![0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00];
+        sll.extend_from_slice(&eth_pkt[14..]);
+        for (link, pkt) in [
+            (LinkType::Ethernet, &eth_pkt[..]),
+            (LinkType::RawIp, &eth_pkt[14..]),
+            (LinkType::LinuxSll, &sll[..]),
+        ] {
+            let prog = compile(filter, link, Target::Classic).unwrap();
+            assert_eq!(
+                pktbaffle::vm::run(prog.instructions(), pkt),
+                *expected,
+                "{filter:?} on {link:?}"
+            );
+        }
+    }
+}
+
 // ── Packet length filters ─────────────────────────────────────────────────────
 // Base TCP packet (no payload): 14 + 20 + 20 = 54 bytes.
 
@@ -623,6 +474,39 @@ fn ip_ttl_byte_access() {
     let pkt = tcp(IP_A, IP_B, 1234, 80);
     assert!(run_filter("ip[8] = 64", &pkt));
     assert!(!run_filter("ip[8] = 128", &pkt));
+}
+
+#[test]
+fn ip_ttl_via_nested_offset_expressions() {
+    // 20 levels of `(` / unary `-` around the offset 8 (#135) still match as
+    // ip[8] does: well inside the nesting limit.
+    let pkt = tcp(IP_A, IP_B, 1234, 80);
+    let nested = [
+        format!("{}8{}", "(".repeat(20), ")".repeat(20)),
+        format!("{}8", "-".repeat(20)),
+        format!("{}8{}", "-(".repeat(20), ")".repeat(20)),
+    ];
+    for offset in nested {
+        assert!(run_filter(&format!("ip[{offset}] = 64"), &pkt), "{offset}");
+        assert!(
+            !run_filter(&format!("ip[{offset}] = 128"), &pkt),
+            "{offset}"
+        );
+    }
+}
+
+#[test]
+fn ip_ttl_via_folded_offset_expressions() {
+    // Constant-folded offsets that stay in range are unchanged by the
+    // overflow checks (#134): each of these is ip[8], the TTL (64).
+    let pkt = tcp(IP_A, IP_B, 1234, 80);
+    for offset in ["1<<3", "16/2", "-4/-2+6", "(1<<30)/(1<<27)"] {
+        assert!(run_filter(&format!("ip[{offset}] = 64"), &pkt), "{offset}");
+        assert!(
+            !run_filter(&format!("ip[{offset}] = 128"), &pkt),
+            "{offset}"
+        );
+    }
 }
 
 // ── Ethernet MAC address filters ──────────────────────────────────────────────
@@ -795,31 +679,6 @@ fn ip_multicast_rejects_unicast() {
 }
 
 // ── IPv6 host filters ─────────────────────────────────────────────────────────
-
-// Fixed IPv6 test addresses.
-const IPV6_A: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-const IPV6_B: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
-const IPV6_MCAST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]; // ff02::1
-
-/// Ethernet/IPv6/UDP frame (40-byte IPv6 header, no extension headers).
-fn eth_ipv6_udp(src_ip: [u8; 16], dst_ip: [u8; 16], src_port: u16, dst_port: u16) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&MAC_B);
-    p.extend_from_slice(&MAC_A);
-    p.extend_from_slice(&ETHERTYPE_IPV6.to_be_bytes());
-    p.push(0x60);
-    p.extend_from_slice(&[0x00, 0x00, 0x00]);
-    p.extend_from_slice(&8u16.to_be_bytes()); // payload length = UDP header
-    p.push(IPPROTO_UDP);
-    p.push(64);
-    p.extend_from_slice(&src_ip);
-    p.extend_from_slice(&dst_ip);
-    p.extend_from_slice(&src_port.to_be_bytes());
-    p.extend_from_slice(&dst_port.to_be_bytes());
-    p.extend_from_slice(&8u16.to_be_bytes());
-    p.extend_from_slice(&[0x00, 0x00]);
-    p
-}
 
 #[test]
 fn ipv6_host_matches_src() {

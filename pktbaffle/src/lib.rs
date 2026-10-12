@@ -27,7 +27,9 @@
 //!
 //! The filter language is a subset of the libpcap expression syntax.
 //! Primitives can be combined with `and`, `or`, `not` (or `!`);
-//! juxtaposition is treated as AND.
+//! juxtaposition is treated as AND. As in libpcap, `and`, `or` and
+//! juxtaposition have equal precedence and associate left to right (so
+//! `a or b and c` is `(a or b) and c`); only `not` binds tighter.
 //!
 //! | Expression | Matches |
 //! |---|---|

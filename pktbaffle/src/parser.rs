@@ -1,11 +1,11 @@
 //! Recursive-descent parser for libpcap-style filter expressions.
 //!
-//! Grammar (lowest to highest precedence):
+//! Grammar (lowest to highest precedence). As in libpcap, `and`, `or` and
+//! juxtaposition (implicit AND) have *equal* precedence and associate left to
+//! right: `a or b and c` is `(a or b) and c`.
 //!
 //! ```text
-//! expr      ::= or_expr
-//! or_expr   ::= and_expr ('or' and_expr)*
-//! and_expr  ::= not_expr ('and' not_expr | not_expr)*   // juxtaposition = AND
+//! expr      ::= not_expr (('and' | 'or')? not_expr)*   // juxtaposition = AND
 //! not_expr  ::= ('not' | '!') not_expr | atom
 //! atom      ::= '(' expr ')' | primitive
 //! ```
@@ -51,6 +51,13 @@ pub fn parse(tokens: &[Spanned]) -> Result<Expr> {
 }
 
 const MAX_DEPTH: usize = 128;
+
+/// Budget charged against `MAX_DEPTH` for each `(` nested inside a `[...]`
+/// offset. A level re-enters seven `parse_offset_*` frames, about twice the
+/// stack of a parenthesised expression in a debug build, so at 4 the limit is
+/// 31 levels and fits a 256 KiB stack even unoptimised. A unary `-` is a single
+/// frame and costs 1.
+const OFFSET_PAREN_COST: usize = 4;
 
 struct Parser<'a> {
     tokens: &'a [Spanned],
@@ -107,39 +114,31 @@ impl Parser<'_> {
                 "expression nested too deeply (max {MAX_DEPTH} levels)"
             )));
         }
-        let result = self.parse_or();
+        let result = self.parse_logical();
         self.depth -= 1;
         result
     }
 
-    fn parse_or(&mut self) -> Result<Expr> {
-        let mut left = self.parse_and()?;
-        while self.eat(&Token::Or) {
-            let right = self.parse_and()?;
-            left = Expr::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> Result<Expr> {
+    /// `and`, `or` and juxtaposition share one precedence level and fold left
+    /// to right, matching libpcap (`%left OR AND`); only `not` binds tighter.
+    fn parse_logical(&mut self) -> Result<Expr> {
         let mut left = self.parse_not()?;
         loop {
-            let explicit = self.eat(&Token::And);
-            if !explicit {
-                // Implicit AND: next token can start a primitive, and it's not
-                // an `or` or `)` or end of input.
-                match self.cur_tok() {
-                    None | Some(Token::Or) | Some(Token::RParen) => break,
-                    _ => {}
-                }
-                // But only if the current position actually looks like the
-                // start of a primitive (not some dangling token).
+            let is_or = self.eat(&Token::Or);
+            if !is_or && !self.eat(&Token::And) {
+                // Implicit AND: only if the current position actually looks
+                // like the start of a primitive (so `)` and end of input stop
+                // the loop, as does any dangling token).
                 if !self.looks_like_primitive_start() {
                     break;
                 }
             }
             let right = self.parse_not()?;
-            left = Expr::And(Box::new(left), Box::new(right));
+            left = if is_or {
+                Expr::Or(Box::new(left), Box::new(right))
+            } else {
+                Expr::And(Box::new(left), Box::new(right))
+            };
         }
         Ok(left)
     }
@@ -986,10 +985,7 @@ impl Parser<'_> {
     // ── Constant offset expressions inside `[...]` — precedence: | ^ & shr+shl +- */
     fn parse_offset_expr(&mut self) -> Result<i32> {
         let v = self.parse_offset_or()?;
-        if v > i32::MAX as i64 {
-            return Err(self.err(format!("offset expression out of range: {v}")));
-        }
-        Ok(v as i32)
+        i32::try_from(v).map_err(|_| self.err(format!("offset expression out of range: {v}")))
     }
 
     fn parse_offset_or(&mut self) -> Result<i64> {
@@ -1029,7 +1025,12 @@ impl Parser<'_> {
                     if !(0..64).contains(&rhs) {
                         return Err(self.err("shift amount out of range in offset expression"));
                     }
-                    lhs <<= rhs;
+                    // Reject shifts that lose bits or reach the sign bit.
+                    let shifted = lhs << rhs;
+                    if shifted >> rhs != lhs {
+                        return Err(self.err("offset expression overflow"));
+                    }
+                    lhs = shifted;
                 }
                 Some(Token::Shr) => {
                     self.advance();
@@ -1083,7 +1084,10 @@ impl Parser<'_> {
                     if rhs == 0 {
                         return Err(self.err("division by zero in offset expression"));
                     }
-                    lhs /= rhs;
+                    // `i64::MIN / -1` overflows.
+                    lhs = lhs
+                        .checked_div(rhs)
+                        .ok_or_else(|| self.err("offset expression overflow"))?;
                 }
                 _ => break,
             }
@@ -1091,17 +1095,34 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
+    /// Run `f` one offset-expression level deeper, charging `cost` against the
+    /// `MAX_DEPTH` budget shared with `parse_expr` so the two cannot add up to
+    /// a stack overflow.
+    fn nested_offset<T>(
+        &mut self,
+        cost: usize,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.depth += cost;
+        if self.depth > MAX_DEPTH {
+            return Err(self.err("offset expression nested too deeply"));
+        }
+        let result = f(self);
+        self.depth -= cost;
+        result
+    }
+
     fn parse_offset_atom(&mut self) -> Result<i64> {
         match self.cur_tok() {
             Some(Token::LParen) => {
                 self.advance();
-                let val = self.parse_offset_or()?;
+                let val = self.nested_offset(OFFSET_PAREN_COST, Self::parse_offset_or)?;
                 self.expect(&Token::RParen)?;
                 Ok(val)
             }
             Some(Token::Minus) => {
                 self.advance();
-                let val = self.parse_offset_atom()?;
+                let val = self.nested_offset(1, Self::parse_offset_atom)?;
                 val.checked_neg()
                     .ok_or_else(|| self.err("offset expression overflow"))
             }
