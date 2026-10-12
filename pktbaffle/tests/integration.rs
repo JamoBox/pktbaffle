@@ -1799,3 +1799,41 @@ fn integer_over_32_bits_is_an_error_in_every_position() {
     }
     assert!(pktbaffle::parse("greater 4294967295").is_ok());
 }
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ─────────────────────────
+// libpcap 1.10.3 parses each octet as plain decimal (`pcap_atoin`), so `010` in
+// a dotted quad is 10, not octal. Expected trees hand-derived from issue #191.
+
+#[test]
+fn zero_padded_dotted_octets_are_decimal() {
+    for (padded, plain) in [
+        ("host 010.1.2.3", "host 10.1.2.3"),
+        ("host 1.2.3.04", "host 1.2.3.4"),
+        ("host 192.168.001.001", "host 192.168.1.1"),
+        ("host 00.0.0.1", "host 0.0.0.1"),
+        ("net 010.0.0.0/8", "net 10.0.0.0/8"),
+        (
+            "net 10.0.0.0 mask 255.255.255.000",
+            "net 10.0.0.0 mask 255.255.255.0",
+        ),
+        ("net 10.0.0.0 mask 255.255.255.000", "net 10.0.0.0/24"),
+        // The 1-3 octet forms already accepted padding; they keep doing so.
+        ("net 010.1.2", "net 10.1.2"),
+        ("host 10.01", "host 10.1"),
+    ] {
+        assert_eq!(ast(padded), ast(plain), "{padded:?} vs {plain:?}");
+    }
+}
+
+#[test]
+fn malformed_dotted_addresses_are_still_errors() {
+    for f in [
+        "host 10.256.0.1",
+        "host 0x0a.0.0.1",
+        "host 1.2.3.4.5",
+        "host 1.2.3.",
+        "net 10.0.0.0 mask 255.255.255.256",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}

@@ -1104,3 +1104,26 @@ fn octal_cidr_prefix_is_a_slash_8() {
         );
     }
 }
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ────────────────────────
+// `host 010.1.2.3` is 10.1.2.3 (decimal octets), as in libpcap 1.10.3.
+// Verdicts hand-derived from issue #191 (no live libpcap was available).
+
+#[test]
+fn zero_padded_host_matches_decimal_address() {
+    let src_10 = tcp([10, 1, 2, 3], IP_B, 1234, 80);
+    let dst_10 = tcp(IP_B, [10, 1, 2, 3], 1234, 80);
+    let src_8 = tcp([8, 1, 2, 3], IP_B, 1234, 80);
+    for f in ["host 010.1.2.3", "host 10.001.002.003"] {
+        assert!(run_filter(f, &src_10), "{f} src");
+        assert!(run_filter(f, &dst_10), "{f} dst");
+        assert!(!run_filter(f, &src_8), "{f} must not match 8.1.2.3");
+    }
+}
+
+#[test]
+fn zero_padded_netmask_is_a_slash_24() {
+    let f = "net 192.168.1.0 mask 255.255.255.000";
+    assert!(run_filter(f, &tcp([192, 168, 1, 77], IP_B, 1234, 80)));
+    assert!(!run_filter(f, &tcp([192, 168, 2, 77], IP_B, 1234, 80)));
+}

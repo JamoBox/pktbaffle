@@ -513,29 +513,22 @@ fn looks_like_mac(s: &str) -> bool {
 }
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
-    // IPv4 (contains a dot)
+    // IPv4 (contains a dot): up to four decimal octets, leading zeros allowed
+    // (`010` is 10, as in libpcap). Fewer than four are zero-padded for the
+    // classful `net` shorthand.
     if raw.contains('.') {
-        let addr_part = raw.split('/').next().unwrap();
-        if let Ok(addr) = addr_part.parse::<std::net::Ipv4Addr>() {
-            return Ok(Token::Ipv4(addr.octets()));
-        }
-        // Partial IPv4 (1–3 octets): zero-pad and emit as Ipv4 for classful net shorthand.
-        let parts: Vec<&str> = addr_part.split('.').collect();
-        if !parts.is_empty() && parts.len() <= 3 {
-            let mut octets = [0u8; 4];
-            let mut valid = true;
-            for (i, p) in parts.iter().enumerate() {
-                if let Ok(n) = p.parse::<u8>() {
-                    octets[i] = n;
-                } else {
-                    valid = false;
-                    break;
+        let mut octets = [0u8; 4];
+        for (i, p) in raw.split('.').enumerate() {
+            match (octets.get_mut(i), p.parse::<u8>()) {
+                (Some(o), Ok(n)) => *o = n,
+                _ => {
+                    return Err(Error::ParseError {
+                        message: format!("invalid IPv4 address '{raw}' at offset {offset}"),
+                    })
                 }
             }
-            if valid {
-                return Ok(Token::Ipv4(octets));
-            }
         }
+        return Ok(Token::Ipv4(octets));
     }
     // IPv6 (contains "::" or two or more colons)
     if looks_like_ipv6(raw) {
@@ -995,5 +988,49 @@ mod tests {
         for src in ["10.0.0.0/08", "2001:db8::/09", "fe80::/08"] {
             assert!(lex(src).is_err(), "{src} must be rejected");
         }
+    }
+
+    // ── Dotted IPv4 octets are decimal, leading zeros allowed (#191) ─────────
+    // libpcap 1.10.3 (nametoaddr.c `pcap_atoin`): each octet is plain decimal,
+    // so `010.1.2.3` is 10.1.2.3. Hand-derived from issue #191.
+
+    #[test]
+    fn zero_padded_four_octet_addresses_lex() {
+        for (src, want) in [
+            ("010.1.2.3", [10, 1, 2, 3]),
+            ("1.2.3.04", [1, 2, 3, 4]),
+            ("192.168.001.001", [192, 168, 1, 1]),
+            ("00.0.0.1", [0, 0, 0, 1]),
+            ("255.255.255.000", [255, 255, 255, 0]),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens.len(), 1, "{src}");
+            assert_eq!(tokens[0].token, Token::Ipv4(want), "{src}");
+        }
+    }
+
+    #[test]
+    fn bad_dotted_addresses_are_rejected_naming_the_literal() {
+        for src in [
+            "10.256.0.1",
+            "1.2.3.1000",
+            "1.2.3.4.5",
+            "1.2.3.",
+            "1..2",
+            "1.2.3.a",
+        ] {
+            let Err(Error::ParseError { message }) = lex(src) else {
+                panic!("{src:?} must be rejected with a ParseError naming it");
+            };
+            assert!(message.contains(&format!("'{src}'")), "{src}: {message}");
+        }
+        // A leading `.` is not part of a number: it is the unexpected character.
+        assert_eq!(
+            lex(".1.2.3").unwrap_err(),
+            Error::LexError { offset: 0, ch: '.' }
+        );
+        // Hex octets are not accepted: `0x0a` lexes as a number, then `.` is
+        // not a token.
+        assert!(lex("0x0a.0.0.1").is_err());
     }
 }
