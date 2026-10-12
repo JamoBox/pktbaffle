@@ -2031,3 +2031,58 @@ fn missing_prefix_length_reports_the_slash_offset() {
         }
     }
 }
+
+// ── A bare integer is an IPv4 host or net (#190) ──────────────────────────────
+// libpcap 1.10.3 `gen_ncode`: `host N` is the exact 32-bit address N; `net N`
+// shifts N (and an all-ones mask) left a byte at a time until the top byte is
+// non-zero. Expected trees hand-derived from that and issue #190.
+
+#[test]
+fn host_takes_a_bare_integer_as_the_address() {
+    for (bare, dotted) in [
+        ("host 10", "host 0.0.0.10"),
+        ("src host 10", "src host 0.0.0.10"),
+        ("dst host 10", "dst host 0.0.0.10"),
+        ("ip host 10", "ip host 0.0.0.10"),
+        ("host 0x0a000001", "host 10.0.0.1"),
+        ("host 167772161", "host 10.0.0.1"),
+        ("host 4294967295", "host 255.255.255.255"),
+        ("host 0", "host 0.0.0.0"),
+        // After a direction, the type keyword is optional (like `src 1.2.3.4`).
+        ("src 10", "src host 0.0.0.10"),
+        ("dst 0x0a000001", "dst host 10.0.0.1"),
+    ] {
+        assert_eq!(ast(bare), ast(dotted), "{bare:?} vs {dotted:?}");
+    }
+}
+
+#[test]
+fn net_promotes_a_short_integer_to_a_prefix() {
+    for (bare, cidr) in [
+        ("net 10", "net 10.0.0.0/8"),
+        ("net 255", "net 255.0.0.0/8"),
+        ("net 256", "net 1.0.0.0/16"),
+        ("net 300", "net 1.44.0.0/16"),
+        ("net 65536", "net 1.0.0.0/24"),
+        ("net 16777216", "net 1.0.0.0/32"),
+        ("net 4294967295", "net 255.255.255.255/32"),
+        ("src net 256", "src net 1.0.0.0/16"),
+        ("dst net 65536", "dst net 1.0.0.0/24"),
+        // `net 0` has no byte to shift: libpcap treats it as the exact address.
+        ("net 0", "net 0.0.0.0/32"),
+    ] {
+        assert_eq!(ast(bare), ast(cidr), "{bare:?} vs {cidr:?}");
+    }
+}
+
+#[test]
+fn bare_integer_over_32_bits_is_still_rejected() {
+    for f in [
+        "host 4294967296",
+        "net 4294967296",
+        "src 4294967296",
+        "host 0x100000000",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
