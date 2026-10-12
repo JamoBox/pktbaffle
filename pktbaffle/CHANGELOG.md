@@ -75,6 +75,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
   and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
   printed as `..`, so a million-term chain formats to a short string.
+- **Integer literals follow C syntax, as in libpcap** (#157). A leading `0`
+  now makes a literal octal: `tcp port 010` is port 8, `ip[010]` is `ip[8]`,
+  `ip proto 017` is protocol 15, `vlan 010` is VLAN 8, `ether proto 0100` is
+  0x40, `len = 0100` is 64 and `net 10.0.0.0/010` is a /8 (all were read as
+  decimal, so they compiled but matched different packets). A leading-zero
+  literal with an 8 or 9 (`tcp port 08`, `ether proto 0800`, `vlan 08`) is now
+  an error, as in libpcap ("number 08 contains non-octal digit"); write
+  `0x0800`. `0` and `00` are still 0, and `/0x8` is now accepted as a prefix
+  length (it was rejected). **Behaviour change** for filters that relied on
+  zero-padded numbers being decimal. A literal over 32 bits is rejected at
+  lex time with a `ParseError` naming it (as libpcap's "overflows 32 bits");
+  a malformed number (`0x`, `12abc`) now reports the same way instead of as
+  an `unexpected character` `LexError` (#210 tracks the rest of the
+  diagnostics).
 
 ### Added
 

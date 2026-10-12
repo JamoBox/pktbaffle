@@ -1023,3 +1023,84 @@ fn very_long_and_and_not_chains_match_like_tcp() {
         assert!(!run_filter(&f, &udp_pkt));
     }
 }
+
+// ── Integer literals: a leading 0 is octal (#157) ────────────────────────────
+// libpcap 1.10.3 reads `010` as 8 (scanner.l `stou`). Verdicts hand-derived from
+// that and issue #157 (no live libpcap was available).
+
+#[test]
+fn octal_port_matches_decimal_value_on_every_link() {
+    let on_dport = |dport| tcp(IP_A, IP_B, 1234, dport);
+    for (pkt, want) in [(on_dport(8), true), (on_dport(10), false)] {
+        let mut sll = vec![0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00];
+        sll.extend_from_slice(&pkt[14..]);
+        for (link, bytes) in [
+            (LinkType::Ethernet, &pkt[..]),
+            (LinkType::RawIp, &pkt[14..]),
+            (LinkType::LinuxSll, &sll[..]),
+        ] {
+            let prog = compile("tcp port 010", link, Target::Classic).unwrap();
+            assert_eq!(
+                pktbaffle::vm::run(prog.instructions(), bytes),
+                want,
+                "{link:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn octal_byte_offset_loads_ip_ttl() {
+    // ip[010] is ip[8] (the TTL), not ip[10] (checksum high byte).
+    let mut ttl1 = tcp(IP_A, IP_B, 1234, 80);
+    ttl1[14 + 8] = 1;
+    let mut csum1 = tcp(IP_A, IP_B, 1234, 80);
+    csum1[14 + 10] = 1;
+    assert!(run_filter("ip[010] = 1", &ttl1));
+    assert!(!run_filter("ip[010] = 1", &csum1));
+}
+
+#[test]
+fn octal_ip_proto_ether_proto_vlan_and_len() {
+    let mut proto15 = tcp(IP_A, IP_B, 1234, 80);
+    proto15[14 + 9] = 15;
+    assert!(run_filter("ip proto 017", &proto15));
+    assert!(!run_filter("ip proto 017", &tcp(IP_A, IP_B, 1234, 80)));
+
+    let mut etype40 = tcp(IP_A, IP_B, 1234, 80);
+    etype40[12..14].copy_from_slice(&[0x00, 0x40]);
+    assert!(run_filter("ether proto 0100", &etype40));
+    assert!(!run_filter("ether proto 0100", &tcp(IP_A, IP_B, 1234, 80)));
+
+    assert!(run_filter(
+        "vlan 010",
+        &eth_vlan_ipv4_tcp(8, IP_A, IP_B, 1234, 80, 2)
+    ));
+    assert!(!run_filter(
+        "vlan 010",
+        &eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 80, 2)
+    ));
+
+    // 54 bytes of headers: 10 payload bytes make 64 (= 0100), 46 make 100.
+    let len64 = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 10);
+    let len100 = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 46);
+    assert!(run_filter("len = 0100", &len64));
+    assert!(!run_filter("len = 0100", &len100));
+}
+
+#[test]
+fn octal_cidr_prefix_is_a_slash_8() {
+    // net 10.0.0.0/010 is /8: 10.64.0.1 and 10.128.0.1 match (a /10 would not
+    // match 10.128.x.x); 11.0.0.1 does not.
+    for (src, want) in [
+        ([10, 64, 0, 1], true),
+        ([10, 128, 0, 1], true),
+        ([11, 0, 0, 1], false),
+    ] {
+        assert_eq!(
+            run_filter("net 10.0.0.0/010", &tcp(src, IP_C, 1234, 80)),
+            want,
+            "{src:?}"
+        );
+    }
+}
