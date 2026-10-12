@@ -875,3 +875,42 @@ fn bad_dotted_octets_rejected() {
         assert!(try_eth(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── `/` before a prefix length is an ordinary token (#194, #173) ─────────────
+// libpcap 1.10.3 accepts these (verified against it in issues #194 and #173)
+// and rejects a bare number after an address.
+
+#[test]
+fn net_prefix_spelling_accepted() {
+    for f in [
+        "net 10.0.0.0 / 8",
+        "net 10.0.0.0/ 8",
+        "net 10.0.0.0/0x8",
+        "net 2001:db8:: /32",
+        "net 2001:db8::/0x20",
+        "net ::/0",
+        "net ::1/128",
+        "net ::ffff:0:0/96",
+        "ip6 net ::/32",
+        "src net ::1/128",
+        "net ::/0 and tcp",
+        "host ::1/128",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn net_prefix_syntax_errors_rejected() {
+    for f in [
+        "net 10.0.0.0 8",
+        "net 10 8",
+        "net 2001:db8:: 32",
+        "net 10 mask 255.0.0.0",
+        "net ::/129",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}

@@ -97,6 +97,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for any number of octets. A bad octet (`10.256.0.1`, `1.2.3.4.5`) is now a
   `ParseError` naming the literal ("invalid IPv4 address '10.256.0.1' at
   offset 5") instead of a `LexError` quoting its first digit.
+- **`/` before a prefix length is an ordinary token, so spacing, hex and
+  `::` networks work** (#194, #173). The lexer glued `/<decimal digits>` onto
+  a preceding IPv4 or IPv6 literal, except after an address starting with
+  `::`, and the parser took any number after an address as the prefix. Now
+  `/` is always lexed on its own and `parse_net` reads `/` followed by an
+  ordinary integer. Accepted, as in libpcap: `net 10.0.0.0 / 8`,
+  `net 10.0.0.0 /8`, `net 10.0.0.0/ 8`, `net 10.0.0.0/0x8`,
+  `net 2001:db8:: /32`, and every network written with a leading `::`
+  (`net ::/0`, `net ::1/128`, `net ::ffff:0:0/96`, `ip6 net ::/32`,
+  `src net ::1/128`; these failed with "IPv6 net requires a CIDR prefix
+  length"). `host ::1/128` is accepted as a /128 (any other length after
+  `host`, or an IPv4 `host x/len`, is an error, as in libpcap). **Behaviour
+  change:** a number with no `/` after an address, which was read as a
+  prefix length (`net 10.0.0.0 8`, `net 10 8`, `src net 192.168.1.0 24 and
+  port 80`), and `net 10 mask 255.0.0.0`, are now errors (libpcap: syntax
+  error). A missing or non-numeric length (`net 10.0.0.0/`) is a
+  `ParseError` instead of a `LexError` with a misleading offset.
 
 ### Added
 

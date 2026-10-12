@@ -111,7 +111,12 @@ net 10.0.0.0/8            # any host in 10.0.0.0/8
 src net 172.16.0.0/12     # source in 172.16.0.0/12
 net 10.0.0.0 mask 255.0.0.0   # explicit mask (equivalent to /8)
 dst net 192.168.1.0/24    # destination network
+net 2001:db8::/32         # IPv6 prefix
+net ::ffff:0:0/96         # IPv4-mapped IPv6 addresses
+net ::/0                  # any IPv6 packet
 ```
+
+As in libpcap, the `/` is an ordinary token: `net 10.0.0.0 / 8` and `net 10.0.0.0/0x8` are the same as `net 10.0.0.0/8`, and the prefix length is required to follow it; a bare number after the address (`net 10.0.0.0 8`) is a syntax error, as is `net 10 mask 255.0.0.0`.
 
 ### Ports and port ranges
 
