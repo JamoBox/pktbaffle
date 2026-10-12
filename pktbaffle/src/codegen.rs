@@ -39,7 +39,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ast::*;
 use crate::bpf::{
-    Insn, Program, BPF_ACCEPT, BPF_DROP, BPF_LD, BPF_LDX, BPF_LEN, BPF_MISC, BPF_TAX,
+    Insn, Program, BPF_ACCEPT, BPF_DROP, BPF_LD, BPF_LDX, BPF_LEN, BPF_MAXINSNS, BPF_MISC, BPF_TAX,
 };
 use crate::error::{Error, Result};
 use crate::optimizer::optimize;
@@ -1678,7 +1678,10 @@ enum PatchField {
 ///
 /// Returns [`Error::CodegenError`] for filter
 /// constructs that are valid syntax but cannot be represented in classic BPF
-/// for the requested link type (e.g. `inbound`/`outbound` direction primitives).
+/// for the requested link type (e.g. `inbound`/`outbound` direction primitives),
+/// and when the finished program is longer than
+/// [`BPF_MAXINSNS`] (4096) instructions, the most the
+/// kernel accepts for `SO_ATTACH_FILTER`.
 pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     let mut cg = Codegen::new(link);
     let patches = cg.emit_expr(expr)?;
@@ -1697,6 +1700,18 @@ pub fn compile(expr: &Expr, link: LinkType) -> Result<Program> {
     // offsets, so every patch must already be resolved.
     let mut insns = cg.insns;
     optimize(&mut insns);
+
+    // The kernel rejects longer programs at SO_ATTACH_FILTER (EINVAL); fail
+    // here with a reason. libpcap only fails later, at pcap_setfilter.
+    if insns.len() > BPF_MAXINSNS {
+        return Err(Error::CodegenError {
+            message: format!(
+                "filter expression is too complex: classic BPF program is {} instructions, \
+                 over the BPF_MAXINSNS limit of {BPF_MAXINSNS}",
+                insns.len()
+            ),
+        });
+    }
 
     Ok(Program::new(insns))
 }

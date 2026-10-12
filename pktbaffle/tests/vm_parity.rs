@@ -1327,3 +1327,32 @@ fn compiled_programs_contain_only_valid_opcodes() {
         }
     }
 }
+
+// ── Classic programs are capped at BPF_MAXINSNS (4096) insns (#203) ─────────
+// A filter that compiles to exactly 4096 insns still runs correctly in the VM.
+// Hand-derived: `ip[0]` of the test frames is 0x45, so `ip[0] + 1 * n` equals
+// `0x45 + n` and (via the 8-bit `ldb`) never wraps.
+
+#[test]
+fn program_of_exactly_4096_insns_runs() {
+    use pktbaffle::bpf::BPF_MAXINSNS;
+
+    let overhead = compile("ip[0]+1 = 0", LinkType::Ethernet, Target::Classic)
+        .unwrap()
+        .len()
+        - 1;
+    let n = BPF_MAXINSNS - overhead;
+    let f = format!("ip[0]{} = {}", "+1".repeat(n), 0x45 + n);
+    let prog = compile(&f, LinkType::Ethernet, Target::Classic).unwrap();
+    assert_eq!(prog.len(), BPF_MAXINSNS);
+    let hit = tcp(IP_A, IP_B, 1234, 80);
+    assert_eq!(hit[14], 0x45);
+    assert!(pktbaffle::vm::run(prog.instructions(), &hit));
+    let mut miss = hit.clone();
+    miss[14] = 0x46;
+    assert!(!pktbaffle::vm::run(prog.instructions(), &miss));
+    assert!(!pktbaffle::vm::run(
+        prog.instructions(),
+        &udp(IP_A, IP_B, 1234, 53)[..14]
+    ));
+}

@@ -100,6 +100,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bpf_check_classic()` (`EINVAL`). `Display` for `Insn` / `Program` prints an
   unknown opcode as `.word    0x000e  ; invalid opcode` instead of an ordinary
   mnemonic. Programs from `compile()` are unaffected.
+- **`compile(.., Target::Classic)` no longer returns programs over
+  `BPF_MAXINSNS`** (#203). A long straight-line filter (`ip[0]+1+1+...`, 4200
+  terms, 4204 instructions) compiled to `Ok`, and the kernel then rejected it
+  with an opaque `EINVAL` from `setsockopt(SO_ATTACH_FILTER)`, which accepts
+  at most 4096 instructions. `compile` (and `codegen::compile`) now returns
+  `Err(CodegenError)` ("filter expression is too complex: ...") for a classic
+  program longer than 4096 instructions; exactly 4096 still compiles.
+  libpcap 1.10.3 returns the oversized program from `pcap_compile` and only
+  fails at `pcap_setfilter`, so this is a deliberate, earlier failure.
+  `Target::Extended` is unaffected. The limit is exported as the new
+  `pktbaffle::bpf::BPF_MAXINSNS` constant and documented in the README and the
+  `compile` / `Target::Classic` rustdoc.
 
 ### Added
 
