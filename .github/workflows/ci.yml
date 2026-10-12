@@ -48,3 +48,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      # A 32-bit run: `vm::run` used to wrap its pc on 32-bit targets (#188).
+      - name: Test pktbaffle (32-bit)
+        if: runner.os == 'Windows'
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo test -p pktbaffle --features vm --target i686-pc-windows-msvc

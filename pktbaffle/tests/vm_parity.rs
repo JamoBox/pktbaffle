@@ -1057,3 +1057,76 @@ fn from_prefix_above_32_matches_like_a_host_mask() {
     assert!(!run_filter("net 10.1.2.3/32", &other));
     assert!(!run_filter("net 10.1.2.3/32", &neighbour));
 }
+
+// ── vm::run: JA with a huge `k` must fault, not wrap pc backwards (#188) ────
+// `pc.wrapping_add(k as usize)` wrapped on 32-bit targets, so `ja 0xFFFFFFFF`
+// jumped to itself and `vm::run` never returned (on 64-bit it walked off the
+// end and returned false).  The verdicts below are the issue's observations
+// on x86_64 (hang on i686): libpcap 1.10.3 `bpf_validate()` rejects `ja 5`
+// and `ja 0xFFFFFFFE` on a 2-insn program; `ja 0xFFFFFFFF` is not a clean
+// oracle (libpcap has its own u_int wrap quirk), so those are hand-derived.
+// Only a 32-bit run can fail before the fix; the loop is bounded by a
+// timeout so a regression fails instead of hanging the suite.
+
+/// Run `vm::run` on a small-stack thread, failing (not hanging) after 10 s.
+fn run_bounded(insns: Vec<pktbaffle::bpf::Insn>, pkt: &'static [u8]) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(|| pktbaffle::vm::run(&insns, pkt));
+            let _ = tx.send(r);
+        })
+        .expect("spawn thread");
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(verdict)) => verdict,
+        Ok(Err(_)) => panic!("vm::run panicked"),
+        Err(_) => panic!("vm::run did not return within 10 s (hang)"),
+    }
+}
+
+#[test]
+fn ja_with_huge_k_is_a_fault_not_a_wrapped_jump() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    // Self-loop on 32-bit before the fix.
+    assert!(!run_bounded(
+        vec![Insn::ja(u32::MAX), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+    // Backward loop to pc 0 on 32-bit before the fix.
+    assert!(!run_bounded(
+        vec![
+            Insn::ld_imm(1),
+            Insn::ja(0xFFFF_FFFE),
+            Insn::ret_k(BPF_ACCEPT)
+        ],
+        b"x"
+    ));
+    // Nearby huge and merely out-of-range targets fault as well.
+    for k in [0x8000_0000, 0xFFFF_FFFD, 5] {
+        assert!(
+            !run_bounded(vec![Insn::ja(k), Insn::ret_k(BPF_ACCEPT)], b"x"),
+            "ja {k:#x}"
+        );
+    }
+}
+
+#[test]
+fn ja_forward_within_program_still_works() {
+    use pktbaffle::bpf::{Insn, BPF_ACCEPT};
+
+    // [ja 1, ret 0, ret ACCEPT]: the control from the issue.
+    assert!(run_bounded(
+        vec![Insn::ja(1), Insn::ret_k(0), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+    // Jumping to exactly the last instruction is in range.
+    assert!(run_bounded(
+        vec![Insn::ja(0), Insn::ret_k(BPF_ACCEPT)],
+        b"x"
+    ));
+}
