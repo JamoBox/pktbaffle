@@ -127,6 +127,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same kind of error whether it fits in 64 bits (`greater 4294967296`) or not.
   Code matching `Error::LexError` for these inputs must also match
   `Error::ParseError`; the rejected set is unchanged.
+- **A bare integer is an IPv4 host or net** (#190). `host 10` and
+  `net 256` were rejected, and `net 0` was a /8. Now, as in libpcap, `host N`
+  (also `src host`, `dst host`, `src N`, `ip host`, `host 0x0a000001`) is the
+  exact address N (`host 10` is 0.0.0.10), and `net N` shifts N and an
+  all-ones mask left a byte at a time until the top byte is non-zero:
+  `net 256` is 1.0.0.0/16, `net 300` 1.44.0.0/16, `net 65536` 1.0.0.0/24,
+  `net 16777216` 1.0.0.0/32. `net 1` to `net 255` are still /8.
+  **Behaviour change:** `net 0` is now 0.0.0.0/32 (an exact address, as in
+  libpcap) instead of 0.0.0.0/8. Values above 32 bits are still rejected.
+  (`host`/`net` programs still omit libpcap's ARP/RARP legs, see #140.)
 
 ### Added
 

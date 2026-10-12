@@ -632,7 +632,7 @@ impl Parser<'_> {
                     )))
                 }
             }
-            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => self.parse_host(dir),
+            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) | Some(Token::Num(_)) => self.parse_host(dir),
             tok => Err(self.err(format!(
                 "expected 'host', 'net', 'port', 'portrange', or an IP address after direction qualifier, got {:?}",
                 tok
@@ -674,18 +674,27 @@ impl Parser<'_> {
         let tok_desc = format!("{:?}", self.cur_tok());
         let octs = match self.advance() {
             Some(Token::Ipv4(octs)) => *octs,
-            // Single-octet classful shorthand: `net 10` → `net 10.0.0.0/8`.
-            // Takes no `/len` or `mask`, as in libpcap's grammar.
+            // A bare integer is shifted left a byte at a time, with an all-ones
+            // mask, until its top byte is non-zero (libpcap's `gen_ncode`):
+            // `net 10` is 10.0.0.0/8, `net 256` is 1.0.0.0/16, `net 0` is /32.
+            // It takes no `/len` or `mask`, as in libpcap's grammar.
             Some(Token::Num(n)) => {
-                let n = *n;
-                if n > 0xff {
+                let Ok(mut addr) = u32::try_from(*n) else {
                     return Err(self.err(format!(
                         "expected IPv4 network after 'net', got {}",
                         tok_desc
                     )));
+                };
+                let mut mask = !0u32;
+                while addr != 0 && addr & 0xff00_0000 == 0 {
+                    addr <<= 8;
+                    mask <<= 8;
                 }
                 return Ok(Primitive::Net {
-                    net: IpNet::from_prefix(std::net::Ipv4Addr::new(n as u8, 0, 0, 0), 8),
+                    net: IpNet {
+                        addr: std::net::Ipv4Addr::from(addr),
+                        mask,
+                    },
                     dir,
                 });
             }
@@ -924,6 +933,10 @@ impl Parser<'_> {
         match self.advance() {
             Some(Token::Ipv4(octs)) => Ok(IpAddr::V4(std::net::Ipv4Addr::from(*octs))),
             Some(Token::Ipv6(a)) => Ok(IpAddr::V6(*a)),
+            // A bare integer is the 32-bit address: `host 10` is 0.0.0.10.
+            Some(&Token::Num(n)) if n <= u64::from(u32::MAX) => {
+                Ok(IpAddr::V4(std::net::Ipv4Addr::from(n as u32)))
+            }
             _ => Err(self.err(format!("expected IP address, got {}", tok_desc))),
         }
     }

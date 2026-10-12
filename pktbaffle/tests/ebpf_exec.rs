@@ -490,12 +490,14 @@ mod parity {
         "ether proto 0x86dd",
         // ── IPv4 hosts and networks
         "host 10.0.0.1",
+        "host 0x0a000001", // bare integer address (#190)
         "host 192.168.1.1",
         "src host 192.168.1.1",
         "dst host 10.0.0.1",
         "src or dst host 10.0.0.1",
         "src and dst host 192.168.1.1",
         "net 10.0.0.0/8",
+        "net 0xa0000", // bare integer shifted into 10.0.0.0/8 (#190)
         "src net 192.168.0.0/16",
         "dst net 10.0.0.0/8",
         "net 192.168.1.0 mask 255.255.255.0",

@@ -914,3 +914,35 @@ fn net_prefix_syntax_errors_rejected() {
         assert!(try_eth(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── A bare integer is an IPv4 host or net (#190) ─────────────────────────────
+// libpcap 1.10.3 accepts a plain integer wherever an IPv4 address is expected
+// (issue #190); the 32-bit limit applies.
+
+#[test]
+fn bare_integer_host_and_net_accepted() {
+    for f in [
+        "host 10",
+        "src host 10",
+        "dst host 10",
+        "ip host 10",
+        "host 0x0a000001",
+        "src 10",
+        "net 256",
+        "net 300",
+        "net 65536",
+        "net 16777216",
+        "net 0",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn bare_integer_over_32_bits_rejected() {
+    for f in ["host 4294967296", "net 4294967296"] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}

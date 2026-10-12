@@ -118,6 +118,8 @@ net ::/0                  # any IPv6 packet
 
 As in libpcap, the `/` is an ordinary token: `net 10.0.0.0 / 8` and `net 10.0.0.0/0x8` are the same as `net 10.0.0.0/8`, and the prefix length is required to follow it; a bare number after the address (`net 10.0.0.0 8`) is a syntax error, as is `net 10 mask 255.0.0.0`.
 
+A plain integer is accepted wherever an IPv4 address is: `host 10` matches the exact address 0.0.0.10 (`host 0x0a000001` is 10.0.0.1), and `net N` shifts N left a byte at a time until its top byte is non-zero, giving that many bits of prefix: `net 10` is 10.0.0.0/8, `net 256` is 1.0.0.0/16, `net 65536` is 1.0.0.0/24, and `net 0` or `net 16777216` match one exact address. Values above 32 bits are errors.
+
 ### Ports and port ranges
 
 ```

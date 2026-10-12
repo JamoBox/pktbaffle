@@ -1175,3 +1175,43 @@ fn spaced_and_hex_ipv4_prefix_match_like_glued() {
         assert!(!run_filter(f, &tcp([11, 0, 0, 1], IP_C, 1234, 80)), "{f}");
     }
 }
+
+// ── A bare integer is an IPv4 host or net (#190) ─────────────────────────────
+// Verdicts from the packets named in issue #190 (hand-derived from libpcap's
+// `gen_ncode`; no live libpcap was available).
+
+#[test]
+fn host_bare_integer_is_the_exact_address() {
+    let src_10 = tcp([0, 0, 0, 10], [9, 9, 9, 9], 1234, 80);
+    let dst_10 = tcp([9, 9, 9, 9], [0, 0, 0, 10], 1234, 80);
+    let dotted_10 = tcp([10, 0, 0, 0], [9, 9, 9, 9], 1234, 80);
+    for f in ["host 10", "ip host 10", "host 0xa"] {
+        assert!(run_filter(f, &src_10), "{f} src");
+        assert!(run_filter(f, &dst_10), "{f} dst");
+        assert!(!run_filter(f, &dotted_10), "{f} must not match 10.0.0.0");
+    }
+    assert!(run_filter("src host 10", &src_10));
+    assert!(!run_filter("src host 10", &dst_10));
+    assert!(run_filter("dst host 10", &dst_10));
+    assert!(!run_filter("dst host 10", &src_10));
+    assert!(run_filter(
+        "host 0x0a000001",
+        &tcp([10, 0, 0, 1], [9, 9, 9, 9], 1, 2)
+    ));
+}
+
+#[test]
+fn net_bare_integer_shifts_into_a_prefix() {
+    // (filter, matching source, non-matching source)
+    for (f, yes, no) in [
+        ("net 256", [1, 0, 0, 5], [1, 1, 0, 5]),
+        ("net 300", [1, 44, 5, 5], [1, 45, 5, 5]),
+        ("net 65536", [1, 0, 0, 77], [1, 0, 1, 77]),
+        ("net 16777216", [1, 0, 0, 0], [1, 0, 0, 1]),
+        ("net 10", [10, 9, 9, 9], [11, 9, 9, 9]),
+    ] {
+        assert!(run_filter(f, &tcp(yes, [9, 9, 9, 9], 1234, 80)), "{f} yes");
+        assert!(run_filter(f, &tcp([9, 9, 9, 9], yes, 1234, 80)), "{f} dst");
+        assert!(!run_filter(f, &tcp(no, [9, 9, 9, 9], 1234, 80)), "{f} no");
+    }
+}
