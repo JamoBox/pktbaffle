@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791839804539,
+  "lastUpdate": 1791840726868,
   "repoUrl": "https://github.com/JamoBox/pktbaffle",
   "entries": {
     "Benchmark": [
@@ -805,6 +805,168 @@ window.BENCHMARK_DATA = {
             "name": "dump_write/throughput",
             "value": 5311154,
             "range": "± 13509",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "2273100+JamoBox@users.noreply.github.com",
+            "name": "Pete Wicken",
+            "username": "JamoBox"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5a36d4b06b337b8dc0201585f30c7af5d2d39fba",
+          "message": "Merge pull request #231 from JamoBox/batch/1-chain-limits\n\nBatch 1: chain and recursion limits (#149, #199, #202, #229)",
+          "timestamp": "2026-10-12T22:27:12+01:00",
+          "tree_id": "10c096ba01ee46ec1be836f459d84a0de0beff14",
+          "url": "https://github.com/JamoBox/pktbaffle/commit/5a36d4b06b337b8dc0201585f30c7af5d2d39fba"
+        },
+        "date": 1791840726029,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "parse/simple",
+            "value": 73,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/medium",
+            "value": 181,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/complex",
+            "value": 840,
+            "range": "± 8",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "parse/boolean_chain",
+            "value": 1016,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/simple",
+            "value": 473,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/medium",
+            "value": 898,
+            "range": "± 2",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/complex",
+            "value": 2892,
+            "range": "± 41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "cbpf/boolean_chain",
+            "value": 2623,
+            "range": "± 6",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/simple",
+            "value": 324,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/complex",
+            "value": 1793,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "ebpf/boolean_chain",
+            "value": 2291,
+            "range": "± 4",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/simple/accept",
+            "value": 10,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/simple/reject",
+            "value": 11,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/complex/accept",
+            "value": 32,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "filter/complex/reject",
+            "value": 16,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "throughput/mixed_1000",
+            "value": 11549,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/construction",
+            "value": 6,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/to_owned",
+            "value": 14,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "packet/as_ref_fields",
+            "value": 5,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/unfiltered",
+            "value": 115790,
+            "range": "± 253",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/filter_match_all",
+            "value": 133451,
+            "range": "± 2438",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "file_capture/filter_reject_all",
+            "value": 135798,
+            "range": "± 377",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dump_write/throughput",
+            "value": 4925778,
+            "range": "± 8590",
             "unit": "ns/iter"
           }
         ]
