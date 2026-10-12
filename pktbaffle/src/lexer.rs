@@ -383,11 +383,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             }
             // Digit-first IPv6 (e.g. 2001:db8::1): MAC detection above didn't
             // match, but a trailing ':' may still begin an IPv6 address.
-            // Speculatively extend through hex digits and colons; commit only
-            // when the candidate contains '::' or two or more colons.
+            // Speculatively extend through hex digits, colons and dots (an
+            // embedded IPv4 tail, as in `64:ff9b::192.0.2.1`); commit only when
+            // the candidate contains '::' or two or more colons.
             if pos < len && bytes[pos] == b':' {
                 let mut tmp = pos;
-                while tmp < len && (bytes[tmp].is_ascii_hexdigit() || bytes[tmp] == b':') {
+                while tmp < len
+                    && (bytes[tmp].is_ascii_hexdigit() || bytes[tmp] == b':' || bytes[tmp] == b'.')
+                {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
@@ -1060,5 +1063,62 @@ mod tests {
             let tokens = lex(src).unwrap();
             assert_eq!(tokens[0].token, Token::Ipv4(octs, parts), "{src}");
         }
+    }
+
+    // ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────
+    // libpcap 1.10.3 accepts `64:ff9b::192.0.2.1` (RFC 6052) like the
+    // hex-group spelling; letter-first and `::` forms already lexed.
+
+    #[test]
+    fn digit_first_ipv6_with_embedded_ipv4() {
+        for (src, hex) in [
+            ("64:ff9b::192.0.2.1", "64:ff9b::c000:201"),
+            ("2001:db8::1.2.3.4", "2001:db8::102:304"),
+            ("1:2:3:4:5:6:1.2.3.4", "1:2:3:4:5:6:102:304"),
+            ("1::1.2.3.4", "1::102:304"),
+            // Already worked; guards for the other two lexer paths.
+            ("fe80::1.2.3.4", "fe80::102:304"),
+            ("a:b:c:d:e:f:1.2.3.4", "a:b:c:d:e:f:102:304"),
+            ("::ffff:1.2.3.4", "::ffff:102:304"),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens.len(), 1, "{src}");
+            assert_eq!(tokens[0].token, Token::Ipv6(hex.parse().unwrap()), "{src}");
+        }
+    }
+
+    #[test]
+    fn colon_sensitive_number_lexing_is_unchanged() {
+        // The digit-first IPv6 scan now accepts '.', so pin the colon cases.
+        let toks =
+            |s: &str| -> Vec<Token> { lex(s).unwrap().into_iter().map(|t| t.token).collect() };
+        assert_eq!(
+            toks("tcp[0:2]"),
+            [
+                Token::Tcp,
+                Token::LBracket,
+                Token::Num(0),
+                Token::Colon,
+                Token::Num(2),
+                Token::RBracket
+            ]
+        );
+        assert_eq!(
+            toks("ip[12:4] = 10"),
+            [
+                Token::Ip,
+                Token::LBracket,
+                Token::Num(12),
+                Token::Colon,
+                Token::Num(4),
+                Token::RBracket,
+                Token::Eq,
+                Token::Num(10)
+            ]
+        );
+        assert_eq!(
+            toks("00:11:22:33:44:55"),
+            [Token::Mac([0, 0x11, 0x22, 0x33, 0x44, 0x55])]
+        );
     }
 }

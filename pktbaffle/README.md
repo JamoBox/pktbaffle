@@ -101,6 +101,7 @@ host 192.168.1.1          # src or dst IPv4 address
 src host 10.0.0.1         # source address only
 dst host 8.8.8.8          # destination address only
 host 2001:db8::1          # IPv6 address
+host 64:ff9b::192.0.2.1   # IPv6 address with an embedded IPv4 tail
 ```
 
 Match by network prefix (CIDR notation or explicit mask):
