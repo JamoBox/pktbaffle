@@ -240,7 +240,7 @@ impl Parser<'_> {
                     | Token::Less
                     | Token::Greater
                     | Token::Gateway
-                    | Token::Ipv4(_)
+                    | Token::Ipv4(..)
                     | Token::Ipv6(_)
                     | Token::Num(_)
                     | Token::LBracket
@@ -504,7 +504,13 @@ impl Parser<'_> {
                 self.parse_portrange(Dir::SrcOrDst, None)
             }
 
-            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) => self.parse_host(Dir::SrcOrDst),
+            // A bare short address (`10.1`) is a syntax error in libpcap; it
+            // must not become an exact host, so require `host` or `net`.
+            Some(Token::Ipv4(_, parts)) if *parts < 4 => {
+                Err(self
+                    .err("a short IPv4 address needs 'host' or 'net' before it (e.g. host 10.1)"))
+            }
+            Some(Token::Ipv4(..)) | Some(Token::Ipv6(_)) => self.parse_host(Dir::SrcOrDst),
 
             // ── raw link-layer byte access: [offset:size] op value ───────────
             Some(Token::LBracket) => self.parse_byte_access(Layer::Raw),
@@ -632,7 +638,9 @@ impl Parser<'_> {
                     )))
                 }
             }
-            Some(Token::Ipv4(_)) | Some(Token::Ipv6(_)) | Some(Token::Num(_)) => self.parse_host(dir),
+            Some(Token::Ipv4(..)) | Some(Token::Ipv6(_)) | Some(Token::Num(_)) => {
+                self.parse_host(dir)
+            }
             tok => Err(self.err(format!(
                 "expected 'host', 'net', 'port', 'portrange', or an IP address after direction qualifier, got {:?}",
                 tok
@@ -643,6 +651,19 @@ impl Parser<'_> {
     // ── concrete primitive parsers ────────────────────────────────────────────
 
     fn parse_host(&mut self, dir: Dir) -> Result<Primitive> {
+        // A short dotted address names the network it starts: libpcap shifts it
+        // and an all-ones mask left by the octets missing, so `host 10.1`
+        // matches 10.1.0.0/16.
+        if let Some(&Token::Ipv4(octs, parts @ 2..=3)) = self.cur_tok() {
+            self.advance();
+            return Ok(Primitive::Net {
+                net: IpNet {
+                    addr: std::net::Ipv4Addr::from(octs),
+                    mask: !0u32 << (32 - 8 * u32::from(parts)),
+                },
+                dir,
+            });
+        }
         let addr = self.parse_ip()?;
         // libpcap reads `host <ipv6>/128` as a /128 net and rejects any other
         // length ("Mask syntax for networks only").
@@ -672,8 +693,8 @@ impl Parser<'_> {
 
     fn parse_net(&mut self, dir: Dir) -> Result<Primitive> {
         let tok_desc = format!("{:?}", self.cur_tok());
-        let octs = match self.advance() {
-            Some(Token::Ipv4(octs)) => *octs,
+        let (octs, parts) = match self.advance() {
+            Some(&Token::Ipv4(octs, parts)) => (octs, parts),
             // A bare integer is shifted left a byte at a time, with an all-ones
             // mask, until its top byte is non-zero (libpcap's `gen_ncode`):
             // `net 10` is 10.0.0.0/8, `net 256` is 1.0.0.0/16, `net 0` is /32.
@@ -732,25 +753,14 @@ impl Parser<'_> {
         } else if self.eat(&Token::Mask) {
             // `net <addr> mask <netmask>` syntax
             match self.advance() {
-                Some(Token::Ipv4(m)) => u32::from_be_bytes(*m),
+                Some(Token::Ipv4(m, _)) => u32::from_be_bytes(*m),
                 _ => return Err(self.err("expected IPv4 netmask after 'mask'")),
             }
         } else {
-            // Classful inference from address bytes
-            let m = if octs[3] != 0 {
-                32u8
-            } else if octs[2] != 0 {
-                24
-            } else if octs[1] != 0 {
-                16
-            } else {
-                8
-            };
-            if m == 0 {
-                0
-            } else {
-                !0u32 << (32 - m)
-            }
+            // No `/len` or `mask`: 8 bits per octet written, so `10.0` is /16
+            // and `10.0.0.0` is /32 (libpcap shifts the address and an
+            // all-ones mask left by the octets missing).
+            !0u32 << (32 - 8 * u32::from(parts))
         };
         Ok(Primitive::Net {
             net: IpNet { addr, mask },
@@ -931,7 +941,7 @@ impl Parser<'_> {
     fn parse_ip(&mut self) -> Result<IpAddr> {
         let tok_desc = format!("{:?}", self.cur_tok());
         match self.advance() {
-            Some(Token::Ipv4(octs)) => Ok(IpAddr::V4(std::net::Ipv4Addr::from(*octs))),
+            Some(Token::Ipv4(octs, _)) => Ok(IpAddr::V4(std::net::Ipv4Addr::from(*octs))),
             Some(Token::Ipv6(a)) => Ok(IpAddr::V6(*a)),
             // A bare integer is the 32-bit address: `host 10` is 0.0.0.10.
             Some(&Token::Num(n)) if n <= u64::from(u32::MAX) => {

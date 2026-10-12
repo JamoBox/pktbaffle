@@ -1215,3 +1215,52 @@ fn net_bare_integer_shifts_into_a_prefix() {
         assert!(!run_filter(f, &tcp(no, [9, 9, 9, 9], 1234, 80)), "{f} no");
     }
 }
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ───────
+// Verdicts are the libpcap 1.10.3 results tabulated in issue #158 (packet
+// `Ether()/IP(src=..., dst="192.0.2.1")/TCP()`), plus the matching cases that
+// follow from the same masks.
+
+fn src_pkt(src: [u8; 4]) -> Vec<u8> {
+    tcp(src, [192, 0, 2, 1], 1234, 80)
+}
+
+#[test]
+fn net_dotted_mask_follows_octet_count() {
+    for (f, src, want) in [
+        // All NOMATCH in libpcap (the old trailing-zero guess matched them).
+        ("net 10.0.0.0", [10, 0, 0, 1], false),
+        ("net 10.0.0.0", [10, 3, 4, 5], false),
+        ("net 192.168.1.0", [192, 168, 1, 77], false),
+        ("net 10.0", [10, 1, 1, 1], false),
+        ("net 10.0.0", [10, 0, 1, 1], false),
+        ("net 10.1.0", [10, 1, 1, 1], false),
+        ("net 0", [0, 1, 2, 3], false),
+        // What the same masks do match.
+        ("net 10.0.0.0", [10, 0, 0, 0], true),
+        ("net 192.168.1.0", [192, 168, 1, 0], true),
+        ("net 10.0", [10, 0, 5, 5], true),
+        ("net 10.0.0", [10, 0, 0, 9], true),
+        ("net 10.1.0", [10, 1, 0, 200], true),
+        ("net 0", [0, 0, 0, 0], true),
+        // `net 10` stays /8.
+        ("net 10", [10, 99, 1, 1], true),
+        ("net 10", [11, 0, 0, 1], false),
+    ] {
+        assert_eq!(run_filter(f, &src_pkt(src)), want, "{f} on src {src:?}");
+    }
+}
+
+#[test]
+fn host_short_dotted_matches_the_network() {
+    // MATCH in libpcap: `host 10.1` is 10.1.0.0/16, `host 10.1.2` is /24.
+    for f in ["host 10.1", "ip host 10.1", "src host 10.1"] {
+        assert!(run_filter(f, &src_pkt([10, 1, 2, 3])), "{f}");
+    }
+    assert!(run_filter("dst host 10.1", &tcp(IP_B, [10, 1, 9, 9], 1, 2)));
+    assert!(!run_filter("src host 10.1", &src_pkt([10, 2, 2, 3])));
+    assert!(run_filter("host 10.1.2", &src_pkt([10, 1, 2, 77])));
+    assert!(!run_filter("host 10.1.2", &src_pkt([10, 1, 3, 77])));
+    // Four octets are still the exact host.
+    assert!(!run_filter("host 10.1.2.3", &src_pkt([10, 1, 2, 4])));
+}

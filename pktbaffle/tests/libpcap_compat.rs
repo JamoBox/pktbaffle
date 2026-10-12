@@ -946,3 +946,28 @@ fn bare_integer_over_32_bits_rejected() {
         assert!(try_eth(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ───────
+// libpcap 1.10.3 promotes a short dotted id by its octet count (issue #158).
+
+#[test]
+fn short_dotted_host_and_net_accepted() {
+    for f in [
+        "net 10.0.0.0",
+        "net 10.0",
+        "net 10.0.0",
+        "host 10.1",
+        "host 10.1.2",
+        "src host 10.1",
+        "ip host 10.1",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn short_dotted_address_without_qualifier_rejected() {
+    assert!(try_eth("10.1").is_err(), "libpcap: syntax error");
+}
