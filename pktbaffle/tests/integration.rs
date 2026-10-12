@@ -1479,3 +1479,100 @@ fn deep_parens_mixed_with_operators_compile_on_small_stack() {
         }
     });
 }
+
+// ── Regression: compile time is linear in chain length (#202) ────────────────
+// Long left-deep `and` / `or` / `!` chains compiled in quadratic time: every OR
+// recomputed its arms' guard sets, every AND rescanned its left spine for a
+// leading `vlan` and copied the accumulated failure list, and jump threading
+// chased each `ja` trampoline chain to its end. A 32000-term `tcp or ...`
+// took 8.6 s (release). These tests compare sizes n and 4n instead of timing
+// against a threshold: linear work grows ~4x, quadratic ~16x.
+
+/// Fastest of three runs of `f`, in seconds.
+fn fastest(f: impl Fn()) -> f64 {
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_secs_f64()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// `f(4 * n)` must take less than 10x as long as `f(n)`, with 5 ms of slack
+/// for timer noise.
+fn assert_linear(name: &str, n: usize, f: impl Fn(usize)) {
+    let small = fastest(|| f(n));
+    let large = fastest(|| f(4 * n));
+    assert!(
+        large < 10.0 * small + 0.005,
+        "{name}: {n} terms took {small:.4}s but {} took {large:.4}s",
+        4 * n
+    );
+}
+
+#[test]
+fn compile_time_is_linear_in_chain_length() {
+    let run = |target: Target, filter: String| {
+        // Ok or "too complex" Err: only the time matters here.
+        let _ = compile(&filter, LinkType::Ethernet, target);
+    };
+    for target in [Target::Classic, Target::Extended] {
+        assert_linear(&format!("{target:?} or"), 8000, |n| {
+            run(target, chain("tcp", "or", n))
+        });
+        assert_linear(&format!("{target:?} and"), 8000, |n| {
+            run(target, chain("tcp", "and", n))
+        });
+        assert_linear(&format!("{target:?} !"), 64_000, |n| {
+            run(target, format!("{}tcp", "!".repeat(n)))
+        });
+        // Right-deep, through parentheses (within the 9995 limit).
+        assert_linear(&format!("{target:?} nested and"), 2000, |n| {
+            run(
+                target,
+                format!("{}tcp{}", "tcp and (".repeat(n), ")".repeat(n)),
+            )
+        });
+        assert_linear(&format!("{target:?} nested or"), 2000, |n| {
+            run(
+                target,
+                format!("{}tcp{}", "tcp or (".repeat(n), ")".repeat(n)),
+            )
+        });
+    }
+}
+
+#[test]
+fn optimizer_time_is_linear_in_ja_chain_length() {
+    use pktbaffle::bpf::Insn;
+
+    // `n` chained `ja 0` trampolines in front of `ret #-1`: every one threads
+    // to the `ret`. (#202: 64004 of these took about 1.5 s.)
+    assert_linear("optimize ja chain", 16_000, |n| {
+        let mut insns = vec![Insn::ja(0); n];
+        insns.push(Insn::ret_k(0xffff_ffff));
+        pktbaffle::optimizer::optimize(&mut insns);
+        // The first `ja` now jumps straight to the `ret`; the rest are dead.
+        assert_eq!(insns, [Insn::ja(0), Insn::ret_k(0xffff_ffff)]);
+    });
+}
+
+#[test]
+fn hundred_thousand_term_chains_compile_on_small_stack() {
+    // #149 acceptance, practical only once compile time is linear: on a
+    // 256 KiB stack a 100000-term `or` / `and` chain returns for both targets.
+    on_small_stack(256, || {
+        for op in ["or", "and"] {
+            let f = chain("tcp", op, 100_000);
+            for &target in &[Target::Classic, Target::Extended] {
+                let _ = compile(&f, LinkType::Ethernet, target);
+            }
+        }
+        // The `and` chain is still just `tcp` in cBPF.
+        assert_eq!(
+            eth_prog(&chain("tcp", "and", 100_000)).instructions(),
+            eth_prog("tcp").instructions()
+        );
+    });
+}

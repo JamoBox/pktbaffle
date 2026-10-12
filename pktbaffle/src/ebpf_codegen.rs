@@ -35,7 +35,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ast::*;
-use crate::codegen::LinkType;
+use crate::codegen::{concat, LinkType};
 use crate::ebpf::{self, Insn, Program, R2, R3, R4, R5, R6, XDP_DROP, XDP_PASS};
 use crate::error::{Error, Result};
 
@@ -309,7 +309,7 @@ impl Codegen {
                     let right_p = done.pop().expect("AND right operand");
                     done.push(Patches {
                         success: right_p.success,
-                        failure: left_failure.into_iter().chain(right_p.failure).collect(),
+                        failure: concat(left_failure, right_p.failure),
                     });
                 }
                 // OR: left's failures try right; left's fall-through success
@@ -326,9 +326,8 @@ impl Codegen {
                     let right_p = done.pop().expect("OR right operand");
                     let mut success = left_success;
                     success.push(Patch(ja_idx));
-                    success.extend(right_p.success);
                     done.push(Patches {
-                        success,
+                        success: concat(success, right_p.success),
                         failure: right_p.failure,
                     });
                 }
@@ -339,13 +338,11 @@ impl Codegen {
                     let ja_idx = self.push(Insn::ja(0));
                     let not_succ_start = self.insns.len();
                     self.resolve_all(inner_p.failure, not_succ_start)?;
+                    let mut failure = inner_p.success;
+                    failure.push(Patch(ja_idx));
                     done.push(Patches {
                         success: vec![],
-                        failure: inner_p
-                            .success
-                            .into_iter()
-                            .chain(std::iter::once(Patch(ja_idx)))
-                            .collect(),
+                        failure,
                     });
                 }
             }

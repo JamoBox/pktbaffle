@@ -58,6 +58,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit. Offset expressions inside `[...]` keep their own unchanged limits
   (31 nested `(`, 127 unary `-`), now independent of the surrounding
   parentheses.
+- **Compile time is linear in the length of `and` / `or` / `not` chains**
+  (#202). Several codegen steps re-walked or re-copied everything before
+  them: cBPF recomputed guard sets at every `or` and rescanned for a leading
+  `vlan` at every `and`, both backends copied the accumulated failure list at
+  every `and`, and jump threading chased every `ja` trampoline chain to its
+  end. A 32000-term `tcp or ...` took 8.6 s (release) and a 32000-term
+  `tcp and ...` 2.4 s; they now take about 18 ms and 9 ms, and
+  `optimizer::optimize` on 64004 chained `ja`s about 1 ms instead of 1.5 s.
+  Generated code is unchanged.
 
 ### Added
 

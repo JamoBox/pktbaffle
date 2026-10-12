@@ -1006,3 +1006,20 @@ fn thousand_nested_parens_match_like_tcp() {
     assert!(!run_filter(&not_f, &tcp_pkt));
     assert!(run_filter(&not_f, &udp_pkt));
 }
+
+// ── Very long chains, now compiled in linear time (#202) ────────────────────
+// Hand-derived verdicts, as for #149 above: a 32000-term `tcp and ...` is
+// `tcp`, and 256000 `!`s cancel out.
+
+#[test]
+fn very_long_and_and_not_chains_match_like_tcp() {
+    let tcp_pkt = tcp(IP_A, IP_B, 1234, 80);
+    let udp_pkt = udp(IP_A, IP_B, 1234, 53);
+    for f in [
+        vec!["tcp"; 32_000].join(" and "),
+        format!("{}tcp", "!".repeat(256_000)),
+    ] {
+        assert!(run_filter(&f, &tcp_pkt));
+        assert!(!run_filter(&f, &udp_pkt));
+    }
+}
