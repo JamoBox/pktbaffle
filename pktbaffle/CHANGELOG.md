@@ -75,6 +75,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
   and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
   printed as `..`, so a million-term chain formats to a short string.
+- **`ast::IpNet::from_prefix` no longer panics or wraps for a prefix length
+  above 32** (#187). `from_prefix(addr, 33)` (or 64, 255, ...) panicked with
+  "attempt to subtract with overflow" in debug builds and returned a wrong
+  mask in release builds (33 gave `0x80000000`), which `compile()` accepted
+  silently. The signature is unchanged, so out-of-range lengths are now
+  **clamped to /32** (mask `0xffff_ffff`) and documented as such; 0-32 are
+  unchanged. `net 10.0.0.0/33` in a filter string is still a parse error, as
+  in libpcap 1.10.3.
 
 ### Added
 

@@ -1023,3 +1023,37 @@ fn very_long_and_and_not_chains_match_like_tcp() {
         assert!(!run_filter(&f, &udp_pkt));
     }
 }
+
+// ── IpNet::from_prefix above /32 clamps instead of wrapping (#187) ──────────
+// Before the fix a release build returned mask 0x80000000 for /33, so the
+// program tested only the top address bit: 1.1.1.1 -> 200.9.9.9 matched
+// (src top bit clear).  Hand-derived: /33 is documented to clamp to /32, i.e.
+// it matches exactly like `net 10.1.2.3/32`.  libpcap rejects the string form.
+
+#[test]
+fn from_prefix_above_32_matches_like_a_host_mask() {
+    use pktbaffle::ast::{Dir, Expr, IpNet, Primitive};
+    use pktbaffle::codegen;
+    use std::net::Ipv4Addr;
+
+    let host = tcp([10, 1, 2, 3], [1, 1, 1, 1], 1234, 80);
+    let other = tcp([1, 1, 1, 1], [200, 9, 9, 9], 1234, 80);
+    let neighbour = tcp([10, 1, 2, 4], [1, 1, 1, 1], 1234, 80);
+    for len in [33u8, 64, 255] {
+        let net = IpNet::from_prefix(Ipv4Addr::new(10, 1, 2, 3), len);
+        let e = Expr::Primitive(Primitive::Net {
+            net,
+            dir: Dir::SrcOrDst,
+        });
+        let prog = codegen::compile(&e, LinkType::Ethernet).unwrap();
+        assert!(pktbaffle::vm::run(prog.instructions(), &host), "/{len}");
+        assert!(!pktbaffle::vm::run(prog.instructions(), &other), "/{len}");
+        assert!(
+            !pktbaffle::vm::run(prog.instructions(), &neighbour),
+            "/{len}"
+        );
+    }
+    assert!(run_filter("net 10.1.2.3/32", &host));
+    assert!(!run_filter("net 10.1.2.3/32", &other));
+    assert!(!run_filter("net 10.1.2.3/32", &neighbour));
+}
