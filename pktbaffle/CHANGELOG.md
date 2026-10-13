@@ -75,6 +75,105 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
   and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
   printed as `..`, so a million-term chain formats to a short string.
+- **Integer literals follow C syntax, as in libpcap** (#157). A leading `0`
+  now makes a literal octal: `tcp port 010` is port 8, `ip[010]` is `ip[8]`,
+  `ip proto 017` is protocol 15, `vlan 010` is VLAN 8, `ether proto 0100` is
+  0x40, `len = 0100` is 64 and `net 10.0.0.0/010` is a /8 (all were read as
+  decimal, so they compiled but matched different packets). A leading-zero
+  literal with an 8 or 9 (`tcp port 08`, `ether proto 0800`, `vlan 08`) is now
+  an error, as in libpcap ("number 08 contains non-octal digit"); write
+  `0x0800`. `0` and `00` are still 0, and `/0x8` is now accepted as a prefix
+  length (it was rejected). **Behaviour change** for filters that relied on
+  zero-padded numbers being decimal. A literal over 32 bits is rejected at
+  lex time with a `ParseError` naming it (as libpcap's "overflows 32 bits");
+  a malformed number (`0x`, `12abc`) now reports the same way instead of as
+  an `unexpected character` `LexError` (#210 tracks the rest of the
+  diagnostics).
+- **Dotted IPv4 literals accept zero-padded octets** (#191). `host 010.1.2.3`,
+  `host 1.2.3.04`, `host 192.168.001.001`, `net 010.0.0.0/8` and
+  `net 10.0.0.0 mask 255.255.255.000` failed with `unexpected character` at
+  the start of the token (the 1-3 octet forms already worked). Each octet is
+  decimal with leading zeros allowed, as in libpcap (`010` is 10, not octal),
+  for any number of octets. A bad octet (`10.256.0.1`, `1.2.3.4.5`) is now a
+  `ParseError` naming the literal ("invalid IPv4 address '10.256.0.1' at
+  offset 5") instead of a `LexError` quoting its first digit.
+- **`/` before a prefix length is an ordinary token, so spacing, hex and
+  `::` networks work** (#194, #173). The lexer glued `/<decimal digits>` onto
+  a preceding IPv4 or IPv6 literal, except after an address starting with
+  `::`, and the parser took any number after an address as the prefix. Now
+  `/` is always lexed on its own and `parse_net` reads `/` followed by an
+  ordinary integer. Accepted, as in libpcap: `net 10.0.0.0 / 8`,
+  `net 10.0.0.0 /8`, `net 10.0.0.0/ 8`, `net 10.0.0.0/0x8`,
+  `net 2001:db8:: /32`, and every network written with a leading `::`
+  (`net ::/0`, `net ::1/128`, `net ::ffff:0:0/96`, `ip6 net ::/32`,
+  `src net ::1/128`; these failed with "IPv6 net requires a CIDR prefix
+  length"). `host ::1/128` is accepted as a /128 (any other length after
+  `host`, or an IPv4 `host x/len`, is an error, as in libpcap). **Behaviour
+  change:** a number with no `/` after an address, which was read as a
+  prefix length (`net 10.0.0.0 8`, `net 10 8`, `src net 192.168.1.0 24 and
+  port 80`), and `net 10 mask 255.0.0.0`, are now errors (libpcap: syntax
+  error). A missing or non-numeric length (`net 10.0.0.0/`) is a
+  `ParseError` instead of a `LexError` with a misleading offset.
+- **Errors for malformed numbers and prefix lengths point at the problem**
+  (#210). `net 10.0.0.0/` and `net 10.0.0.0/abc` reported
+  `unexpected character '/' at offset 13` (one past the `/`, and past the end
+  of the input for a trailing `/`); `port 12abc`, `host 10.0.0.256`,
+  `ip[0x]=1` and `port 99999999999999999999` reported their first digit (or a
+  hard-coded `'0'`) as "unexpected". With #157, #191 and #194 these are now a
+  `ParseError` naming the literal and its offset ("invalid number '12abc' at
+  offset 5", "invalid IPv4 address '10.0.0.256' at offset 5", "expected a
+  prefix length after '/' at offset 12"), and every remaining `LexError`
+  satisfies `filter[offset..].starts_with(ch)`. A literal over 32 bits is the
+  same kind of error whether it fits in 64 bits (`greater 4294967296`) or not.
+  Code matching `Error::LexError` for these inputs must also match
+  `Error::ParseError`; the rejected set is unchanged.
+- **A bare integer is an IPv4 host or net** (#190). `host 10` and
+  `net 256` were rejected, and `net 0` was a /8. Now, as in libpcap, `host N`
+  (also `src host`, `dst host`, `src N`, `ip host`, `host 0x0a000001`) is the
+  exact address N (`host 10` is 0.0.0.10), and `net N` shifts N and an
+  all-ones mask left a byte at a time until the top byte is non-zero:
+  `net 256` is 1.0.0.0/16, `net 300` 1.44.0.0/16, `net 65536` 1.0.0.0/24,
+  `net 16777216` 1.0.0.0/32. `net 1` to `net 255` are still /8.
+  **Behaviour change:** `net 0` is now 0.0.0.0/32 (an exact address, as in
+  libpcap) instead of 0.0.0.0/8. Values above 32 bits are still rejected.
+  (`host`/`net` programs still omit libpcap's ARP/RARP legs, see #140.)
+- **Dotted IPv4 `host` / `net` take their mask from the octets written, as
+  libpcap** (#158). The lexer zero-padded `10.0` and `10.0.0` and forgot how
+  many octets there were, so `net` guessed the prefix from trailing zero
+  octets (`net 10.0.0.0` was /8, `net 192.168.1.0` /24, `net 10.0` /8) and
+  `host 10.1` was the exact host 10.1.0.0. Now the mask is 8 bits per octet
+  written: `net 10.0.0.0` and `net 192.168.1.0` match only that address,
+  `net 10.0` is /16, `net 10.0.0` and `net 10.1.0` are /24, and `host 10.1` /
+  `host 10.1.2` match the /16 / /24 they start. `net 10`, `net 192.168`,
+  `net 10.0.1` and explicit `/len` or `mask` are unchanged. **Behaviour
+  change:** filters that relied on `net a.b.c.0` meaning the whole /24 (or
+  `a.0.0.0` the /8) now match one address; write the prefix. A bare short
+  address with no `host` or `net` (`10.1`) is now an error instead of the
+  host 10.1.0.0. (An unqualified full address such as `10.0.0.1` is still
+  taken as `host`.)
+- **IPv6 literals that start with a digit accept an embedded IPv4 tail**
+  (#192). `host 64:ff9b::192.0.2.1` (NAT64), `host 2001:db8::1.2.3.4`,
+  `host 1:2:3:4:5:6:1.2.3.4` and `host 1::1.2.3.4` failed with
+  `unexpected character '.'`, although the same forms starting with a letter
+  or `::` (`fe80::1.2.3.4`, `::ffff:1.2.3.4`) and the hex spelling
+  (`64:ff9b::c000:201`) worked. They now compile to the same program as the
+  hex spelling.
+- **IPv6 `net <addr>` without a prefix length is a /128** (#174). `net ::1`,
+  `net 2001:db8::1`, `net 2001:db8::`, `ip6 net ::1`, `src net fe80::1` and
+  `dst net fe80::1` were rejected with "IPv6 net requires a CIDR prefix
+  length"; libpcap accepts them and matches exactly like `host <addr>` (and
+  like IPv4 `net 10.1.2.3`, which was already accepted). `net X/len` is
+  unchanged and `net ::1/129` is still an error.
+- **`net` with bits set outside the prefix or mask is an error** (#208).
+  `net 192.168.1.5/24`, `net 10.1.0.1/24`, `net 10.1.2/16`,
+  `net 10.1.2.0 mask 255.255.0.0`, `net 10.0.0.0 mask 0.0.0.0`,
+  `net 10.0.0.0/0`, `net 2001:db8::1/32`, `net fe80::1/10` and
+  `net 2001:db8::/0` compiled by silently ANDing the address with the mask
+  (`net 192.168.1.5/24` became the whole /24, `net 10.0.0.0/0` every IPv4
+  packet); libpcap fails with `non-network bits set in "..."`, and so do we
+  now. Write the network address (`net 192.168.1.0/24`) or `net 0.0.0.0/0` /
+  `net ::/0` for match-all. Nets whose address fits the mask (`net 10.1/24`,
+  `net 10.0.0.0 mask 255.0.255.0`, `net fe80::/10`) are unchanged.
 
 ### Added
 

@@ -105,7 +105,10 @@ pub enum Token {
 
     // ── literals ─────────────────────────────────────────────────────────────
     Num(u64),
-    Ipv4([u8; 4]),
+    /// A dotted address zero-padded to four octets, and how many octets were
+    /// written (2-4): libpcap's mask for an un-prefixed `host`/`net` is 8 bits
+    /// per octet written.
+    Ipv4([u8; 4], u8),
     Ipv6(std::net::Ipv6Addr),
     Mac([u8; 6]),
     Ident(String),
@@ -117,9 +120,8 @@ pub struct Spanned {
     /// The token value.
     pub token: Token,
     /// Byte offset of this token's first character in the original input.
-    /// Retained for future diagnostic spans; not read internally yet (the
-    /// lexer is a private module since 0.2.0, so the field is not public API).
-    #[allow(dead_code)]
+    /// Used by the parser to say where a prefix length is missing (the lexer
+    /// is a private module since 0.2.0, so the field is not public API).
     pub offset: usize,
 }
 
@@ -131,7 +133,8 @@ pub struct Spanned {
 /// # Errors
 ///
 /// Returns [`crate::Error::LexError`] if the input contains a character that
-/// is not part of the filter grammar.
+/// is not part of the filter grammar, and [`crate::Error::ParseError`] naming
+/// the literal if a number is malformed (`08`, `0x`, or over 32 bits).
 ///
 /// # Example
 ///
@@ -324,10 +327,7 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             while pos < len && bytes[pos].is_ascii_hexdigit() {
                 pos += 1;
             }
-            let n = u64::from_str_radix(&src[start + 2..pos], 16).map_err(|_| Error::LexError {
-                offset: start,
-                ch: '0',
-            })?;
+            let n = parse_int(&src[start..pos], start)?;
             tokens.push(Spanned {
                 token: Token::Num(n),
                 offset: start,
@@ -383,11 +383,14 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
             }
             // Digit-first IPv6 (e.g. 2001:db8::1): MAC detection above didn't
             // match, but a trailing ':' may still begin an IPv6 address.
-            // Speculatively extend through hex digits and colons; commit only
-            // when the candidate contains '::' or two or more colons.
+            // Speculatively extend through hex digits, colons and dots (an
+            // embedded IPv4 tail, as in `64:ff9b::192.0.2.1`); commit only when
+            // the candidate contains '::' or two or more colons.
             if pos < len && bytes[pos] == b':' {
                 let mut tmp = pos;
-                while tmp < len && (bytes[tmp].is_ascii_hexdigit() || bytes[tmp] == b':') {
+                while tmp < len
+                    && (bytes[tmp].is_ascii_hexdigit() || bytes[tmp] == b':' || bytes[tmp] == b'.')
+                {
                     tmp += 1;
                 }
                 let candidate = &src[start..tmp];
@@ -398,22 +401,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                             offset: start,
                         });
                         pos = tmp;
-                        if pos < len && bytes[pos] == b'/' {
-                            pos += 1;
-                            let pl_start = pos;
-                            while pos < len && bytes[pos].is_ascii_digit() {
-                                pos += 1;
-                            }
-                            let n: u64 =
-                                src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                                    offset: pl_start,
-                                    ch: '/',
-                                })?;
-                            tokens.push(Spanned {
-                                token: Token::Num(n),
-                                offset: pl_start,
-                            });
-                        }
                         continue;
                     }
                 }
@@ -424,26 +411,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                 token: tok,
                 offset: start,
             });
-            // If this was an IPv4 address and the next char is '/', consume
-            // the prefix length as a separate Num token (CIDR notation).
-            if matches!(tokens.last(), Some(s) if matches!(s.token, Token::Ipv4(_)))
-                && pos < len
-                && bytes[pos] == b'/'
-            {
-                pos += 1; // consume '/'
-                let pl_start = pos;
-                while pos < len && bytes[pos].is_ascii_digit() {
-                    pos += 1;
-                }
-                let n: u64 = src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                    offset: pl_start,
-                    ch: '/',
-                })?;
-                tokens.push(Spanned {
-                    token: Token::Num(n),
-                    offset: pl_start,
-                });
-            }
             continue;
         }
 
@@ -471,21 +438,6 @@ pub fn lex(src: &str) -> Result<Vec<Spanned>> {
                         token: Token::Ipv6(addr),
                         offset: start,
                     });
-                    if pos < len && bytes[pos] == b'/' {
-                        pos += 1;
-                        let pl_start = pos;
-                        while pos < len && bytes[pos].is_ascii_digit() {
-                            pos += 1;
-                        }
-                        let n: u64 = src[pl_start..pos].parse().map_err(|_| Error::LexError {
-                            offset: pl_start,
-                            ch: '/',
-                        })?;
-                        tokens.push(Spanned {
-                            token: Token::Num(n),
-                            offset: pl_start,
-                        });
-                    }
                     continue;
                 }
             }
@@ -525,29 +477,26 @@ fn looks_like_mac(s: &str) -> bool {
 }
 
 fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
-    // IPv4 (contains a dot)
+    // IPv4 (contains a dot): up to four decimal octets, leading zeros allowed
+    // (`010` is 10, as in libpcap). Fewer than four are zero-padded; the token
+    // keeps how many were written, which sets the mask of a bare `host`/`net`.
     if raw.contains('.') {
-        let addr_part = raw.split('/').next().unwrap();
-        if let Ok(addr) = addr_part.parse::<std::net::Ipv4Addr>() {
-            return Ok(Token::Ipv4(addr.octets()));
-        }
-        // Partial IPv4 (1–3 octets): zero-pad and emit as Ipv4 for classful net shorthand.
-        let parts: Vec<&str> = addr_part.split('.').collect();
-        if !parts.is_empty() && parts.len() <= 3 {
-            let mut octets = [0u8; 4];
-            let mut valid = true;
-            for (i, p) in parts.iter().enumerate() {
-                if let Ok(n) = p.parse::<u8>() {
-                    octets[i] = n;
-                } else {
-                    valid = false;
-                    break;
+        let mut octets = [0u8; 4];
+        let mut parts = 0;
+        for (i, p) in raw.split('.').enumerate() {
+            match (octets.get_mut(i), p.parse::<u8>()) {
+                (Some(o), Ok(n)) => {
+                    *o = n;
+                    parts = i as u8 + 1;
+                }
+                _ => {
+                    return Err(Error::ParseError {
+                        message: format!("invalid IPv4 address '{raw}' at offset {offset}"),
+                    })
                 }
             }
-            if valid {
-                return Ok(Token::Ipv4(octets));
-            }
         }
+        return Ok(Token::Ipv4(octets, parts));
     }
     // IPv6 (contains "::" or two or more colons)
     if looks_like_ipv6(raw) {
@@ -561,14 +510,40 @@ fn parse_numlike(raw: &str, offset: usize) -> Result<Token> {
             return Ok(Token::Mac(mac));
         }
     }
-    // Plain decimal integer
-    if let Ok(n) = raw.parse::<u64>() {
-        return Ok(Token::Num(n));
+    parse_int(raw, offset).map(Token::Num)
+}
+
+/// Parse an integer literal the way libpcap's scanner does: `0x`/`0X` hex, a
+/// leading `0` octal (so `08` is an error), otherwise decimal, at most 32 bits.
+fn parse_int(raw: &str, offset: usize) -> Result<u64> {
+    let (digits, radix) = if let Some(hex) = raw.strip_prefix("0x").or(raw.strip_prefix("0X")) {
+        (hex, 16)
+    } else if let Some(oct) = raw.strip_prefix('0').filter(|o| !o.is_empty()) {
+        (oct, 8)
+    } else {
+        (raw, 10)
+    };
+    let invalid = |why: &str| Error::ParseError {
+        message: format!("invalid number '{raw}' at offset {offset}: {why}"),
+    };
+    if digits.is_empty() {
+        return Err(invalid("expected digits"));
     }
-    Err(Error::LexError {
-        offset,
-        ch: raw.chars().next().unwrap_or('?'),
-    })
+    let mut n = 0u64;
+    for c in digits.chars() {
+        let d = c.to_digit(radix).ok_or_else(|| {
+            invalid(if radix == 8 && c.is_ascii_digit() {
+                "contains non-octal digit"
+            } else {
+                "contains invalid digit"
+            })
+        })?;
+        n = n * u64::from(radix) + u64::from(d);
+        if n > u64::from(u32::MAX) {
+            return Err(invalid("overflows 32 bits"));
+        }
+    }
+    Ok(n)
 }
 
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -896,5 +871,254 @@ mod tests {
         assert!(!looks_like_mac("aa:bb:cc:dd:ee:ff:00")); // 6 colons
         assert!(!looks_like_mac(""));
         assert!(!looks_like_mac("no colons here"));
+    }
+
+    // ── Integer literals follow C syntax, like libpcap's scanner (#157) ──────
+    // libpcap 1.10.3 (scanner.l `stou`): `0x` hex, a leading `0` octal, else
+    // decimal; `08` is "number 08 contains non-octal digit"; over 32 bits is an
+    // error. Expected values hand-derived from that source and issue #157.
+
+    fn lex_num(src: &str) -> Result<u64> {
+        match lex(src)?.as_slice() {
+            [Spanned {
+                token: Token::Num(n),
+                ..
+            }] => Ok(*n),
+            t => panic!("{src:?} lexed to {t:?}, not a single number"),
+        }
+    }
+
+    #[test]
+    fn leading_zero_is_octal() {
+        for (src, want) in [
+            ("010", 8),
+            ("0100", 64),
+            ("017", 15),
+            ("0777", 511),
+            ("00", 0),
+            ("0", 0),
+        ] {
+            assert_eq!(lex_num(src).unwrap(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn decimal_and_hex_unchanged() {
+        for (src, want) in [
+            ("10", 10),
+            ("100", 100),
+            ("4294967295", 0xffff_ffff),
+            ("0x10", 16),
+            ("0X1f", 31),
+            ("0xffffffff", 0xffff_ffff),
+        ] {
+            assert_eq!(lex_num(src).unwrap(), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn non_octal_digit_or_overflow_is_rejected_naming_the_literal() {
+        for src in [
+            "08",
+            "09",
+            "0800",
+            "019",
+            "4294967296",
+            "99999999999999999999",
+            "0x100000000",
+            "0x",
+            "12abc",
+        ] {
+            let Err(Error::ParseError { message }) = lex(src) else {
+                panic!("{src:?} must be rejected with a ParseError naming it");
+            };
+            assert!(message.contains(&format!("'{src}'")), "{src}: {message}");
+        }
+    }
+
+    #[test]
+    fn dotted_octets_stay_decimal() {
+        // Only a lone integer is octal; `010` in a dotted quad is 10.
+        let tokens = lex("10.010.0").unwrap();
+        assert_eq!(tokens[0].token, Token::Ipv4([10, 10, 0, 0], 3));
+    }
+
+    #[test]
+    fn cidr_prefix_length_is_a_c_integer() {
+        for (src, want) in [
+            ("10.0.0.0/010", 8),
+            ("10.0.0.0/0x8", 8),
+            ("2001:db8::/0x20", 32),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens[2].token, Token::Num(want), "{src}");
+        }
+        for src in ["10.0.0.0/08", "2001:db8::/09", "fe80::/08"] {
+            assert!(lex(src).is_err(), "{src} must be rejected");
+        }
+    }
+
+    // ── Dotted IPv4 octets are decimal, leading zeros allowed (#191) ─────────
+    // libpcap 1.10.3 (nametoaddr.c `pcap_atoin`): each octet is plain decimal,
+    // so `010.1.2.3` is 10.1.2.3. Hand-derived from issue #191.
+
+    #[test]
+    fn zero_padded_four_octet_addresses_lex() {
+        for (src, want) in [
+            ("010.1.2.3", [10, 1, 2, 3]),
+            ("1.2.3.04", [1, 2, 3, 4]),
+            ("192.168.001.001", [192, 168, 1, 1]),
+            ("00.0.0.1", [0, 0, 0, 1]),
+            ("255.255.255.000", [255, 255, 255, 0]),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens.len(), 1, "{src}");
+            assert_eq!(tokens[0].token, Token::Ipv4(want, 4), "{src}");
+        }
+    }
+
+    #[test]
+    fn bad_dotted_addresses_are_rejected_naming_the_literal() {
+        for src in [
+            "10.256.0.1",
+            "1.2.3.1000",
+            "1.2.3.4.5",
+            "1.2.3.",
+            "1..2",
+            "1.2.3.a",
+        ] {
+            let Err(Error::ParseError { message }) = lex(src) else {
+                panic!("{src:?} must be rejected with a ParseError naming it");
+            };
+            assert!(message.contains(&format!("'{src}'")), "{src}: {message}");
+        }
+        // A leading `.` is not part of a number: it is the unexpected character.
+        assert_eq!(
+            lex(".1.2.3").unwrap_err(),
+            Error::LexError { offset: 0, ch: '.' }
+        );
+        // Hex octets are not accepted: `0x0a` lexes as a number, then `.` is
+        // not a token.
+        assert!(lex("0x0a.0.0.1").is_err());
+    }
+
+    // ── `/` is always its own token (#194, #173) ─────────────────────────────
+    // libpcap's grammar is `HID '/' NUM` / `HID6 '/' NUM`: the scanner emits `/`
+    // as an ordinary token, so spacing around it is free and every address
+    // spelling (including a leading `::`) takes a prefix the same way.
+
+    #[test]
+    fn slash_after_an_address_is_a_separate_token() {
+        for (src, addr) in [
+            ("10.0.0.0/8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0 / 8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0 /8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("10.0.0.0/ 8", Token::Ipv4([10, 0, 0, 0], 4)),
+            ("2001:db8::/32", Token::Ipv6("2001:db8::".parse().unwrap())),
+            (
+                "2001:db8:: / 32",
+                Token::Ipv6("2001:db8::".parse().unwrap()),
+            ),
+            ("fe80::/32", Token::Ipv6("fe80::".parse().unwrap())),
+            ("::/32", Token::Ipv6("::".parse().unwrap())),
+            ("::1/32", Token::Ipv6("::1".parse().unwrap())),
+            ("::ffff:0:0/32", Token::Ipv6("::ffff:0:0".parse().unwrap())),
+            (
+                "::ffff:1.2.3.4 / 32",
+                Token::Ipv6("::ffff:1.2.3.4".parse().unwrap()),
+            ),
+        ] {
+            let toks: Vec<_> = lex(src).unwrap().into_iter().map(|s| s.token).collect();
+            let prefix = if src.contains("10.") { 8 } else { 32 };
+            assert_eq!(toks, [addr, Token::Slash, Token::Num(prefix)], "{src}");
+        }
+    }
+
+    #[test]
+    fn slash_with_nothing_after_it_lexes() {
+        // The parser, not the lexer, reports a missing prefix length (#210).
+        let toks: Vec<_> = lex("10.0.0.0/")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.token)
+            .collect();
+        assert_eq!(toks, [Token::Ipv4([10, 0, 0, 0], 4), Token::Slash]);
+    }
+
+    // ── Dotted IPv4 tokens remember how many octets were written (#158) ──────
+    // libpcap derives the mask of an un-prefixed `host`/`net` from that count
+    // (8 bits per octet), so `10.0` and `10.0.0.0` differ even though both
+    // zero-pad to a leading `10`.
+
+    #[test]
+    fn dotted_ipv4_keeps_the_octet_count() {
+        for (src, octs, parts) in [
+            ("10.1", [10, 1, 0, 0], 2),
+            ("10.0", [10, 0, 0, 0], 2),
+            ("10.1.2", [10, 1, 2, 0], 3),
+            ("10.0.0", [10, 0, 0, 0], 3),
+            ("10.0.0.0", [10, 0, 0, 0], 4),
+            ("192.168.1.77", [192, 168, 1, 77], 4),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens[0].token, Token::Ipv4(octs, parts), "{src}");
+        }
+    }
+
+    // ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────
+    // libpcap 1.10.3 accepts `64:ff9b::192.0.2.1` (RFC 6052) like the
+    // hex-group spelling; letter-first and `::` forms already lexed.
+
+    #[test]
+    fn digit_first_ipv6_with_embedded_ipv4() {
+        for (src, hex) in [
+            ("64:ff9b::192.0.2.1", "64:ff9b::c000:201"),
+            ("2001:db8::1.2.3.4", "2001:db8::102:304"),
+            ("1:2:3:4:5:6:1.2.3.4", "1:2:3:4:5:6:102:304"),
+            ("1::1.2.3.4", "1::102:304"),
+            // Already worked; guards for the other two lexer paths.
+            ("fe80::1.2.3.4", "fe80::102:304"),
+            ("a:b:c:d:e:f:1.2.3.4", "a:b:c:d:e:f:102:304"),
+            ("::ffff:1.2.3.4", "::ffff:102:304"),
+        ] {
+            let tokens = lex(src).unwrap();
+            assert_eq!(tokens.len(), 1, "{src}");
+            assert_eq!(tokens[0].token, Token::Ipv6(hex.parse().unwrap()), "{src}");
+        }
+    }
+
+    #[test]
+    fn colon_sensitive_number_lexing_is_unchanged() {
+        // The digit-first IPv6 scan now accepts '.', so pin the colon cases.
+        let toks =
+            |s: &str| -> Vec<Token> { lex(s).unwrap().into_iter().map(|t| t.token).collect() };
+        assert_eq!(
+            toks("tcp[0:2]"),
+            [
+                Token::Tcp,
+                Token::LBracket,
+                Token::Num(0),
+                Token::Colon,
+                Token::Num(2),
+                Token::RBracket
+            ]
+        );
+        assert_eq!(
+            toks("ip[12:4] = 10"),
+            [
+                Token::Ip,
+                Token::LBracket,
+                Token::Num(12),
+                Token::Colon,
+                Token::Num(4),
+                Token::RBracket,
+                Token::Eq,
+                Token::Num(10)
+            ]
+        );
+        assert_eq!(
+            toks("00:11:22:33:44:55"),
+            [Token::Mac([0, 0x11, 0x22, 0x33, 0x44, 0x55])]
+        );
     }
 }

@@ -204,7 +204,8 @@ impl Program {
 /// # Errors
 ///
 /// Returns [`Error::LexError`] for unrecognised characters,
-/// [`Error::ParseError`] for grammatically invalid expressions, and
+/// [`Error::ParseError`] for grammatically invalid expressions (including
+/// malformed numbers such as `08` or `10.0.0.256`), and
 /// [`Error::CodegenError`] for constructs that cannot be represented in
 /// the chosen target for the chosen link type.
 pub fn compile(filter: &str, link: LinkType, target: Target) -> Result<Program> {
