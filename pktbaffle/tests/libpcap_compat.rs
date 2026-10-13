@@ -1008,3 +1008,51 @@ fn ipv6_net_without_prefix_accepted_on_both_targets() {
     }
     assert!(try_eth("net ::1/129").is_err());
 }
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ───────────────
+// libpcap 1.10.3 fails with `non-network bits set in "..."` for each of these and
+// accepts the second list (issue #208; hand-derived, no live libpcap).
+
+#[test]
+fn net_non_network_bits_rejected_on_both_targets() {
+    for f in [
+        "net 10.1.0.1/24",
+        "net 10.1.2/16",
+        "net 10.1.2.0 mask 255.255.0.0",
+        "net 10.0.0.0 mask 0.0.0.0",
+        "net 10.0.0.0 mask 0.255.255.255",
+        "net 10.0.0.0/0",
+        "net 2001:db8::1/32",
+        "net fe80::1/10",
+        "net 2001:db8::/0",
+        "src net 192.168.1.5/24",
+        "dst net 192.168.1.5/24",
+        "src or dst net 192.168.1.5/24",
+        "src and dst net 192.168.1.5/24",
+        "ip6 net 2001:db8::1/32",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected (Classic)");
+        assert!(
+            compile(f, LinkType::Ethernet, Target::Extended).is_err(),
+            "{f:?} must be rejected (Extended)"
+        );
+    }
+}
+
+#[test]
+fn net_within_the_mask_accepted_on_both_targets() {
+    for f in [
+        "net 10.1/24",
+        "net 10.0.0.0 mask 255.0.255.0",
+        "net 0.0.0.0/0",
+        "net 10.0.0.0/8",
+        "net 2001:db8::/32",
+        "net fe80::/10",
+        "net 2001:db8::/128",
+        "net ::/0",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}

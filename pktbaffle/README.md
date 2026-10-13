@@ -120,6 +120,8 @@ net 2001:db8::1           # no length: a /128, matches like host 2001:db8::1
 
 As in libpcap, the `/` is an ordinary token: `net 10.0.0.0 / 8` and `net 10.0.0.0/0x8` are the same as `net 10.0.0.0/8`, and the prefix length is required to follow it; a bare number after the address (`net 10.0.0.0 8`) is a syntax error, as is `net 10 mask 255.0.0.0`.
 
+As in libpcap, an address with bits set outside its prefix or mask is an error rather than being silently masked: `net 192.168.1.5/24`, `net 10.1.2/16`, `net 10.0.0.0/0`, `net 10.0.0.0 mask 255.255.0.0` and `net 2001:db8::1/32` fail with `non-network bits set in "..."`. Use the network address (`net 192.168.1.0/24`); `net 0.0.0.0/0` and `net ::/0` are the match-all forms.
+
 A plain integer is accepted wherever an IPv4 address is: `host 10` matches the exact address 0.0.0.10 (`host 0x0a000001` is 10.0.0.1), and `net N` shifts N left a byte at a time until its top byte is non-zero, giving that many bits of prefix: `net 10` is 10.0.0.0/8, `net 256` is 1.0.0.0/16, `net 65536` is 1.0.0.0/24, and `net 0` or `net 16777216` match one exact address. Values above 32 bits are errors.
 
 A dotted address with fewer than four octets stands for the network it starts, with 8 bits of mask per octet written (libpcap's rule, for `host` as well as `net`): `net 10.0` is 10.0.0.0/16, `net 10.0.0` is /24, and `host 10.1` matches 10.1.0.0/16. With four octets and no `/len` or `mask`, `net 10.0.0.0` matches that one address only, not the /8 its zero octets might suggest. A short address with no `host` or `net` before it (`10.1`) is an error.
