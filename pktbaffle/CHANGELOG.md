@@ -164,6 +164,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length"; libpcap accepts them and matches exactly like `host <addr>` (and
   like IPv4 `net 10.1.2.3`, which was already accepted). `net X/len` is
   unchanged and `net ::1/129` is still an error.
+- **`net` with bits set outside the prefix or mask is an error** (#208).
+  `net 192.168.1.5/24`, `net 10.1.0.1/24`, `net 10.1.2/16`,
+  `net 10.1.2.0 mask 255.255.0.0`, `net 10.0.0.0 mask 0.0.0.0`,
+  `net 10.0.0.0/0`, `net 2001:db8::1/32`, `net fe80::1/10` and
+  `net 2001:db8::/0` compiled by silently ANDing the address with the mask
+  (`net 192.168.1.5/24` became the whole /24, `net 10.0.0.0/0` every IPv4
+  packet); libpcap fails with `non-network bits set in "..."`, and so do we
+  now. Write the network address (`net 192.168.1.0/24`) or `net 0.0.0.0/0` /
+  `net ::/0` for match-all. Nets whose address fits the mask (`net 10.1/24`,
+  `net 10.0.0.0 mask 255.0.255.0`, `net fe80::/10`) are unchanged.
 
 ### Added
 

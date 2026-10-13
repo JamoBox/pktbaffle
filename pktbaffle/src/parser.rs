@@ -727,6 +727,12 @@ impl Parser<'_> {
                 } else {
                     128
                 };
+                // libpcap rejects set bits past the prefix, `/0` included.
+                if u128::from(addr) & u128::MAX.checked_shr(prefix_len.into()).unwrap_or(0) != 0 {
+                    return Err(
+                        self.err(format!("non-network bits set in \"{addr}/{prefix_len}\""))
+                    );
+                }
                 return Ok(Primitive::Net6 {
                     net: Ipv6Net { addr, prefix_len },
                     dir,
@@ -743,19 +749,25 @@ impl Parser<'_> {
         if self.eat(&Token::Minus) {
             return Err(self.err("net range syntax not supported; use CIDR or mask notation"));
         }
+        // libpcap rejects any address bit outside the mask, so a net is never
+        // silently widened: `net 192.168.1.5/24` and `net 10.0.0.0/0` are errors.
         let mask = if self.eat(&Token::Slash) {
             let n = self.parse_prefix_len("IPv4", 32)?;
-            if n == 0 {
-                0u32
-            } else {
-                !0u32 << (32 - n)
+            let mask = IpNet::from_prefix(addr, n).mask;
+            if u32::from(addr) & !mask != 0 {
+                return Err(self.err(format!("non-network bits set in \"{addr}/{n}\"")));
             }
+            mask
         } else if self.eat(&Token::Mask) {
             // `net <addr> mask <netmask>` syntax
-            match self.advance() {
-                Some(Token::Ipv4(m, _)) => u32::from_be_bytes(*m),
+            let m = match self.advance() {
+                Some(Token::Ipv4(m, _)) => std::net::Ipv4Addr::from(*m),
                 _ => return Err(self.err("expected IPv4 netmask after 'mask'")),
+            };
+            if u32::from(addr) & !u32::from(m) != 0 {
+                return Err(self.err(format!("non-network bits set in \"{addr} mask {m}\"")));
             }
+            u32::from(m)
         } else {
             // No `/len` or `mask`: 8 bits per octet written, so `10.0` is /16
             // and `10.0.0.0` is /32 (libpcap shifts the address and an

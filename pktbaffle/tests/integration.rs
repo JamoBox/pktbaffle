@@ -2201,3 +2201,55 @@ fn ipv6_net_prefix_forms_unchanged() {
     assert!(pktbaffle::parse("net ::1/129").is_err());
     assert!(pktbaffle::parse("net ::1/").is_err());
 }
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ────────────────
+// libpcap 1.10.3 (`gen_mcode` / `gen_mcode6`) fails with `non-network bits set in
+// "<addr>/<len>"` whenever `addr & ~mask != 0`, `/0` included. Rejected and
+// accepted lists are those of issue #208 (hand-derived; no live libpcap).
+
+#[test]
+fn net_with_bits_outside_the_mask_is_rejected() {
+    for net in [
+        "10.1.0.1/24",
+        "10.1.2/16", // 10.1.2 is promoted to 10.1.2.0
+        "192.168.1.5/24",
+        "10.1.2.0 mask 255.255.0.0",
+        "10.0.0.0 mask 0.0.0.0",
+        "10.0.0.0 mask 0.255.255.255",
+        "10.0.0.0/0",
+        "2001:db8::1/32",
+        "fe80::1/10",
+        "2001:db8::/0",
+    ] {
+        for dir in ["", "src ", "dst ", "src or dst ", "src and dst "] {
+            let f = format!("{dir}net {net}");
+            let e = pktbaffle::parse(&f).expect_err(&f).to_string();
+            assert!(e.contains("non-network bits set"), "{f:?}: {e}");
+        }
+    }
+}
+
+#[test]
+fn net_within_the_mask_is_still_accepted() {
+    for f in [
+        "net 10.1/24",
+        "net 10.0.0.0 mask 255.0.255.0",
+        "net 0.0.0.0/0",
+        "net 0.0.0.0 mask 0.0.0.0",
+        "net 10.0.0.0/8",
+        "net 10.1.2.3/32",
+        "net 10.1.2.3 mask 255.255.255.255",
+        "net 2001:db8::/32",
+        "net fe80::/10",
+        "net 2001:db8::/128",
+        "net ::/0",
+        // No `/len` or `mask`: the length comes from the octets written (#158, #190, #174).
+        "net 10",
+        "net 10.1",
+        "net 10.1.2.3",
+        "net 2001:db8::1",
+    ] {
+        assert!(pktbaffle::parse(f).is_ok(), "{f:?} must compile");
+    }
+    assert_eq!(ast("net 10.1/24"), ast("net 10.1.0.0/24"));
+}

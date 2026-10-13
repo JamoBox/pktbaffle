@@ -1306,3 +1306,51 @@ fn ipv6_net_without_prefix_matches_like_host() {
     assert!(!run_filter("dst net 2001:db8::1", &a));
     assert!(!run_filter("net 2001:db8::1", &tcp(IP_A, IP_B, 1234, 80)));
 }
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ────────────────
+// The nets libpcap 1.10.3 still accepts (issue #208) match exactly their
+// addresses; the rejected ones never reach the VM (see integration.rs).
+// Verdicts hand-derived from the issue.
+
+/// `head` zero-padded to 15 bytes, then `last`.
+fn v6(head: &[u8], last: u8) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[..head.len()].copy_from_slice(head);
+    a[15] = last;
+    a
+}
+
+#[test]
+fn accepted_ipv4_nets_still_match() {
+    let hit = |f: &str, ip: [u8; 4]| run_filter(f, &tcp(ip, IP_C, 1234, 80));
+    // 10.1/24 is 10.1.0.0/24
+    assert!(hit("net 10.1/24", [10, 1, 0, 200]));
+    assert!(!hit("net 10.1/24", [10, 1, 1, 200]));
+    // A non-contiguous mask keeps matching on the bits it names.
+    assert!(hit("net 10.0.0.0 mask 255.0.255.0", [10, 99, 0, 7]));
+    assert!(!hit("net 10.0.0.0 mask 255.0.255.0", [10, 99, 1, 7]));
+    // /0 with a zero address is every IPv4 packet, and no IPv6 one.
+    assert!(hit("net 0.0.0.0/0", IP_A));
+    assert!(!run_filter(
+        "net 0.0.0.0/0",
+        &eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02)
+    ));
+}
+
+#[test]
+fn accepted_ipv6_nets_still_match() {
+    let hit =
+        |f: &str, src: [u8; 16]| run_filter(f, &eth_ipv6_tcp(src, IPV6_MCAST, 1234, 80, 0x02));
+    assert!(hit(
+        "net 2001:db8::/32",
+        v6(&[0x20, 0x01, 0x0d, 0xb8, 0, 5], 7)
+    ));
+    assert!(!hit("net 2001:db8::/32", v6(&[0x20, 0x01, 0x0d, 0xb9], 1)));
+    // fe80::/10 covers fe80:: through febf:: and not fec0::.
+    assert!(hit("net fe80::/10", v6(&[0xfe, 0x80], 1)));
+    assert!(hit("net fe80::/10", v6(&[0xfe, 0xbf], 1)));
+    assert!(!hit("net fe80::/10", v6(&[0xfe, 0xc0], 1)));
+    // A /128 is that one address.
+    assert!(hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 0)));
+    assert!(!hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 1)));
+}
