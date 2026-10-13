@@ -1264,3 +1264,23 @@ fn host_short_dotted_matches_the_network() {
     // Four octets are still the exact host.
     assert!(!run_filter("host 10.1.2.3", &src_pkt([10, 1, 2, 4])));
 }
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────────
+// Issue #192: the NAT64 packet `Ether()/IPv6(dst="64:ff9b::c000:201")/TCP()`
+// matches `host 64:ff9b::192.0.2.1`; dst `...c000:202` does not.
+
+#[test]
+fn nat64_dotted_host_matches_hex_address() {
+    let nat64 = |tail: [u8; 4]| {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&[0x00, 0x64, 0xff, 0x9b]);
+        a[12..].copy_from_slice(&tail);
+        a
+    };
+    let hit = eth_ipv6_tcp(IPV6_A, nat64([0xc0, 0x00, 0x02, 0x01]), 1234, 80, 0x02);
+    let miss = eth_ipv6_tcp(IPV6_A, nat64([0xc0, 0x00, 0x02, 0x02]), 1234, 80, 0x02);
+    assert!(run_filter("host 64:ff9b::192.0.2.1", &hit));
+    assert!(run_filter("dst host 64:ff9b::192.0.2.1", &hit));
+    assert!(!run_filter("src host 64:ff9b::192.0.2.1", &hit));
+    assert!(!run_filter("host 64:ff9b::192.0.2.1", &miss));
+}

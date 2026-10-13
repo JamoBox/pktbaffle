@@ -2148,3 +2148,27 @@ fn short_dotted_address_without_a_qualifier_is_an_error() {
         assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ────────────────────────
+// libpcap 1.10.3 compiles these to the same program as the hex-group spelling
+// (issue #192).
+
+#[test]
+fn digit_first_ipv6_embedded_ipv4_equals_hex_spelling() {
+    for (dotted, hex) in [
+        ("host 64:ff9b::192.0.2.1", "host 64:ff9b::c000:201"),
+        ("host 2001:db8::1.2.3.4", "host 2001:db8::102:304"),
+        ("host 1:2:3:4:5:6:1.2.3.4", "host 1:2:3:4:5:6:102:304"),
+        ("host 1::1.2.3.4", "host 1::102:304"),
+        ("src host 64:ff9b::192.0.2.1", "src host 64:ff9b::c000:201"),
+        ("net 64:ff9b::192.0.2.1/128", "net 64:ff9b::c000:201/128"),
+    ] {
+        assert_eq!(ast(dotted), ast(hex), "{dotted:?} vs {hex:?}");
+    }
+    // Unaffected, and a malformed tail is still an error.
+    assert!(pktbaffle::parse("net 64:ff9b::/96").is_ok());
+    assert!(pktbaffle::parse("host 64:ff9b::c000:201").is_ok());
+    for f in ["host 1::1.2.3", "host 1::1.2.3.4.5", "host 1::1.2.3.256"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}

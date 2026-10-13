@@ -151,6 +151,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address with no `host` or `net` (`10.1`) is now an error instead of the
   host 10.1.0.0. (An unqualified full address such as `10.0.0.1` is still
   taken as `host`.)
+- **IPv6 literals that start with a digit accept an embedded IPv4 tail**
+  (#192). `host 64:ff9b::192.0.2.1` (NAT64), `host 2001:db8::1.2.3.4`,
+  `host 1:2:3:4:5:6:1.2.3.4` and `host 1::1.2.3.4` failed with
+  `unexpected character '.'`, although the same forms starting with a letter
+  or `::` (`fe80::1.2.3.4`, `::ffff:1.2.3.4`) and the hex spelling
+  (`64:ff9b::c000:201`) worked. They now compile to the same program as the
+  hex spelling.
 
 ### Added
 

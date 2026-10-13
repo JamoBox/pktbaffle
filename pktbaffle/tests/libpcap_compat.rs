@@ -971,3 +971,20 @@ fn short_dotted_host_and_net_accepted() {
 fn short_dotted_address_without_qualifier_rejected() {
     assert!(try_eth("10.1").is_err(), "libpcap: syntax error");
 }
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────────
+// libpcap 1.10.3 accepts all of these (issue #192).
+
+#[test]
+fn digit_first_ipv6_embedded_ipv4_accepted_on_both_targets() {
+    for f in [
+        "host 64:ff9b::192.0.2.1",
+        "host 2001:db8::1.2.3.4",
+        "host 1:2:3:4:5:6:1.2.3.4",
+        "host 1::1.2.3.4",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
