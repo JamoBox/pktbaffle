@@ -2172,3 +2172,32 @@ fn digit_first_ipv6_embedded_ipv4_equals_hex_spelling() {
         assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
     }
 }
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ───────────────────────
+// libpcap 1.10.3 (`HID6` with no `/len` in grammar.y: gen_mcode6 with 128) compiles
+// `net 2001:db8::1` to the same match as `host 2001:db8::1` and `net .../128`.
+
+#[test]
+fn ipv6_net_without_prefix_is_slash_128() {
+    for (bare, explicit) in [
+        ("net ::1", "net ::1/128"),
+        ("net 2001:db8::1", "net 2001:db8::1/128"),
+        ("net 2001:db8::", "net 2001:db8::/128"),
+        ("ip6 net ::1", "ip6 net ::1/128"),
+        ("src net fe80::1", "src net fe80::1/128"),
+        ("dst net fe80::1", "dst net fe80::1/128"),
+        ("src or dst net fe80::1", "net fe80::1/128"),
+        ("src and dst net fe80::1", "src and dst net fe80::1/128"),
+        ("net ::1 and tcp", "net ::1/128 and tcp"),
+    ] {
+        assert_eq!(ast(bare), ast(explicit), "{bare:?} vs {explicit:?}");
+    }
+}
+
+#[test]
+fn ipv6_net_prefix_forms_unchanged() {
+    // Behaviour-preservation guards.
+    assert!(pktbaffle::parse("net 2001:db8::/32").is_ok());
+    assert!(pktbaffle::parse("net ::1/129").is_err());
+    assert!(pktbaffle::parse("net ::1/").is_err());
+}

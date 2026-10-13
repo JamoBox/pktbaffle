@@ -721,12 +721,12 @@ impl Parser<'_> {
             }
             Some(Token::Ipv6(addr)) => {
                 let addr = *addr;
-                if !self.eat(&Token::Slash) {
-                    return Err(
-                        self.err("IPv6 net requires a CIDR prefix length (e.g. net 2001:db8::/32)")
-                    );
-                }
-                let prefix_len = self.parse_prefix_len("IPv6", 128)?;
+                // No `/len` is a /128, as in libpcap (`net X` matches like `host X`).
+                let prefix_len = if self.eat(&Token::Slash) {
+                    self.parse_prefix_len("IPv6", 128)?
+                } else {
+                    128
+                };
                 return Ok(Primitive::Net6 {
                     net: Ipv6Net { addr, prefix_len },
                     dir,
