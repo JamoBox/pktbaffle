@@ -115,6 +115,7 @@ dst net 192.168.1.0/24    # destination network
 net 2001:db8::/32         # IPv6 prefix
 net ::ffff:0:0/96         # IPv4-mapped IPv6 addresses
 net ::/0                  # any IPv6 packet
+net 2001:db8::1           # no length: a /128, matches like host 2001:db8::1
 ```
 
 As in libpcap, the `/` is an ordinary token: `net 10.0.0.0 / 8` and `net 10.0.0.0/0x8` are the same as `net 10.0.0.0/8`, and the prefix length is required to follow it; a bare number after the address (`net 10.0.0.0 8`) is a syntax error, as is `net 10 mask 255.0.0.0`.

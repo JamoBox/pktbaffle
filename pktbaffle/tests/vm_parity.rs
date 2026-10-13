@@ -1284,3 +1284,25 @@ fn nat64_dotted_host_matches_hex_address() {
     assert!(!run_filter("src host 64:ff9b::192.0.2.1", &hit));
     assert!(!run_filter("host 64:ff9b::192.0.2.1", &miss));
 }
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ──────────────────────
+// Issue #174's packets: a has src 2001:db8::1, b has dst 2001:db8::1, c has src
+// 2001:db8::2. `net 2001:db8::1` matches a and b, not c, exactly like `host` and
+// `net .../128`.
+
+#[test]
+fn ipv6_net_without_prefix_matches_like_host() {
+    let a = eth_ipv6_tcp(IPV6_A, V6_LOOPBACK, 1234, 80, 0x02);
+    let b = eth_ipv6_udp(V6_LOOPBACK, IPV6_A, 1234, 53);
+    let c = eth_ipv6_tcp(IPV6_B, V6_LOOPBACK, 1234, 80, 0x02);
+    for f in ["net 2001:db8::1", "host 2001:db8::1", "net 2001:db8::1/128"] {
+        assert!(run_filter(f, &a), "{f} a");
+        assert!(run_filter(f, &b), "{f} b");
+        assert!(!run_filter(f, &c), "{f} c");
+    }
+    assert!(run_filter("src net 2001:db8::1", &a));
+    assert!(!run_filter("src net 2001:db8::1", &b));
+    assert!(run_filter("dst net 2001:db8::1", &b));
+    assert!(!run_filter("dst net 2001:db8::1", &a));
+    assert!(!run_filter("net 2001:db8::1", &tcp(IP_A, IP_B, 1234, 80)));
+}

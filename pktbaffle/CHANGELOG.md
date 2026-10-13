@@ -158,6 +158,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `::` (`fe80::1.2.3.4`, `::ffff:1.2.3.4`) and the hex spelling
   (`64:ff9b::c000:201`) worked. They now compile to the same program as the
   hex spelling.
+- **IPv6 `net <addr>` without a prefix length is a /128** (#174). `net ::1`,
+  `net 2001:db8::1`, `net 2001:db8::`, `ip6 net ::1`, `src net fe80::1` and
+  `dst net fe80::1` were rejected with "IPv6 net requires a CIDR prefix
+  length"; libpcap accepts them and matches exactly like `host <addr>` (and
+  like IPv4 `net 10.1.2.3`, which was already accepted). `net X/len` is
+  unchanged and `net ::1/129` is still an error.
 
 ### Added
 

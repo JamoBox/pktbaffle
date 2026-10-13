@@ -988,3 +988,23 @@ fn digit_first_ipv6_embedded_ipv4_accepted_on_both_targets() {
             .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
     }
 }
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ──────────────────────
+// libpcap 1.10.3 accepts all of these (issue #174).
+
+#[test]
+fn ipv6_net_without_prefix_accepted_on_both_targets() {
+    for f in [
+        "net ::1",
+        "net 2001:db8::1",
+        "net 2001:db8::",
+        "ip6 net ::1",
+        "src net fe80::1",
+        "dst net fe80::1",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+    assert!(try_eth("net ::1/129").is_err());
+}
