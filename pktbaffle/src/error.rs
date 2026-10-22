@@ -13,7 +13,9 @@ pub enum Error {
     /// `offset` is the byte position in the original filter string where the
     /// unexpected character was found.
     LexError { offset: usize, ch: char },
-    /// The token stream did not conform to the filter grammar.
+    /// The token stream did not conform to the filter grammar, or a number in
+    /// it was malformed (`08`, `0x`, over 32 bits, `10.0.0.256`); the message
+    /// names the literal and where it starts.
     ParseError { message: String },
     /// The filter is grammatically valid but cannot be expressed in BPF —
     /// for example, `inbound`/`outbound` direction primitives are not

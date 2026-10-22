@@ -1734,3 +1734,522 @@ fn hundred_thousand_term_chains_compile_on_small_stack() {
         );
     });
 }
+
+// ── Integer literals follow C syntax, as libpcap's scanner (#157) ─────────────
+// libpcap 1.10.3 (scanner.l `stou`): `0x` hex, a leading `0` octal, otherwise
+// decimal; `08` is an error. Expected trees hand-derived from that and issue #157.
+
+#[test]
+fn leading_zero_integers_are_octal_in_every_position() {
+    for (octal, decimal) in [
+        ("tcp port 010", "tcp port 8"),
+        ("portrange 010-020", "portrange 8-16"),
+        ("ip proto 017", "ip proto 15"),
+        ("ether proto 0100", "ether proto 64"),
+        ("vlan 010", "vlan 8"),
+        ("mpls 010", "mpls 8"),
+        ("less 010", "less 8"),
+        ("len = 0100", "len = 64"),
+        ("ip[010] = 1", "ip[8] = 1"),
+        ("ip[8] = 010", "ip[8] = 8"),
+        ("net 10.0.0.0/010", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/0x8", "net 10.0.0.0/8"),
+        ("net 2001:db8::/040", "net 2001:db8::/32"),
+        // Unchanged: 0 and 00 are 0, and decimal literals stay decimal.
+        ("port 00", "port 0"),
+        ("port 0", "port 0"),
+        ("tcp port 80", "tcp port 0x50"),
+    ] {
+        assert_eq!(ast(octal), ast(decimal), "{octal:?} vs {decimal:?}");
+    }
+}
+
+#[test]
+fn octal_literals_differ_from_the_decimal_reading() {
+    assert_ne!(ast("tcp port 010"), ast("tcp port 10"));
+    assert_ne!(ast("net 10.0.0.0/010"), ast("net 10.0.0.0/10"));
+}
+
+#[test]
+fn non_octal_digit_after_a_leading_zero_is_an_error() {
+    for f in [
+        "tcp port 08",
+        "tcp port 09",
+        "port 0800",
+        "vlan 08",
+        "less 08",
+        "ip[08] = 1",
+        "ether proto 0800",
+        "net 10.0.0.0/08",
+        "net 2001:db8::/09",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+#[test]
+fn integer_over_32_bits_is_an_error_in_every_position() {
+    // libpcap: "number ... overflows 32 bits".
+    for f in [
+        "greater 4294967296",
+        "port 0x100000000",
+        "ip[0] = 4294967296",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+    assert!(pktbaffle::parse("greater 4294967295").is_ok());
+}
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ─────────────────────────
+// libpcap 1.10.3 parses each octet as plain decimal (`pcap_atoin`), so `010` in
+// a dotted quad is 10, not octal. Expected trees hand-derived from issue #191.
+
+#[test]
+fn zero_padded_dotted_octets_are_decimal() {
+    for (padded, plain) in [
+        ("host 010.1.2.3", "host 10.1.2.3"),
+        ("host 1.2.3.04", "host 1.2.3.4"),
+        ("host 192.168.001.001", "host 192.168.1.1"),
+        ("host 00.0.0.1", "host 0.0.0.1"),
+        ("net 010.0.0.0/8", "net 10.0.0.0/8"),
+        (
+            "net 10.0.0.0 mask 255.255.255.000",
+            "net 10.0.0.0 mask 255.255.255.0",
+        ),
+        ("net 10.0.0.0 mask 255.255.255.000", "net 10.0.0.0/24"),
+        // The 1-3 octet forms already accepted padding; they keep doing so.
+        ("net 010.1.2", "net 10.1.2"),
+        ("host 10.01", "host 10.1"),
+    ] {
+        assert_eq!(ast(padded), ast(plain), "{padded:?} vs {plain:?}");
+    }
+}
+
+#[test]
+fn malformed_dotted_addresses_are_still_errors() {
+    for f in [
+        "host 10.256.0.1",
+        "host 0x0a.0.0.1",
+        "host 1.2.3.4.5",
+        "host 1.2.3.",
+        "net 10.0.0.0 mask 255.255.255.256",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── `/` before a prefix length is an ordinary token (#194, #173) ──────────────
+// libpcap 1.10.3 grammar: `HID '/' NUM`, `HID6 '/' NUM`, `HID NETMASK HID`; a bare
+// number after an address is a syntax error. Expected trees hand-derived from
+// that and issues #194 and #173.
+
+#[test]
+fn whitespace_and_hex_around_the_prefix_slash() {
+    for (spaced, glued) in [
+        ("net 10.0.0.0 / 8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0 /8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/ 8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/0x8", "net 10.0.0.0/8"),
+        ("net 10.0.0.0/010", "net 10.0.0.0/8"),
+        ("net 2001:db8:: /32", "net 2001:db8::/32"),
+        ("net 2001:db8::/ 32", "net 2001:db8::/32"),
+        ("net 2001:db8::/0x20", "net 2001:db8::/32"),
+        (
+            "src net fe80:: /10 and port 80",
+            "src net fe80::/10 and port 80",
+        ),
+    ] {
+        assert_eq!(ast(spaced), ast(glued), "{spaced:?} vs {glued:?}");
+    }
+}
+
+#[test]
+fn bare_number_after_a_network_is_a_syntax_error() {
+    for f in [
+        "net 10.0.0.0 8",
+        "net 10 8",
+        "net 2001:db8:: 32",
+        "src net 192.168.1.0 24 and port 80",
+        "net 10 mask 255.0.0.0",
+        "net 10.0.0.0/",
+        "net 10.0.0.0/abc",
+        "net 2001:db8::/",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+#[test]
+fn slash_prefix_regressions() {
+    // Behaviour-preservation guards: a prefix still combines with `and`, and a
+    // `/` in a byte-access expression is still division.
+    assert!(pktbaffle::parse("net 10.0.0.0/8 and tcp").is_ok());
+    assert!(pktbaffle::parse("ip[2] / 2 = 1").is_ok());
+    assert!(pktbaffle::parse("net 10.0.0.0/33").is_err());
+    assert!(pktbaffle::parse("net 2001:db8::/129").is_err());
+}
+
+#[test]
+fn ipv6_net_starting_with_double_colon_takes_a_prefix() {
+    for f in [
+        "net ::/0",
+        "net ::1/128",
+        "net ::ffff:0:0/96",
+        "net ::ffff:1.2.3.4/128",
+        "ip6 net ::/32",
+        "src net ::1/128",
+        "dst net ::/0",
+        "not net ::/0",
+        "net ::/0 and tcp",
+        "net ::1 /128",
+        "net :: / 0",
+    ] {
+        assert!(pktbaffle::parse(f).is_ok(), "{f:?} must compile");
+    }
+    // The same network spelled with a leading digit is the same tree.
+    for n in 0..=128 {
+        assert_eq!(
+            ast(&format!("net ::/{n}")),
+            ast(&format!("net 0::/{n}")),
+            "/{n}"
+        );
+    }
+    assert!(pktbaffle::parse("net ::/129").is_err());
+}
+
+#[test]
+fn host_ipv6_accepts_only_a_slash_128() {
+    // libpcap: `host ::1/128` is a /128 net; any other length is "Mask syntax
+    // for networks only".
+    assert_eq!(ast("host ::1/128"), ast("host ::1"));
+    assert_eq!(ast("src ::1/128"), ast("src host ::1"));
+    for f in ["host ::1/64", "host ::1/129", "host 10.0.0.1/32"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── Diagnostics for malformed numbers and prefix lengths (#210) ───────────────
+// Every input below is rejected by libpcap 1.10.3 too; only the diagnostic was
+// wrong. Most of the fix landed with #157 (numbers), #191 (dotted octets) and
+// #194 (the lexer no longer reads prefix lengths), so those tests are guards
+// that fail on `main`; the offset of a missing prefix length is new here.
+
+/// Rejected filters, with non-ASCII input, that cover every lexer error path.
+const REJECTED: &[&str] = &[
+    "net 10.0.0.0/",
+    "net 10.0.0.0/abc",
+    "net 10.0.0.0/99999999999999999999999",
+    "host 2001:db8::1/",
+    "ip6 net fe80::/\u{e9}",
+    "host 10.0.0.256",
+    "host 1.2.3.4.5",
+    "port 12abc",
+    "ip[0x]=1",
+    "ip[0x1g]=1",
+    "port 99999999999999999999",
+    "greater 4294967296",
+    "port 08",
+    "tcp port ???",
+    "\u{e9}",
+    "host 10.0.0.1 \u{1f980}",
+    "port 80 \u{e9}\u{e9}",
+    ".1.2.3",
+];
+
+#[test]
+fn lex_error_offset_and_char_agree() {
+    for f in REJECTED {
+        if let Err(pktbaffle::Error::LexError { offset, ch }) = pktbaffle::parse(f) {
+            assert!(
+                f.is_char_boundary(offset) && f[offset..].starts_with(ch),
+                "{f:?}: LexError {{ offset: {offset}, ch: {ch:?} }} does not point at {ch:?}"
+            );
+        }
+    }
+    // The characters the lexer really does not know keep their exact position.
+    assert_eq!(
+        pktbaffle::parse("tcp port ???").unwrap_err(),
+        pktbaffle::Error::LexError { offset: 9, ch: '?' }
+    );
+    assert_eq!(
+        pktbaffle::parse("port 80 \u{e9}\u{e9}").unwrap_err(),
+        pktbaffle::Error::LexError {
+            offset: 8,
+            ch: '\u{e9}'
+        }
+    );
+}
+
+#[test]
+fn malformed_number_error_names_the_literal() {
+    for (f, literal) in [
+        ("port 99999999999999999999", "99999999999999999999"),
+        ("host 10.0.0.256", "10.0.0.256"),
+        ("ip[0x]=1", "0x"),
+        ("port 12abc", "12abc"),
+        ("port 08", "08"),
+    ] {
+        match pktbaffle::parse(f) {
+            Err(pktbaffle::Error::ParseError { message }) => {
+                assert!(
+                    message.contains(&format!("'{literal}'")),
+                    "{f:?}: {message}"
+                )
+            }
+            other => panic!("{f:?}: expected a ParseError naming {literal:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn over_32_bit_literals_are_one_kind_of_error() {
+    // `greater 4294967296` used to fail in the parser and a larger literal in
+    // the lexer, with two different error kinds.
+    let kind = |f| std::mem::discriminant(&pktbaffle::parse(f).unwrap_err());
+    assert_eq!(
+        kind("greater 4294967296"),
+        kind("greater 99999999999999999999")
+    );
+    assert_eq!(kind("greater 4294967296"), kind("greater 0x100000000"));
+}
+
+#[test]
+fn missing_prefix_length_reports_the_slash_offset() {
+    for (f, slash) in [
+        ("net 10.0.0.0/", 12),
+        ("net 10.0.0.0/abc", 12),
+        ("net 10.0.0.0 / and tcp", 13),
+        ("host 2001:db8::1/", 16),
+        ("net 2001:db8::/", 14),
+    ] {
+        match pktbaffle::parse(f) {
+            Err(pktbaffle::Error::ParseError { message }) => assert!(
+                message.contains(&format!("at offset {slash}")) && f.as_bytes()[slash] == b'/',
+                "{f:?}: {message}"
+            ),
+            other => panic!("{f:?}: expected a ParseError, got {other:?}"),
+        }
+    }
+}
+
+// ── A bare integer is an IPv4 host or net (#190) ──────────────────────────────
+// libpcap 1.10.3 `gen_ncode`: `host N` is the exact 32-bit address N; `net N`
+// shifts N (and an all-ones mask) left a byte at a time until the top byte is
+// non-zero. Expected trees hand-derived from that and issue #190.
+
+#[test]
+fn host_takes_a_bare_integer_as_the_address() {
+    for (bare, dotted) in [
+        ("host 10", "host 0.0.0.10"),
+        ("src host 10", "src host 0.0.0.10"),
+        ("dst host 10", "dst host 0.0.0.10"),
+        ("ip host 10", "ip host 0.0.0.10"),
+        ("host 0x0a000001", "host 10.0.0.1"),
+        ("host 167772161", "host 10.0.0.1"),
+        ("host 4294967295", "host 255.255.255.255"),
+        ("host 0", "host 0.0.0.0"),
+        // After a direction, the type keyword is optional (like `src 1.2.3.4`).
+        ("src 10", "src host 0.0.0.10"),
+        ("dst 0x0a000001", "dst host 10.0.0.1"),
+    ] {
+        assert_eq!(ast(bare), ast(dotted), "{bare:?} vs {dotted:?}");
+    }
+}
+
+#[test]
+fn net_promotes_a_short_integer_to_a_prefix() {
+    for (bare, cidr) in [
+        ("net 10", "net 10.0.0.0/8"),
+        ("net 255", "net 255.0.0.0/8"),
+        ("net 256", "net 1.0.0.0/16"),
+        ("net 300", "net 1.44.0.0/16"),
+        ("net 65536", "net 1.0.0.0/24"),
+        ("net 16777216", "net 1.0.0.0/32"),
+        ("net 4294967295", "net 255.255.255.255/32"),
+        ("src net 256", "src net 1.0.0.0/16"),
+        ("dst net 65536", "dst net 1.0.0.0/24"),
+        // `net 0` has no byte to shift: libpcap treats it as the exact address.
+        ("net 0", "net 0.0.0.0/32"),
+    ] {
+        assert_eq!(ast(bare), ast(cidr), "{bare:?} vs {cidr:?}");
+    }
+}
+
+#[test]
+fn bare_integer_over_32_bits_is_still_rejected() {
+    for f in [
+        "host 4294967296",
+        "net 4294967296",
+        "src 4294967296",
+        "host 0x100000000",
+    ] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ────────
+// libpcap 1.10.3 `gen_ncode`: `v <<= 32 - vlen; mask <<= 32 - vlen` with vlen = 8
+// per octet written, for both `host` and `net`: `10` is /8, `10.0` /16, `10.0.0`
+// /24, `10.0.0.0` /32. Expected trees hand-derived from that and issue #158.
+
+#[test]
+fn net_mask_comes_from_the_octets_written() {
+    for (short, cidr) in [
+        ("net 10.0.0.0", "net 10.0.0.0/32"),
+        ("net 192.168.1.0", "net 192.168.1.0/32"),
+        ("net 192.168.1.77", "net 192.168.1.77/32"),
+        ("net 10.0", "net 10.0.0.0/16"),
+        ("net 10.0.0", "net 10.0.0.0/24"),
+        ("net 10.1.0", "net 10.1.0.0/24"),
+        ("net 10.1", "net 10.1.0.0/16"),
+        ("src net 10.0", "src net 10.0.0.0/16"),
+        ("dst net 10.0.0", "dst net 10.0.0.0/24"),
+        // Unchanged: one octet, an explicit prefix, an explicit mask.
+        ("net 10", "net 10.0.0.0/8"),
+        ("net 192.168", "net 192.168.0.0/16"),
+        ("net 10.0.1", "net 10.0.1.0/24"),
+        ("net 10.1/24", "net 10.1.0.0/24"),
+        ("net 10.0.0.0 mask 255.255.0.0", "net 10.0.0.0/16"),
+    ] {
+        assert_eq!(ast(short), ast(cidr), "{short:?} vs {cidr:?}");
+    }
+}
+
+#[test]
+fn host_with_fewer_than_four_octets_is_a_network() {
+    for (host, net) in [
+        ("host 10.1", "net 10.1.0.0/16"),
+        ("host 10.1.2", "net 10.1.2.0/24"),
+        ("src host 10.1", "src net 10.1.0.0/16"),
+        ("dst host 10.1.2", "dst net 10.1.2.0/24"),
+        ("src and dst host 10.1", "src and dst net 10.1.0.0/16"),
+        ("src 10.1", "src net 10.1.0.0/16"),
+        ("ip host 10.1", "ip net 10.1.0.0/16"),
+        // Four octets stay an exact host.
+        ("host 10.1.2.3", "net 10.1.2.3/32"),
+    ] {
+        // `host x.y.z.w` is a `Host`, not a /32 `Net`; compare the others only.
+        if host == "host 10.1.2.3" {
+            assert!(matches!(
+                ast(host),
+                pktbaffle::ast::Expr::Primitive(pktbaffle::ast::Primitive::Host { .. })
+            ));
+            continue;
+        }
+        assert_eq!(ast(host), ast(net), "{host:?} vs {net:?}");
+    }
+}
+
+#[test]
+fn short_dotted_address_without_a_qualifier_is_an_error() {
+    // libpcap: a bare id is a syntax error. Reading `10.1` as the host
+    // 10.1.0.0 (the old behaviour) was a silent wrong match.
+    for f in ["10.1", "10.1.2", "tcp and 10.1", "10.1 and tcp"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ────────────────────────
+// libpcap 1.10.3 compiles these to the same program as the hex-group spelling
+// (issue #192).
+
+#[test]
+fn digit_first_ipv6_embedded_ipv4_equals_hex_spelling() {
+    for (dotted, hex) in [
+        ("host 64:ff9b::192.0.2.1", "host 64:ff9b::c000:201"),
+        ("host 2001:db8::1.2.3.4", "host 2001:db8::102:304"),
+        ("host 1:2:3:4:5:6:1.2.3.4", "host 1:2:3:4:5:6:102:304"),
+        ("host 1::1.2.3.4", "host 1::102:304"),
+        ("src host 64:ff9b::192.0.2.1", "src host 64:ff9b::c000:201"),
+        ("net 64:ff9b::192.0.2.1/128", "net 64:ff9b::c000:201/128"),
+    ] {
+        assert_eq!(ast(dotted), ast(hex), "{dotted:?} vs {hex:?}");
+    }
+    // Unaffected, and a malformed tail is still an error.
+    assert!(pktbaffle::parse("net 64:ff9b::/96").is_ok());
+    assert!(pktbaffle::parse("host 64:ff9b::c000:201").is_ok());
+    for f in ["host 1::1.2.3", "host 1::1.2.3.4.5", "host 1::1.2.3.256"] {
+        assert!(pktbaffle::parse(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ───────────────────────
+// libpcap 1.10.3 (`HID6` with no `/len` in grammar.y: gen_mcode6 with 128) compiles
+// `net 2001:db8::1` to the same match as `host 2001:db8::1` and `net .../128`.
+
+#[test]
+fn ipv6_net_without_prefix_is_slash_128() {
+    for (bare, explicit) in [
+        ("net ::1", "net ::1/128"),
+        ("net 2001:db8::1", "net 2001:db8::1/128"),
+        ("net 2001:db8::", "net 2001:db8::/128"),
+        ("ip6 net ::1", "ip6 net ::1/128"),
+        ("src net fe80::1", "src net fe80::1/128"),
+        ("dst net fe80::1", "dst net fe80::1/128"),
+        ("src or dst net fe80::1", "net fe80::1/128"),
+        ("src and dst net fe80::1", "src and dst net fe80::1/128"),
+        ("net ::1 and tcp", "net ::1/128 and tcp"),
+    ] {
+        assert_eq!(ast(bare), ast(explicit), "{bare:?} vs {explicit:?}");
+    }
+}
+
+#[test]
+fn ipv6_net_prefix_forms_unchanged() {
+    // Behaviour-preservation guards.
+    assert!(pktbaffle::parse("net 2001:db8::/32").is_ok());
+    assert!(pktbaffle::parse("net ::1/129").is_err());
+    assert!(pktbaffle::parse("net ::1/").is_err());
+}
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ────────────────
+// libpcap 1.10.3 (`gen_mcode` / `gen_mcode6`) fails with `non-network bits set in
+// "<addr>/<len>"` whenever `addr & ~mask != 0`, `/0` included. Rejected and
+// accepted lists are those of issue #208 (hand-derived; no live libpcap).
+
+#[test]
+fn net_with_bits_outside_the_mask_is_rejected() {
+    for net in [
+        "10.1.0.1/24",
+        "10.1.2/16", // 10.1.2 is promoted to 10.1.2.0
+        "192.168.1.5/24",
+        "10.1.2.0 mask 255.255.0.0",
+        "10.0.0.0 mask 0.0.0.0",
+        "10.0.0.0 mask 0.255.255.255",
+        "10.0.0.0/0",
+        "2001:db8::1/32",
+        "fe80::1/10",
+        "2001:db8::/0",
+    ] {
+        for dir in ["", "src ", "dst ", "src or dst ", "src and dst "] {
+            let f = format!("{dir}net {net}");
+            let e = pktbaffle::parse(&f).expect_err(&f).to_string();
+            assert!(e.contains("non-network bits set"), "{f:?}: {e}");
+        }
+    }
+}
+
+#[test]
+fn net_within_the_mask_is_still_accepted() {
+    for f in [
+        "net 10.1/24",
+        "net 10.0.0.0 mask 255.0.255.0",
+        "net 0.0.0.0/0",
+        "net 0.0.0.0 mask 0.0.0.0",
+        "net 10.0.0.0/8",
+        "net 10.1.2.3/32",
+        "net 10.1.2.3 mask 255.255.255.255",
+        "net 2001:db8::/32",
+        "net fe80::/10",
+        "net 2001:db8::/128",
+        "net ::/0",
+        // No `/len` or `mask`: the length comes from the octets written (#158, #190, #174).
+        "net 10",
+        "net 10.1",
+        "net 10.1.2.3",
+        "net 2001:db8::1",
+    ] {
+        assert!(pktbaffle::parse(f).is_ok(), "{f:?} must compile");
+    }
+    assert_eq!(ast("net 10.1/24"), ast("net 10.1.0.0/24"));
+}

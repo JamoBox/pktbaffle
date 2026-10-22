@@ -2419,11 +2419,12 @@ fn ipv6_net_slash128_is_host_equivalent() {
     );
 }
 
-/// `net addr/0` only emits the ethertype guard (no segment comparisons).
+/// `net ::/0` only emits the ethertype guard (no segment comparisons). (It was
+/// `net 2001:db8::/0` until #208: libpcap 1.10.3 rejects set bits past the prefix.)
 #[test]
 fn ipv6_net_slash0_only_checks_ethertype() {
-    let insns = cbpf("net 2001:db8::/0");
-    assert_well_formed("net 2001:db8::/0", &insns);
+    let insns = cbpf("net ::/0");
+    assert_well_formed("net ::/0", &insns);
     // /0 means every IPv6 address matches; only the ethertype check is needed.
     let jeq_count = insns.iter().filter(|i| is_jeq(**i)).count();
     assert_eq!(

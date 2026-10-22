@@ -1023,3 +1023,334 @@ fn very_long_and_and_not_chains_match_like_tcp() {
         assert!(!run_filter(&f, &udp_pkt));
     }
 }
+
+// ── Integer literals: a leading 0 is octal (#157) ────────────────────────────
+// libpcap 1.10.3 reads `010` as 8 (scanner.l `stou`). Verdicts hand-derived from
+// that and issue #157 (no live libpcap was available).
+
+#[test]
+fn octal_port_matches_decimal_value_on_every_link() {
+    let on_dport = |dport| tcp(IP_A, IP_B, 1234, dport);
+    for (pkt, want) in [(on_dport(8), true), (on_dport(10), false)] {
+        let mut sll = vec![0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00];
+        sll.extend_from_slice(&pkt[14..]);
+        for (link, bytes) in [
+            (LinkType::Ethernet, &pkt[..]),
+            (LinkType::RawIp, &pkt[14..]),
+            (LinkType::LinuxSll, &sll[..]),
+        ] {
+            let prog = compile("tcp port 010", link, Target::Classic).unwrap();
+            assert_eq!(
+                pktbaffle::vm::run(prog.instructions(), bytes),
+                want,
+                "{link:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn octal_byte_offset_loads_ip_ttl() {
+    // ip[010] is ip[8] (the TTL), not ip[10] (checksum high byte).
+    let mut ttl1 = tcp(IP_A, IP_B, 1234, 80);
+    ttl1[14 + 8] = 1;
+    let mut csum1 = tcp(IP_A, IP_B, 1234, 80);
+    csum1[14 + 10] = 1;
+    assert!(run_filter("ip[010] = 1", &ttl1));
+    assert!(!run_filter("ip[010] = 1", &csum1));
+}
+
+#[test]
+fn octal_ip_proto_ether_proto_vlan_and_len() {
+    let mut proto15 = tcp(IP_A, IP_B, 1234, 80);
+    proto15[14 + 9] = 15;
+    assert!(run_filter("ip proto 017", &proto15));
+    assert!(!run_filter("ip proto 017", &tcp(IP_A, IP_B, 1234, 80)));
+
+    let mut etype40 = tcp(IP_A, IP_B, 1234, 80);
+    etype40[12..14].copy_from_slice(&[0x00, 0x40]);
+    assert!(run_filter("ether proto 0100", &etype40));
+    assert!(!run_filter("ether proto 0100", &tcp(IP_A, IP_B, 1234, 80)));
+
+    assert!(run_filter(
+        "vlan 010",
+        &eth_vlan_ipv4_tcp(8, IP_A, IP_B, 1234, 80, 2)
+    ));
+    assert!(!run_filter(
+        "vlan 010",
+        &eth_vlan_ipv4_tcp(10, IP_A, IP_B, 1234, 80, 2)
+    ));
+
+    // 54 bytes of headers: 10 payload bytes make 64 (= 0100), 46 make 100.
+    let len64 = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 10);
+    let len100 = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1234, 80, 0x02, 46);
+    assert!(run_filter("len = 0100", &len64));
+    assert!(!run_filter("len = 0100", &len100));
+}
+
+#[test]
+fn octal_cidr_prefix_is_a_slash_8() {
+    // net 10.0.0.0/010 is /8: 10.64.0.1 and 10.128.0.1 match (a /10 would not
+    // match 10.128.x.x); 11.0.0.1 does not.
+    for (src, want) in [
+        ([10, 64, 0, 1], true),
+        ([10, 128, 0, 1], true),
+        ([11, 0, 0, 1], false),
+    ] {
+        assert_eq!(
+            run_filter("net 10.0.0.0/010", &tcp(src, IP_C, 1234, 80)),
+            want,
+            "{src:?}"
+        );
+    }
+}
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ────────────────────────
+// `host 010.1.2.3` is 10.1.2.3 (decimal octets), as in libpcap 1.10.3.
+// Verdicts hand-derived from issue #191 (no live libpcap was available).
+
+#[test]
+fn zero_padded_host_matches_decimal_address() {
+    let src_10 = tcp([10, 1, 2, 3], IP_B, 1234, 80);
+    let dst_10 = tcp(IP_B, [10, 1, 2, 3], 1234, 80);
+    let src_8 = tcp([8, 1, 2, 3], IP_B, 1234, 80);
+    for f in ["host 010.1.2.3", "host 10.001.002.003"] {
+        assert!(run_filter(f, &src_10), "{f} src");
+        assert!(run_filter(f, &dst_10), "{f} dst");
+        assert!(!run_filter(f, &src_8), "{f} must not match 8.1.2.3");
+    }
+}
+
+#[test]
+fn zero_padded_netmask_is_a_slash_24() {
+    let f = "net 192.168.1.0 mask 255.255.255.000";
+    assert!(run_filter(f, &tcp([192, 168, 1, 77], IP_B, 1234, 80)));
+    assert!(!run_filter(f, &tcp([192, 168, 2, 77], IP_B, 1234, 80)));
+}
+
+// ── IPv6 nets starting with `::` and spaced prefixes (#173, #194) ────────────
+// Verdicts hand-derived from issues #173 and #194 (no live libpcap was
+// available): `net ::ffff:0:0/96` matches IPv4-mapped addresses.
+
+fn v6_mapped(a: u8, b: u8, c: u8, d: u8) -> [u8; 16] {
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, a, b, c, d]
+}
+
+const V6_LOOPBACK: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+#[test]
+fn net_double_colon_zero_matches_any_ipv6_not_ipv4() {
+    let v6 = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("net ::/0", &v6));
+    assert!(!run_filter("net ::/0", &tcp(IP_A, IP_B, 1234, 80)));
+    assert!(!run_filter("not net ::/0", &v6));
+}
+
+#[test]
+fn net_loopback_slash_128_matches_src_or_dst() {
+    let to_lo = eth_ipv6_tcp(IPV6_A, V6_LOOPBACK, 1234, 80, 0x02);
+    let from_lo = eth_ipv6_tcp(V6_LOOPBACK, IPV6_A, 1234, 80, 0x02);
+    let other = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    for f in ["net ::1/128", "host ::1/128", "net ::1 / 128"] {
+        assert!(run_filter(f, &to_lo), "{f} dst");
+        assert!(run_filter(f, &from_lo), "{f} src");
+        assert!(!run_filter(f, &other), "{f} other");
+    }
+    assert!(run_filter("src net ::1/128", &from_lo));
+    assert!(!run_filter("src net ::1/128", &to_lo));
+}
+
+#[test]
+fn net_ipv4_mapped_slash_96() {
+    let mapped = eth_ipv6_tcp(IPV6_A, v6_mapped(1, 2, 3, 4), 1234, 80, 0x02);
+    let plain = eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02);
+    assert!(run_filter("net ::ffff:0:0/96", &mapped));
+    assert!(!run_filter("net ::ffff:0:0/96", &plain));
+}
+
+#[test]
+fn spaced_and_hex_ipv4_prefix_match_like_glued() {
+    for f in ["net 10.0.0.0 / 8", "net 10.0.0.0/ 8", "net 10.0.0.0/0x8"] {
+        assert!(run_filter(f, &tcp([10, 128, 0, 1], IP_C, 1234, 80)), "{f}");
+        assert!(!run_filter(f, &tcp([11, 0, 0, 1], IP_C, 1234, 80)), "{f}");
+    }
+}
+
+// ── A bare integer is an IPv4 host or net (#190) ─────────────────────────────
+// Verdicts from the packets named in issue #190 (hand-derived from libpcap's
+// `gen_ncode`; no live libpcap was available).
+
+#[test]
+fn host_bare_integer_is_the_exact_address() {
+    let src_10 = tcp([0, 0, 0, 10], [9, 9, 9, 9], 1234, 80);
+    let dst_10 = tcp([9, 9, 9, 9], [0, 0, 0, 10], 1234, 80);
+    let dotted_10 = tcp([10, 0, 0, 0], [9, 9, 9, 9], 1234, 80);
+    for f in ["host 10", "ip host 10", "host 0xa"] {
+        assert!(run_filter(f, &src_10), "{f} src");
+        assert!(run_filter(f, &dst_10), "{f} dst");
+        assert!(!run_filter(f, &dotted_10), "{f} must not match 10.0.0.0");
+    }
+    assert!(run_filter("src host 10", &src_10));
+    assert!(!run_filter("src host 10", &dst_10));
+    assert!(run_filter("dst host 10", &dst_10));
+    assert!(!run_filter("dst host 10", &src_10));
+    assert!(run_filter(
+        "host 0x0a000001",
+        &tcp([10, 0, 0, 1], [9, 9, 9, 9], 1, 2)
+    ));
+}
+
+#[test]
+fn net_bare_integer_shifts_into_a_prefix() {
+    // (filter, matching source, non-matching source)
+    for (f, yes, no) in [
+        ("net 256", [1, 0, 0, 5], [1, 1, 0, 5]),
+        ("net 300", [1, 44, 5, 5], [1, 45, 5, 5]),
+        ("net 65536", [1, 0, 0, 77], [1, 0, 1, 77]),
+        ("net 16777216", [1, 0, 0, 0], [1, 0, 0, 1]),
+        ("net 10", [10, 9, 9, 9], [11, 9, 9, 9]),
+    ] {
+        assert!(run_filter(f, &tcp(yes, [9, 9, 9, 9], 1234, 80)), "{f} yes");
+        assert!(run_filter(f, &tcp([9, 9, 9, 9], yes, 1234, 80)), "{f} dst");
+        assert!(!run_filter(f, &tcp(no, [9, 9, 9, 9], 1234, 80)), "{f} no");
+    }
+}
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ───────
+// Verdicts are the libpcap 1.10.3 results tabulated in issue #158 (packet
+// `Ether()/IP(src=..., dst="192.0.2.1")/TCP()`), plus the matching cases that
+// follow from the same masks.
+
+fn src_pkt(src: [u8; 4]) -> Vec<u8> {
+    tcp(src, [192, 0, 2, 1], 1234, 80)
+}
+
+#[test]
+fn net_dotted_mask_follows_octet_count() {
+    for (f, src, want) in [
+        // All NOMATCH in libpcap (the old trailing-zero guess matched them).
+        ("net 10.0.0.0", [10, 0, 0, 1], false),
+        ("net 10.0.0.0", [10, 3, 4, 5], false),
+        ("net 192.168.1.0", [192, 168, 1, 77], false),
+        ("net 10.0", [10, 1, 1, 1], false),
+        ("net 10.0.0", [10, 0, 1, 1], false),
+        ("net 10.1.0", [10, 1, 1, 1], false),
+        ("net 0", [0, 1, 2, 3], false),
+        // What the same masks do match.
+        ("net 10.0.0.0", [10, 0, 0, 0], true),
+        ("net 192.168.1.0", [192, 168, 1, 0], true),
+        ("net 10.0", [10, 0, 5, 5], true),
+        ("net 10.0.0", [10, 0, 0, 9], true),
+        ("net 10.1.0", [10, 1, 0, 200], true),
+        ("net 0", [0, 0, 0, 0], true),
+        // `net 10` stays /8.
+        ("net 10", [10, 99, 1, 1], true),
+        ("net 10", [11, 0, 0, 1], false),
+    ] {
+        assert_eq!(run_filter(f, &src_pkt(src)), want, "{f} on src {src:?}");
+    }
+}
+
+#[test]
+fn host_short_dotted_matches_the_network() {
+    // MATCH in libpcap: `host 10.1` is 10.1.0.0/16, `host 10.1.2` is /24.
+    for f in ["host 10.1", "ip host 10.1", "src host 10.1"] {
+        assert!(run_filter(f, &src_pkt([10, 1, 2, 3])), "{f}");
+    }
+    assert!(run_filter("dst host 10.1", &tcp(IP_B, [10, 1, 9, 9], 1, 2)));
+    assert!(!run_filter("src host 10.1", &src_pkt([10, 2, 2, 3])));
+    assert!(run_filter("host 10.1.2", &src_pkt([10, 1, 2, 77])));
+    assert!(!run_filter("host 10.1.2", &src_pkt([10, 1, 3, 77])));
+    // Four octets are still the exact host.
+    assert!(!run_filter("host 10.1.2.3", &src_pkt([10, 1, 2, 4])));
+}
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────────
+// Issue #192: the NAT64 packet `Ether()/IPv6(dst="64:ff9b::c000:201")/TCP()`
+// matches `host 64:ff9b::192.0.2.1`; dst `...c000:202` does not.
+
+#[test]
+fn nat64_dotted_host_matches_hex_address() {
+    let nat64 = |tail: [u8; 4]| {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&[0x00, 0x64, 0xff, 0x9b]);
+        a[12..].copy_from_slice(&tail);
+        a
+    };
+    let hit = eth_ipv6_tcp(IPV6_A, nat64([0xc0, 0x00, 0x02, 0x01]), 1234, 80, 0x02);
+    let miss = eth_ipv6_tcp(IPV6_A, nat64([0xc0, 0x00, 0x02, 0x02]), 1234, 80, 0x02);
+    assert!(run_filter("host 64:ff9b::192.0.2.1", &hit));
+    assert!(run_filter("dst host 64:ff9b::192.0.2.1", &hit));
+    assert!(!run_filter("src host 64:ff9b::192.0.2.1", &hit));
+    assert!(!run_filter("host 64:ff9b::192.0.2.1", &miss));
+}
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ──────────────────────
+// Issue #174's packets: a has src 2001:db8::1, b has dst 2001:db8::1, c has src
+// 2001:db8::2. `net 2001:db8::1` matches a and b, not c, exactly like `host` and
+// `net .../128`.
+
+#[test]
+fn ipv6_net_without_prefix_matches_like_host() {
+    let a = eth_ipv6_tcp(IPV6_A, V6_LOOPBACK, 1234, 80, 0x02);
+    let b = eth_ipv6_udp(V6_LOOPBACK, IPV6_A, 1234, 53);
+    let c = eth_ipv6_tcp(IPV6_B, V6_LOOPBACK, 1234, 80, 0x02);
+    for f in ["net 2001:db8::1", "host 2001:db8::1", "net 2001:db8::1/128"] {
+        assert!(run_filter(f, &a), "{f} a");
+        assert!(run_filter(f, &b), "{f} b");
+        assert!(!run_filter(f, &c), "{f} c");
+    }
+    assert!(run_filter("src net 2001:db8::1", &a));
+    assert!(!run_filter("src net 2001:db8::1", &b));
+    assert!(run_filter("dst net 2001:db8::1", &b));
+    assert!(!run_filter("dst net 2001:db8::1", &a));
+    assert!(!run_filter("net 2001:db8::1", &tcp(IP_A, IP_B, 1234, 80)));
+}
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ────────────────
+// The nets libpcap 1.10.3 still accepts (issue #208) match exactly their
+// addresses; the rejected ones never reach the VM (see integration.rs).
+// Verdicts hand-derived from the issue.
+
+/// `head` zero-padded to 15 bytes, then `last`.
+fn v6(head: &[u8], last: u8) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[..head.len()].copy_from_slice(head);
+    a[15] = last;
+    a
+}
+
+#[test]
+fn accepted_ipv4_nets_still_match() {
+    let hit = |f: &str, ip: [u8; 4]| run_filter(f, &tcp(ip, IP_C, 1234, 80));
+    // 10.1/24 is 10.1.0.0/24
+    assert!(hit("net 10.1/24", [10, 1, 0, 200]));
+    assert!(!hit("net 10.1/24", [10, 1, 1, 200]));
+    // A non-contiguous mask keeps matching on the bits it names.
+    assert!(hit("net 10.0.0.0 mask 255.0.255.0", [10, 99, 0, 7]));
+    assert!(!hit("net 10.0.0.0 mask 255.0.255.0", [10, 99, 1, 7]));
+    // /0 with a zero address is every IPv4 packet, and no IPv6 one.
+    assert!(hit("net 0.0.0.0/0", IP_A));
+    assert!(!run_filter(
+        "net 0.0.0.0/0",
+        &eth_ipv6_tcp(IPV6_A, IPV6_B, 1234, 80, 0x02)
+    ));
+}
+
+#[test]
+fn accepted_ipv6_nets_still_match() {
+    let hit =
+        |f: &str, src: [u8; 16]| run_filter(f, &eth_ipv6_tcp(src, IPV6_MCAST, 1234, 80, 0x02));
+    assert!(hit(
+        "net 2001:db8::/32",
+        v6(&[0x20, 0x01, 0x0d, 0xb8, 0, 5], 7)
+    ));
+    assert!(!hit("net 2001:db8::/32", v6(&[0x20, 0x01, 0x0d, 0xb9], 1)));
+    // fe80::/10 covers fe80:: through febf:: and not fec0::.
+    assert!(hit("net fe80::/10", v6(&[0xfe, 0x80], 1)));
+    assert!(hit("net fe80::/10", v6(&[0xfe, 0xbf], 1)));
+    assert!(!hit("net fe80::/10", v6(&[0xfe, 0xc0], 1)));
+    // A /128 is that one address.
+    assert!(hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 0)));
+    assert!(!hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 1)));
+}
