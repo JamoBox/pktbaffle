@@ -208,7 +208,8 @@ impl Program {
 /// # Errors
 ///
 /// Returns [`Error::LexError`] for unrecognised characters,
-/// [`Error::ParseError`] for grammatically invalid expressions, and
+/// [`Error::ParseError`] for grammatically invalid expressions (including
+/// malformed numbers such as `08` or `10.0.0.256`), and
 /// [`Error::CodegenError`] for constructs that cannot be represented in
 /// the chosen target for the chosen link type, and for a [`Target::Classic`]
 /// program longer than [`bpf::BPF_MAXINSNS`] (4096) instructions, which the

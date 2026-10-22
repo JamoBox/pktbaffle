@@ -483,18 +483,23 @@ mod parity {
         "ip6",
         "icmp6",
         "ip proto 6",
+        "ip proto 021", // octal 17 (#157)
         "ip proto 17",
         "ip6 proto 17",
         "ether proto 0x0800",
         "ether proto 0x86dd",
         // ── IPv4 hosts and networks
         "host 10.0.0.1",
+        "host 0x0a000001", // bare integer address (#190)
         "host 192.168.1.1",
         "src host 192.168.1.1",
         "dst host 10.0.0.1",
         "src or dst host 10.0.0.1",
         "src and dst host 192.168.1.1",
         "net 10.0.0.0/8",
+        "net 0xa0000", // bare integer shifted into 10.0.0.0/8 (#190)
+        "net 10.0",    // octets written set the mask: /16 (#158)
+        "host 10.0.0", // short host is the /24 net (#158)
         "src net 192.168.0.0/16",
         "dst net 10.0.0.0/8",
         "net 192.168.1.0 mask 255.255.255.0",
@@ -525,6 +530,7 @@ mod parity {
         "vlan",
         "vlan 100",
         "vlan 200",
+        "vlan 0144", // octal 100 (#157)
         "vlan 100 and ip",
         "vlan and tcp port 80",
         "mpls",

@@ -862,3 +862,246 @@ mod optimization_budgets {
         assert!(insn_count("tcp or udp") <= 14);
     }
 }
+
+// ── Integer literals: C syntax (#157) ────────────────────────────────────────
+// libpcap 1.10.3's scanner: `0x` hex, leading `0` octal, `08` rejected.
+// Hand-derived from scanner.l and issue #157 (no live libpcap was available).
+
+#[test]
+fn leading_zero_integer_literals_accepted() {
+    for f in [
+        "tcp port 010",
+        "port 00",
+        "ip proto 017",
+        "ether proto 0100",
+        "vlan 010",
+        "len = 0100",
+        "ip[010] = 1",
+        "net 10.0.0.0/010",
+        "net 10.0.0.0/0x8",
+    ] {
+        eth(f);
+    }
+}
+
+#[test]
+fn non_octal_integer_literals_rejected() {
+    for f in [
+        "tcp port 08",
+        "tcp port 09",
+        "ether proto 0800",
+        "vlan 08",
+        "less 08",
+        "ip[08] = 1",
+        "net 10.0.0.0/08",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── Zero-padded octets in dotted IPv4 literals (#191) ────────────────────────
+// libpcap 1.10.3 reads each octet as decimal. Hand-derived from issue #191.
+
+#[test]
+fn zero_padded_dotted_octets_accepted_on_both_targets() {
+    for f in [
+        "host 010.1.2.3",
+        "host 1.2.3.04",
+        "host 192.168.001.001",
+        "host 00.0.0.1",
+        "net 010.0.0.0/8",
+        "net 10.0.0.0 mask 255.255.255.000",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn bad_dotted_octets_rejected() {
+    for f in ["host 10.256.0.1", "host 0x0a.0.0.1", "host 1.2.3.4.5"] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── `/` before a prefix length is an ordinary token (#194, #173) ─────────────
+// libpcap 1.10.3 accepts these (verified against it in issues #194 and #173)
+// and rejects a bare number after an address.
+
+#[test]
+fn net_prefix_spelling_accepted() {
+    for f in [
+        "net 10.0.0.0 / 8",
+        "net 10.0.0.0/ 8",
+        "net 10.0.0.0/0x8",
+        "net 2001:db8:: /32",
+        "net 2001:db8::/0x20",
+        "net ::/0",
+        "net ::1/128",
+        "net ::ffff:0:0/96",
+        "ip6 net ::/32",
+        "src net ::1/128",
+        "net ::/0 and tcp",
+        "host ::1/128",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn net_prefix_syntax_errors_rejected() {
+    for f in [
+        "net 10.0.0.0 8",
+        "net 10 8",
+        "net 2001:db8:: 32",
+        "net 10 mask 255.0.0.0",
+        "net ::/129",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── A bare integer is an IPv4 host or net (#190) ─────────────────────────────
+// libpcap 1.10.3 accepts a plain integer wherever an IPv4 address is expected
+// (issue #190); the 32-bit limit applies.
+
+#[test]
+fn bare_integer_host_and_net_accepted() {
+    for f in [
+        "host 10",
+        "src host 10",
+        "dst host 10",
+        "ip host 10",
+        "host 0x0a000001",
+        "src 10",
+        "net 256",
+        "net 300",
+        "net 65536",
+        "net 16777216",
+        "net 0",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn bare_integer_over_32_bits_rejected() {
+    for f in ["host 4294967296", "net 4294967296"] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected");
+    }
+}
+
+// ── Dotted IPv4 host/net: the written octet count sets the mask (#158) ───────
+// libpcap 1.10.3 promotes a short dotted id by its octet count (issue #158).
+
+#[test]
+fn short_dotted_host_and_net_accepted() {
+    for f in [
+        "net 10.0.0.0",
+        "net 10.0",
+        "net 10.0.0",
+        "host 10.1",
+        "host 10.1.2",
+        "src host 10.1",
+        "ip host 10.1",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+#[test]
+fn short_dotted_address_without_qualifier_rejected() {
+    assert!(try_eth("10.1").is_err(), "libpcap: syntax error");
+}
+
+// ── Digit-first IPv6 with an embedded IPv4 tail (#192) ───────────────────────
+// libpcap 1.10.3 accepts all of these (issue #192).
+
+#[test]
+fn digit_first_ipv6_embedded_ipv4_accepted_on_both_targets() {
+    for f in [
+        "host 64:ff9b::192.0.2.1",
+        "host 2001:db8::1.2.3.4",
+        "host 1:2:3:4:5:6:1.2.3.4",
+        "host 1::1.2.3.4",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
+
+// ── IPv6 `net <addr>` without a prefix is a /128 (#174) ──────────────────────
+// libpcap 1.10.3 accepts all of these (issue #174).
+
+#[test]
+fn ipv6_net_without_prefix_accepted_on_both_targets() {
+    for f in [
+        "net ::1",
+        "net 2001:db8::1",
+        "net 2001:db8::",
+        "ip6 net ::1",
+        "src net fe80::1",
+        "dst net fe80::1",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+    assert!(try_eth("net ::1/129").is_err());
+}
+
+// ── `net` with bits outside the prefix/mask is an error (#208) ───────────────
+// libpcap 1.10.3 fails with `non-network bits set in "..."` for each of these and
+// accepts the second list (issue #208; hand-derived, no live libpcap).
+
+#[test]
+fn net_non_network_bits_rejected_on_both_targets() {
+    for f in [
+        "net 10.1.0.1/24",
+        "net 10.1.2/16",
+        "net 10.1.2.0 mask 255.255.0.0",
+        "net 10.0.0.0 mask 0.0.0.0",
+        "net 10.0.0.0 mask 0.255.255.255",
+        "net 10.0.0.0/0",
+        "net 2001:db8::1/32",
+        "net fe80::1/10",
+        "net 2001:db8::/0",
+        "src net 192.168.1.5/24",
+        "dst net 192.168.1.5/24",
+        "src or dst net 192.168.1.5/24",
+        "src and dst net 192.168.1.5/24",
+        "ip6 net 2001:db8::1/32",
+    ] {
+        assert!(try_eth(f).is_err(), "{f:?} must be rejected (Classic)");
+        assert!(
+            compile(f, LinkType::Ethernet, Target::Extended).is_err(),
+            "{f:?} must be rejected (Extended)"
+        );
+    }
+}
+
+#[test]
+fn net_within_the_mask_accepted_on_both_targets() {
+    for f in [
+        "net 10.1/24",
+        "net 10.0.0.0 mask 255.0.255.0",
+        "net 0.0.0.0/0",
+        "net 10.0.0.0/8",
+        "net 2001:db8::/32",
+        "net fe80::/10",
+        "net 2001:db8::/128",
+        "net ::/0",
+    ] {
+        eth(f);
+        compile(f, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
+    }
+}
