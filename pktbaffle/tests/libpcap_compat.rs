@@ -37,6 +37,7 @@
 //! | IPv6 extension header traversal | Partial | `ip6 protochain` only walks one level |
 //! | bare `broadcast` | Ethernet-only | Does not include `ip broadcast`; use `ether broadcast or ip broadcast` |
 //! | bare `multicast` | Ethernet-only | Does not include `ip multicast` or `ip6 multicast`; use explicit OR |
+//! | classic program over 4096 insns | `Err(CodegenError)` | libpcap's `pcap_compile` returns it and only fails at `pcap_setfilter`; the kernel's `BPF_MAXINSNS` is 4096 (#203) |
 
 use pktbaffle::{compile, LinkType, Target};
 
@@ -696,6 +697,54 @@ fn outbound_returns_error() {
         try_eth("outbound").is_err(),
         "`outbound` must return an error (requires kernel direction context)"
     );
+}
+
+// ── Classic programs over BPF_MAXINSNS (4096) are an error (#203) ────────────
+// libpcap 1.10.3 `pcap_compile` returns the oversized program (4207 insns for
+// the issue's 4200-term filter) and only fails at `pcap_setfilter`; the Linux
+// kernel rejects more than 4096 insns at SO_ATTACH_FILTER with EINVAL.  The
+// issue observed pktbaffle emitting 4204 insns for that filter and 4211 for
+// Target::Extended.  pktbaffle now fails earlier, for Classic only: a
+// deliberate divergence from libpcap (hand-derived expectations below).
+
+/// `ip[0]+1+...+1 = value` with `terms` straight-line `+1` terms (no jumps).
+fn plus_one_chain(terms: usize, value: u32) -> String {
+    format!("ip[0]{} = {value}", "+1".repeat(terms))
+}
+
+#[test]
+fn classic_program_over_bpf_maxinsns_is_an_error() {
+    use pktbaffle::bpf::BPF_MAXINSNS;
+    use pktbaffle::Error;
+
+    assert_eq!(BPF_MAXINSNS, 4096);
+    let f = plus_one_chain(4200, 5);
+    match compile(&f, LinkType::Ethernet, Target::Classic) {
+        Err(Error::CodegenError { message }) => {
+            assert!(message.contains("BPF_MAXINSNS"), "message: {message}");
+            assert!(message.contains("4096"), "message: {message}");
+        }
+        other => panic!("expected CodegenError, got {other:?}"),
+    }
+}
+
+#[test]
+fn classic_program_of_exactly_bpf_maxinsns_still_compiles() {
+    use pktbaffle::bpf::BPF_MAXINSNS;
+
+    // Each `+1` is one instruction, so the fixed overhead is len(n) - n.
+    let overhead = eth(&plus_one_chain(10, 5)).len() - 10;
+    let n = BPF_MAXINSNS - overhead;
+    assert_eq!(eth(&plus_one_chain(n, 5)).len(), BPF_MAXINSNS);
+    assert!(try_eth(&plus_one_chain(n + 1, 5)).is_err(), "4097 insns");
+}
+
+#[test]
+fn extended_program_over_4096_insns_still_compiles() {
+    // The 4096 limit is classic BPF's; the kernel allows far more eBPF insns.
+    let f = plus_one_chain(4200, 5);
+    let p = compile(&f, LinkType::Ethernet, Target::Extended).unwrap();
+    assert!(p.len() > 4096, "{} insns", p.len());
 }
 
 // ── Optimization budgets ─────────────────────────────────────────────────────

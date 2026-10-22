@@ -2253,3 +2253,60 @@ fn net_within_the_mask_is_still_accepted() {
     }
     assert_eq!(ast("net 10.1/24"), ast("net 10.1.0.0/24"));
 }
+
+// ── Regression: IpNet::from_prefix must not panic or wrap above /32 (#187) ───
+// `!0u32 << (32 - prefix_len)` underflowed the `u8` for prefix_len > 32: a
+// debug-build panic, or (release) a shift count masked to 5 bits and a wrong
+// mask (33 -> 0x80000000, 40 -> 0xff000000, 64 -> 0xffffffff, 255 ->
+// 0xfffffffe).  libpcap 1.10.3 rejects `net 10.0.0.0/33` ("mask length must
+// be <= 32"); the string form already does too.  `from_prefix` returns `Self`,
+// so out-of-range lengths are documented to clamp to /32 (hand-derived: no
+// libpcap run, there is no programmatic libpcap equivalent).
+
+#[test]
+fn ipnet_from_prefix_in_range_masks() {
+    use pktbaffle::ast::IpNet;
+    use std::net::Ipv4Addr;
+
+    let a = Ipv4Addr::new(10, 1, 2, 3);
+    for (len, mask) in [
+        (0u8, 0u32),
+        (1, 0x8000_0000),
+        (8, 0xff00_0000),
+        (24, 0xffff_ff00),
+        (31, 0xffff_fffe),
+        (32, 0xffff_ffff),
+    ] {
+        assert_eq!(IpNet::from_prefix(a, len).mask, mask, "/{len}");
+    }
+}
+
+#[test]
+fn ipnet_from_prefix_above_32_clamps_and_never_panics() {
+    use pktbaffle::ast::IpNet;
+    use std::net::Ipv4Addr;
+
+    on_small_stack(512, || {
+        let a = Ipv4Addr::new(10, 1, 2, 3);
+        for len in [33u8, 34, 40, 64, 128, 255] {
+            let net = IpNet::from_prefix(a, len);
+            assert_eq!(net.mask, 0xffff_ffff, "/{len} must clamp to /32");
+            assert_eq!(net.addr, a);
+        }
+    });
+}
+
+#[test]
+fn net_string_prefix_above_32_is_still_a_parse_error() {
+    use pktbaffle::{parse, Error};
+
+    for f in ["net 10.0.0.0/33", "net 10.0.0.0/255", "src net 10.0.0.0/64"] {
+        assert!(
+            matches!(parse(f), Err(Error::ParseError { .. })),
+            "parse({f:?}) must be a ParseError"
+        );
+    }
+    assert!(parse("net 10.0.0.0/32").is_ok());
+    // `net 10.0.0.0/0` has host bits set and is rejected since #208.
+    assert!(parse("net 0.0.0.0/0").is_ok());
+}

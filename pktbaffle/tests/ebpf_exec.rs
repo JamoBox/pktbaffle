@@ -1178,3 +1178,308 @@ fn thousand_host_list_matches_listed_hosts_only() {
         .join()
         .expect("thread panicked (see message above)");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Programs over 32K instructions (#200)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// #200: a jump offset is an `i16`, so once any edge had to span more than
+/// 32767 instructions `compile(.., Target::Extended)` failed with "eBPF jump
+/// offset overflow" (2049 `host` terms with the old, pre-#129 code size).
+/// libpcap 1.10.3 has no such limit (the issue compiled a 1000-term chain to
+/// 5759 cBPF insns); the verdicts here are hand-derived. Each family runs the
+/// *same* cases against a 50-term and a huge version of the filter, on a
+/// little- and a big-endian host, so "big" must behave like "small".
+mod long_programs {
+    use super::*;
+    use common::packets::*;
+    use pktbaffle::ebpf::BPF_EXIT;
+    use pktbaffle::{compile, LinkType, Target};
+
+    fn ebpf(filter: &str) -> Vec<Insn> {
+        compile(filter, LinkType::Ethernet, Target::Extended)
+            .unwrap_or_else(|e| panic!("ebpf compile of {} bytes of filter: {e}", filter.len()))
+            .as_extended()
+            .unwrap()
+            .instructions()
+            .to_vec()
+    }
+
+    /// Every jump goes forward to an instruction that exists.
+    fn assert_jumps_in_range(insns: &[Insn]) {
+        for (i, insn) in insns.iter().enumerate() {
+            let is_jump = matches!(insn.code & 7, BPF_JMP | BPF_JMP32);
+            if is_jump && insn.code & 0xf0 != BPF_EXIT {
+                assert!(insn.off >= 0, "insn {i}: backward jump {}", insn.off);
+                assert!(i + 1 + (insn.off as usize) < insns.len(), "insn {i}");
+            }
+        }
+    }
+
+    type Cases = Vec<(&'static str, Vec<u8>, Verdict)>;
+
+    /// Run `cases(n)` against `filter(n)` for n = 50 and n = `big`.
+    fn check(
+        name: &str,
+        big: usize,
+        filter: impl Fn(usize) -> String,
+        cases: impl Fn(usize) -> Cases,
+    ) {
+        for n in [50, big] {
+            let insns = ebpf(&filter(n));
+            if n == big {
+                assert!(
+                    insns.len() > i16::MAX as usize,
+                    "{name}: {} insns does not exercise the 16-bit range",
+                    insns.len()
+                );
+            }
+            assert_jumps_in_range(&insns);
+            for host in [Little, Big] {
+                for (what, pkt, want) in cases(n) {
+                    assert_eq!(
+                        run_ebpf(&insns, &pkt, host),
+                        Ok(want),
+                        "{name} n={n} {host:?} {what}"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── `host a.b.c.d` lists ─────────────────────────────────────────────────
+
+    fn host4(i: usize) -> [u8; 4] {
+        [10, (i / 250) as u8, (i % 250) as u8, 1]
+    }
+
+    fn host_list(n: usize) -> String {
+        let terms: Vec<_> = (0..n)
+            .map(|i| format!("host {}", std::net::Ipv4Addr::from(host4(i))))
+            .collect();
+        terms.join(" or ")
+    }
+
+    /// Listed hosts (first, middle, last; as dst and as src) and non-hosts, all
+    /// on port 80, plus the last host on port 81. Verdicts are for the bare
+    /// list, which ignores ports.
+    fn host_cases(n: usize) -> Cases {
+        use Verdict::{Match, NoMatch};
+        vec![
+            ("first dst", tcp(IP_C, host4(0), 1234, 80), Match),
+            ("middle dst", tcp(IP_C, host4(n / 2), 1234, 80), Match),
+            ("last dst", tcp(IP_C, host4(n - 1), 1234, 80), Match),
+            ("last src", tcp(host4(n - 1), IP_C, 1234, 80), Match),
+            ("last, port 81", tcp(IP_C, host4(n - 1), 1234, 81), Match),
+            ("unlisted", tcp(IP_C, [10, 0, 0, 2], 1234, 80), NoMatch),
+            ("past the end", tcp(IP_C, host4(n), 1234, 80), NoMatch),
+        ]
+    }
+
+    #[test]
+    fn host_or_chain_of_3000_matches_like_50() {
+        check("3000 hosts", 3000, host_list, host_cases);
+    }
+
+    #[test]
+    fn host_chain_around_the_old_2048_term_limit_compiles() {
+        // The issue's 2048 OK / 2049 error boundary (at the old code size).
+        for n in [2047, 2048, 2049, 2050] {
+            let insns = ebpf(&host_list(n));
+            assert_jumps_in_range(&insns);
+            let pkt = tcp(IP_C, host4(n - 1), 1234, 80);
+            assert_eq!(run_ebpf(&insns, &pkt, Little), Ok(Verdict::Match), "n={n}");
+            let pkt = tcp(IP_C, host4(n), 1234, 80);
+            assert_eq!(run_ebpf(&insns, &pkt, Big), Ok(Verdict::NoMatch), "n={n}");
+        }
+    }
+
+    // ── Long lists inside other operators ────────────────────────────────────
+
+    #[test]
+    fn long_list_anded_with_a_port() {
+        use Verdict::{Match, NoMatch};
+        check(
+            "(hosts) and port 80",
+            3000,
+            |n| format!("({}) and port 80", host_list(n)),
+            |n| {
+                vec![
+                    ("first dst", tcp(IP_C, host4(0), 1234, 80), Match),
+                    ("last dst", tcp(IP_C, host4(n - 1), 1234, 80), Match),
+                    ("last, port 81", tcp(IP_C, host4(n - 1), 1234, 81), NoMatch),
+                    ("unlisted", tcp(IP_C, host4(n), 1234, 80), NoMatch),
+                ]
+            },
+        );
+    }
+
+    #[test]
+    fn long_list_negated() {
+        use Verdict::{Match, NoMatch};
+        check(
+            "not (hosts)",
+            3000,
+            |n| format!("not ({})", host_list(n)),
+            |n| {
+                vec![
+                    ("first dst", tcp(IP_C, host4(0), 1234, 80), NoMatch),
+                    ("last src", tcp(host4(n - 1), IP_C, 1234, 80), NoMatch),
+                    ("unlisted", tcp(IP_C, host4(n), 1234, 80), Match),
+                ]
+            },
+        );
+    }
+
+    #[test]
+    fn long_blacklist_of_not_host_terms() {
+        use Verdict::{Match, NoMatch};
+        // `not host a and not host b and ...`: every term fails far from the
+        // drop epilogue.
+        check(
+            "not host chain",
+            3000,
+            |n| {
+                let terms: Vec<_> = (0..n)
+                    .map(|i| format!("not host {}", std::net::Ipv4Addr::from(host4(i))))
+                    .collect();
+                terms.join(" and ")
+            },
+            |n| {
+                vec![
+                    ("first", tcp(IP_C, host4(0), 1234, 80), NoMatch),
+                    ("last", tcp(host4(n - 1), IP_C, 1234, 80), NoMatch),
+                    ("unlisted", tcp(IP_C, [10, 0, 0, 2], 1234, 80), Match),
+                    ("past the end", tcp(IP_C, host4(n), 1234, 80), Match),
+                ]
+            },
+        );
+    }
+
+    #[test]
+    fn long_list_between_the_arms_of_an_or() {
+        use Verdict::{Match, NoMatch};
+        check(
+            "port 443 or (hosts) or port 8443",
+            3000,
+            |n| format!("port 443 or ({}) or port 8443", host_list(n)),
+            |n| {
+                vec![
+                    ("left arm", tcp(IP_C, [9, 9, 9, 9], 1234, 443), Match),
+                    ("middle", tcp(IP_C, host4(n / 2), 1234, 1), Match),
+                    ("last host", tcp(IP_C, host4(n - 1), 1234, 1), Match),
+                    ("right arm", tcp(IP_C, [9, 9, 9, 9], 1234, 8443), Match),
+                    ("none", tcp(IP_C, [9, 9, 9, 9], 1234, 1), NoMatch),
+                ]
+            },
+        );
+    }
+
+    // ── `tcp port N` list ────────────────────────────────────────────────────
+
+    #[test]
+    fn tcp_port_or_chain_of_2000_matches_like_50() {
+        use Verdict::{Match, NoMatch};
+        check(
+            "2000 tcp ports",
+            2000,
+            |n| {
+                let terms: Vec<_> = (0..n).map(|i| format!("tcp port {}", 1000 + i)).collect();
+                terms.join(" or ")
+            },
+            |n| {
+                let last = 1000 + (n - 1) as u16;
+                vec![
+                    ("first dst port", tcp(IP_A, IP_B, 40000, 1000), Match),
+                    ("last src port", tcp(IP_A, IP_B, last, 40000), Match),
+                    ("below", tcp(IP_A, IP_B, 40000, 999), NoMatch),
+                    ("above", tcp(IP_A, IP_B, 40000, last + 1), NoMatch),
+                    ("udp", udp(IP_A, IP_B, 1000, 1000), NoMatch),
+                ]
+            },
+        );
+    }
+
+    // ── IPv6 `host` list ─────────────────────────────────────────────────────
+
+    fn host6(i: usize) -> [u8; 16] {
+        let mut a = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        a[14..].copy_from_slice(&((i + 1) as u16).to_be_bytes());
+        a
+    }
+
+    #[test]
+    fn ipv6_host_or_chain_of_1000_matches_like_50() {
+        use Verdict::{Match, NoMatch};
+        // 2001:db8:1::1 is never listed.
+        let other = [0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        check(
+            "1000 ipv6 hosts",
+            1000,
+            |n| {
+                let terms: Vec<_> = (0..n)
+                    .map(|i| format!("host {}", std::net::Ipv6Addr::from(host6(i))))
+                    .collect();
+                terms.join(" or ")
+            },
+            |n| {
+                vec![
+                    ("first dst", eth_ipv6_tcp(other, host6(0), 1, 2, 2), Match),
+                    (
+                        "last dst",
+                        eth_ipv6_tcp(other, host6(n - 1), 1, 2, 2),
+                        Match,
+                    ),
+                    (
+                        "last src",
+                        eth_ipv6_tcp(host6(n - 1), other, 1, 2, 2),
+                        Match,
+                    ),
+                    ("unlisted", eth_ipv6_tcp(other, host6(n), 1, 2, 2), NoMatch),
+                    ("ipv4", tcp(IP_C, IP_B, 1234, 80), NoMatch),
+                ]
+            },
+        );
+    }
+
+    // ── Fall-through across relay islands ────────────────────────────────────
+
+    /// A relay island sits on the fall-through path (`ja over; relays...`), so
+    /// a bug in its skip distance only shows for a packet whose path falls
+    /// through one. Sweeping every term finds the one next to each island.
+    #[test]
+    fn every_term_of_a_2049_host_list_matches() {
+        let n = 2049;
+        let insns = ebpf(&host_list(n));
+        assert!(insns.len() > i16::MAX as usize);
+        for i in 0..n {
+            let pkt = tcp(IP_C, host4(i), 1234, 80);
+            assert_eq!(
+                run_ebpf(&insns, &pkt, Little),
+                Ok(Verdict::Match),
+                "term {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_and_chain_falls_through_every_island() {
+        use Verdict::{Match, NoMatch};
+        // `len > 0 and ... and len > 60`: a 74-byte frame passes every term
+        // (each success falls through, crossing every island); a 54-byte one
+        // fails the last, with thousands of failure edges pending.
+        check(
+            "len > 0 chain",
+            12_000,
+            |n| format!("{} and len > 60", vec!["len > 0"; n].join(" and ")),
+            |_| {
+                let long = eth_ipv4_tcp(MAC_B, MAC_A, IP_A, IP_B, 1, 2, 2, 20);
+                vec![
+                    ("74 bytes", long, Match),
+                    ("54 bytes", tcp(IP_A, IP_B, 1, 2), NoMatch),
+                    ("empty", vec![], NoMatch),
+                ]
+            },
+        );
+    }
+}

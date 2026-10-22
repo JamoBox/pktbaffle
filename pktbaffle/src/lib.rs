@@ -105,6 +105,10 @@ pub use bpf::Insn;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     /// Classic BPF (cBPF) — for `SO_ATTACH_FILTER` / raw socket filters.
+    ///
+    /// The kernel accepts at most [`bpf::BPF_MAXINSNS`] (4096) instructions,
+    /// so [`compile`] returns [`Error::CodegenError`] instead of a longer
+    /// program.
     Classic,
     /// Extended BPF (eBPF) — for XDP, TC, and other modern hooks.
     Extended,
@@ -207,7 +211,9 @@ impl Program {
 /// [`Error::ParseError`] for grammatically invalid expressions (including
 /// malformed numbers such as `08` or `10.0.0.256`), and
 /// [`Error::CodegenError`] for constructs that cannot be represented in
-/// the chosen target for the chosen link type.
+/// the chosen target for the chosen link type, and for a [`Target::Classic`]
+/// program longer than [`bpf::BPF_MAXINSNS`] (4096) instructions, which the
+/// kernel would reject at `SO_ATTACH_FILTER`.
 pub fn compile(filter: &str, link: LinkType, target: Target) -> Result<Program> {
     let tokens = lexer::lex(filter)?;
     let ast = parser::parse(&tokens)?;

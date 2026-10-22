@@ -75,6 +75,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behave exactly as before at any depth. `Debug` output is unchanged (`{:?}`
   and `{:#?}`) for trees up to 128 levels deep; anything nested deeper is
   printed as `..`, so a million-term chain formats to a short string.
+- **`ast::IpNet::from_prefix` no longer panics or wraps for a prefix length
+  above 32** (#187). `from_prefix(addr, 33)` (or 64, 255, ...) panicked with
+  "attempt to subtract with overflow" in debug builds and returned a wrong
+  mask in release builds (33 gave `0x80000000`), which `compile()` accepted
+  silently. The signature is unchanged, so out-of-range lengths are now
+  **clamped to /32** (mask `0xffff_ffff`) and documented as such; 0-32 are
+  unchanged. `net 10.0.0.0/33` in a filter string is still a parse error, as
+  in libpcap 1.10.3.
+- **`vm::run` no longer hangs on 32-bit targets for a `ja` with a huge `k`**
+  (#188). The jump target was computed with `wrapping_add`, so on i686 /
+  armv7 / wasm32 `ja 0xFFFFFFFF` jumped to itself and `[ld #1, ja 0xFFFFFFFE,
+  ret]` looped back to the start, and the call never returned (64-bit targets
+  returned `false`). A target that overflows `usize`, or lies past the end of
+  the program, now makes the VM return `false` on every pointer width.
+  Programs from `compile()` are unaffected.
+- **The VM returns `false` for malformed cBPF opcodes instead of running them
+  as valid ones** (#201). `vm::run` / `Program::matches` documented `false`
+  for an invalid instruction but decoded opcodes by masking bit fields, so
+  `RET|X` (`0x0e`) returned `k`, MISC `0xff` ran as `txa`, `LD|H|LEN`,
+  `LD|B|IMM`, `ST` with stray bits, `NEG|X` and `LDX|H|IMM` all executed, and
+  `matches` returned `true`. Only exact cBPF opcodes now run, as in libpcap's
+  `bpf_filter()` (which `abort()`s on the others) and the kernel's
+  `bpf_check_classic()` (`EINVAL`). `Display` for `Insn` / `Program` prints an
+  unknown opcode as `.word    0x000e  ; invalid opcode` instead of an ordinary
+  mnemonic. Programs from `compile()` are unaffected.
+- **`compile(.., Target::Classic)` no longer returns programs over
+  `BPF_MAXINSNS`** (#203). A long straight-line filter (`ip[0]+1+1+...`, 4200
+  terms, 4204 instructions) compiled to `Ok`, and the kernel then rejected it
+  with an opaque `EINVAL` from `setsockopt(SO_ATTACH_FILTER)`, which accepts
+  at most 4096 instructions. `compile` (and `codegen::compile`) now returns
+  `Err(CodegenError)` ("filter expression is too complex: ...") for a classic
+  program longer than 4096 instructions; exactly 4096 still compiles.
+  libpcap 1.10.3 returns the oversized program from `pcap_compile` and only
+  fails at `pcap_setfilter`, so this is a deliberate, earlier failure.
+  `Target::Extended` is unaffected. The limit is exported as the new
+  `pktbaffle::bpf::BPF_MAXINSNS` constant and documented in the README and the
+  `compile` / `Target::Classic` rustdoc.
+- **eBPF programs longer than 32K instructions now compile** (#200). Every
+  success/failure edge jumped straight to an epilogue at the end of the
+  program, and a jump offset is an `i16`, so a `host ... or host ...` list of
+  about 2000 terms failed with "filter expression is too complex: eBPF jump
+  offset overflow" (as did 2000 `tcp port N` or 1000 IPv6 `host` terms, and
+  the same lists inside `and` / `not`). Roughly every 16K instructions the
+  generator now emits a short island of `ja` relays and re-points all pending
+  edges at it, so 3000 `host` terms (57K instructions) or more compile and
+  match like a 50-term list. Programs under 16K instructions are unchanged
+  instruction for instruction; past that, the fall-through path executes one
+  extra `ja` per island. Only a single primitive that is itself over 32767
+  instructions can still return `CodegenError`. (The classic-BPF 255-offset
+  limit is separate, #151.)
 - **Integer literals follow C syntax, as in libpcap** (#157). A leading `0`
   now makes a literal octal: `tcp port 010` is port 8, `ip[010]` is `ip[8]`,
   `ip proto 017` is protocol 15, `vlan 010` is VLAN 8, `ether proto 0100` is

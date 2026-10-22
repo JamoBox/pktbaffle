@@ -409,6 +409,8 @@ Produces a `bpf::Program` — the original Berkeley Packet Filter format. This i
 - Windows Npcap via `pcap_setfilter`
 - All `pcap_compile`-compatible APIs
 
+The kernel accepts at most 4096 instructions (`BPF_MAXINSNS`, also exported as `pktbaffle::bpf::BPF_MAXINSNS`) and rejects a longer program at `SO_ATTACH_FILTER` with `EINVAL`. `compile` returns a `CodegenError` instead of a classic program over that length.
+
 ```rust
 use pktbaffle::{compile, LinkType, Target};
 
@@ -640,10 +642,11 @@ If the wrong link type is used, field offsets will be wrong and the filter will 
 ## Limitations
 
 - **No optimizer** — redundant protocol checks across `and` operands are not eliminated. The generated programs are correct but not minimal.
+- **4096-instruction limit (classic BPF)** — `Target::Classic` returns a `CodegenError` ("filter expression is too complex") for a program over `BPF_MAXINSNS` (4096) instructions, the most the Linux kernel accepts for `SO_ATTACH_FILTER`. libpcap's `pcap_compile` returns such a program and only fails later, at `pcap_setfilter`.
 - **`inbound` / `outbound`** — these direction primitives cannot be expressed in BPF and produce a `CodegenError`.
 - **`ether multicast`** — parsed but generates a stub that always accepts; use `ip multicast` or `ip6 multicast` instead.
 - **IPv6 fields** — complex IPv6 extension-header traversal is not supported; basic `ip6 and tcp port N` works correctly.
-- **Nesting limits** — up to 9995 nested parentheses, as libpcap 1.10.3 allows around a primitive; deeper nesting is a `ParseError`. Inside a byte-access offset (`ip[...]`) the limit is 31 nested parentheses or 127 chained unary `-`, where libpcap accepts thousands. `and` / `or` / `not` chains have no length limit (long ones may still exceed the BPF jump range and return a `CodegenError`).
+- **Nesting limits** — up to 9995 nested parentheses, as libpcap 1.10.3 allows around a primitive; deeper nesting is a `ParseError`. Inside a byte-access offset (`ip[...]`) the limit is 31 nested parentheses or 127 chained unary `-`, where libpcap accepts thousands. `and` / `or` / `not` chains have no length limit (long ones may still exceed the classic BPF jump range or the 4096-instruction limit and return a `CodegenError`).
 
 ---
 
