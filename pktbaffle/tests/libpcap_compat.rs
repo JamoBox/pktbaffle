@@ -1056,3 +1056,38 @@ fn net_within_the_mask_accepted_on_both_targets() {
             .unwrap_or_else(|e| panic!("compile({f:?}, Extended) failed: {e}"));
     }
 }
+
+// libpcap 1.10.3 rejects constant shifts above 31 bits, including folded
+// offsets. Such ALU instructions are also rejected by BPF verifiers (#205).
+#[test]
+fn oversized_constant_shifts_are_rejected() {
+    for filter in [
+        "ip[0] << 32 = 0",
+        "ip[0] >> 40 = 0",
+        "tcp[0] << 0xffffffff = 0",
+        "ip[1<<32] = 0",
+        "ip[1>>32] = 0",
+        "ip[0] = ip[1>>40]",
+    ] {
+        for link in [LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+            for target in [Target::Classic, Target::Extended] {
+                let error = compile(filter, link, target).expect_err(filter);
+                assert!(
+                    error.to_string().contains("shift by more than 31 bits"),
+                    "{filter}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn constant_shifts_at_31_bits_remain_supported() {
+    for filter in ["ip[0] << 31 = 0", "ip[0] >> 31 = 0", "ip[1>>31] = 0"] {
+        for link in [LinkType::Ethernet, LinkType::RawIp, LinkType::LinuxSll] {
+            for target in [Target::Classic, Target::Extended] {
+                compile(filter, link, target).unwrap_or_else(|e| panic!("{filter}: {e}"));
+            }
+        }
+    }
+}
