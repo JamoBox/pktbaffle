@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject constant left/right shifts above 31 bits in byte-access operations and
+  folded offsets, matching libpcap and avoiding programs BPF verifiers reject (#205).
+
 - **`and` / `or` precedence now matches libpcap** (#128). The parser gave `and`
   higher precedence than `or`; libpcap (`%left OR AND`, pcap-filter(7)) gives
   `and`, `or` and juxtaposition *equal* precedence, left-associative. This is a

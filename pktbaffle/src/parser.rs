@@ -850,6 +850,9 @@ impl Parser<'_> {
             };
             self.advance();
             let operand = self.parse_u32()?;
+            if matches!(aop, ArithOp::Shl | ArithOp::Shr) && operand > 31 {
+                return Err(self.err("shift by more than 31 bits"));
+            }
             alu_ops.push((aop, operand));
         }
 
@@ -1095,7 +1098,10 @@ impl Parser<'_> {
                 Some(Token::Shl) => {
                     self.advance();
                     let rhs = self.parse_offset_add()?;
-                    if !(0..64).contains(&rhs) {
+                    if rhs > 31 {
+                        return Err(self.err("shift by more than 31 bits"));
+                    }
+                    if rhs < 0 {
                         return Err(self.err("shift amount out of range in offset expression"));
                     }
                     // Reject shifts that lose bits or reach the sign bit.
@@ -1108,7 +1114,10 @@ impl Parser<'_> {
                 Some(Token::Shr) => {
                     self.advance();
                     let rhs = self.parse_offset_add()?;
-                    if !(0..64).contains(&rhs) {
+                    if rhs > 31 {
+                        return Err(self.err("shift by more than 31 bits"));
+                    }
+                    if rhs < 0 {
                         return Err(self.err("shift amount out of range in offset expression"));
                     }
                     lhs >>= rhs;

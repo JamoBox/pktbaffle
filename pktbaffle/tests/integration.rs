@@ -1149,7 +1149,8 @@ fn offset_expr_valid_forms_unchanged_by_overflow_checks() {
         ("ip[8/2] = 0", "ip[4] = 0"),
         ("ip[-4/-2+2] = 0", "ip[4] = 0"),
         ("ip[(1<<30)/(1<<29)] = 0", "ip[2] = 0"),
-        ("ip[-(1<<62)/-(1<<61)] = 0", "ip[2] = 0"),
+        // libpcap 1.10.3 rejects shifts above 31, even when folded (#205).
+        ("ip[-(1<<30)/-(1<<29)] = 0", "ip[2] = 0"),
     ] {
         assert_eq!(
             eth_prog(expr).instructions(),

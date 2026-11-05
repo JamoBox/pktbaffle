@@ -1354,3 +1354,20 @@ fn accepted_ipv6_nets_still_match() {
     assert!(hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 0)));
     assert!(!hit("net 2001:db8::/128", v6(&[0x20, 0x01, 0x0d, 0xb8], 1)));
 }
+
+#[test]
+fn shift_boundary_31_matches_packet_bits() {
+    // libpcap 1.10.3 accepts both filters. The loaded word is the IPv4
+    // identification/fragment field; the expected bits are hand-derived.
+    for (filter, yes, no) in [
+        ("ip[4:4] << 31 = 0x80000000", 1u32, 2u32),
+        ("ip[4:4] >> 31 = 1", 0x80000000u32, 1u32),
+    ] {
+        let mut positive = tcp(IP_A, IP_B, 1234, 80);
+        let mut negative = positive.clone();
+        positive[18..22].copy_from_slice(&yes.to_be_bytes());
+        negative[18..22].copy_from_slice(&no.to_be_bytes());
+        assert!(run_filter(filter, &positive), "{filter}");
+        assert!(!run_filter(filter, &negative), "{filter}");
+    }
+}
